@@ -31,6 +31,9 @@ export function RamDashboard({
   const [loading, setLoading] = useState(false);
   const [closing, setClosing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // v0.9.11: non-error feedback line (e.g. "already in your applications").
+  const [info, setInfo] = useState<string | null>(null);
+  const [adding, setAdding] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -107,6 +110,31 @@ export function RamDashboard({
     }
   }
 
+  // v0.9.11: "Add to applications" for a popup row. The backend reads
+  // the popup's live address, dedups, and opens the new app as a proper
+  // page window. alreadyAdded is informational, not an error.
+  async function addPopup(w: OpenAccountWindow) {
+    if (adding) return;
+    setAdding(w.label);
+    setError(null);
+    setInfo(null);
+    try {
+      const r = await invoke<{
+        alreadyAdded: boolean;
+        added: boolean;
+        appName: string;
+      }>("popup_add_to_applications", { label: w.label });
+      if (r.alreadyAdded) {
+        setInfo("This site is already in your applications.");
+      }
+      await refresh();
+    } catch (err) {
+      setError(errMsg(err));
+    } finally {
+      setAdding(null);
+    }
+  }
+
   // Even estimate per window; guarded against a zero count and backends
   // whose main-process number exceeds the total.
   const webviewTotalKb = Math.max(
@@ -143,6 +171,12 @@ export function RamDashboard({
           </p>
         )}
 
+        {info && (
+          <p className="muted" role="status">
+            {info}
+          </p>
+        )}
+
         {snapshot && !snapshot.supported && (
           <p className="muted">Memory numbers aren't available on this PC.</p>
         )}
@@ -170,17 +204,33 @@ export function RamDashboard({
                 <span className="ram-row-mem muted" title="Estimated share of memory">
                   {aboutMb(perWindowKb)} (estimated)
                 </span>
-                <label
-                  className="ram-pin-toggle"
-                  title="Asks before this window can be closed."
-                >
-                  <input
-                    type="checkbox"
-                    checked={w.pinned}
-                    onChange={() => void togglePin(w)}
-                  />
-                  <span>Don't close this window</span>
-                </label>
+                {/* v0.9.11: popups are transient — no "don't close" pin.
+                    Instead they get "Add to applications", which promotes
+                    the popup's site into the app list. */}
+                {w.label.startsWith("popup-") ? (
+                  <button
+                    type="button"
+                    className="ram-row-add"
+                    title="Add this site to your applications"
+                    aria-label="Add to applications"
+                    disabled={adding === w.label}
+                    onClick={() => void addPopup(w)}
+                  >
+                    {adding === w.label ? "Adding…" : "Add to applications"}
+                  </button>
+                ) : (
+                  <label
+                    className="ram-pin-toggle"
+                    title="Asks before this window can be closed."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={w.pinned}
+                      onChange={() => void togglePin(w)}
+                    />
+                    <span>Don't close this window</span>
+                  </label>
+                )}
                 <button
                   type="button"
                   className="ram-row-close"

@@ -2010,6 +2010,23 @@ function AppShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // v0.9.11: transient backend notices (e.g. "This site is already in your
+  // applications." from the popup system-menu / Ctrl+Shift+A flows, which
+  // have no invoking frontend). Reuses the auto-clearing banner.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    listen("appmaka:notice", (e) => {
+      const msg = (e.payload as { message?: string } | null)?.message;
+      if (typeof msg === "string" && msg.length > 0) setNotice(msg);
+    })
+      .then((f) => {
+        off = f;
+      })
+      .catch(() => {});
+    return () => off?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Add-app form
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");

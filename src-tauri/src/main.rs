@@ -33,6 +33,17 @@ mod winkey;
 /// Slim native caption strips + the Esc+LMB close gesture for page windows
 /// (v0.9.6, Windows only; no-op stubs elsewhere).
 mod caption;
+/// "Add to applications" for popup windows (v0.9.11): backend flow shared
+/// by the dashboard button, the system-menu item and Ctrl+Shift+A.
+mod popup_add;
+/// Windows-only native popup tweaks (v0.9.11): system-menu item +
+/// title-bar theme-color tint. The module itself is cfg'd out elsewhere.
+#[cfg(windows)]
+mod popup_chrome;
+/// Debug-only E2E driver for the v0.9.11 popup revamp (Xvfb smoke).
+/// Compiled out of release builds; inert without the env var.
+#[cfg(debug_assertions)]
+mod debug_e2e;
 /// Clipboard image reading beyond the plugin's format list (v0.9.2):
 /// direct DIB reads on Windows, image/bmp fallback on Linux.
 mod clipboard_img;
@@ -714,6 +725,19 @@ fn main() {
                     if event.state
                         == tauri_plugin_global_shortcut::ShortcutState::Pressed
                     {
+                        // v0.9.11: fixed "add popup to applications"
+                        // shortcut. Fires only when a popup window is
+                        // focused; ignored silently anywhere else. The
+                        // active flag guarantees this can never steal a
+                        // user's own binding or the summon hotkey: those
+                        // always win registration, leaving the flag false.
+                        if crate::popup_add::add_shortcut_active()
+                            && Some(shortcut.id())
+                                == crate::popup_add::add_shortcut_id()
+                        {
+                            crate::popup_add::fire_from_hotkey(app);
+                            return;
+                        }
                         // Named hotkey bindings (routines / workspaces /
                         // per-command hotkeys) dispatch through the shared
                         // registry. Anything with no binding — the launcher
@@ -848,6 +872,14 @@ fn main() {
             // startup never crashes on a hotkey.
             crate::hotkeys::init_registry(app.handle());
             crate::hotkeys::register_all_saved(app.handle());
+            // v0.9.11: fixed Ctrl+Shift+A for "add popup to applications".
+            // Skipped silently when the keys are already claimed (a user's
+            // own binding always wins).
+            crate::popup_add::ensure_add_shortcut_registered(app.handle());
+            // Debug-only E2E driver (Xvfb smoke): inert without the env var,
+            // compiled out of release builds.
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_popup_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
@@ -1005,6 +1037,8 @@ fn main() {
             windows::close_all_account_windows,
             windows::close_open_window,
             windows::list_open_account_windows,
+            // v0.9.11: "Add to applications" for popup windows.
+            popup_add::popup_add_to_applications,
             windows::memory_snapshot,
             windows::forget_login,
             // v0.9.9: "Don't close this window" pin commands

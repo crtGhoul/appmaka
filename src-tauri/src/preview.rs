@@ -407,7 +407,7 @@ pub(crate) fn move_session_dir(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn prettified_domain(raw_url: &str) -> String {
+pub(crate) fn prettified_domain(raw_url: &str) -> String {
     let host = url::Url::parse(raw_url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))

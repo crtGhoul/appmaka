@@ -510,7 +510,7 @@ fn app_origin(app_url: &str) -> String {
 /// until the user closes it. (The old code routed "allow" popups through
 /// the OAuth modal, whose auto-close script killed same-origin popups
 /// within ~1.5 s — the "popups don't open even on Allow" bug.)
-fn spawn_popup_window(app: &AppHandle, url: &url::Url, app_name: &str, session_dir: &Path) {
+pub(crate) fn spawn_popup_window(app: &AppHandle, url: &url::Url, app_name: &str, session_dir: &Path) {
     let title = format!("{app_name} — popup");
     spawn_contained_window(app, "popup", url, &title, session_dir, None, "popup");
 }
@@ -598,8 +598,42 @@ fn spawn_contained_window(
             if let Some(script) = initialization_script {
                 builder = builder.initialization_script(script);
             }
-            if let Err(e) = builder.build() {
-                eprintln!("[appmaka] {label_prefix} window failed for {log_ctx}: {e}");
+            // v0.9.11: re-tint the title bar when the popup navigates
+            // (theme-color can change per page). The hook must never block
+            // the navigation decision, so the work goes to a detached
+            // thread; the tint itself is best-effort and silent.
+            #[cfg(windows)]
+            if label_prefix == "popup" {
+                let nav_app = window_app.clone();
+                let nav_label = label.clone();
+                builder = builder.on_navigation(move |nav_url: &url::Url| {
+                    let app = nav_app.clone();
+                    let lbl = nav_label.clone();
+                    let u = nav_url.clone();
+                    std::thread::Builder::new()
+                        .name(format!("appmaka-popup-retint-{lbl}"))
+                        .spawn(move || crate::popup_chrome::tint_popup_caption(&app, &lbl, &u))
+                        .ok();
+                    true
+                });
+            }
+            match builder.build() {
+                Ok(_window) => {
+                    // v0.9.11: "Add to applications…" system-menu item +
+                    // title-bar tint. Windows-only; best-effort and silent.
+                    #[cfg(windows)]
+                    if label_prefix == "popup" {
+                        crate::popup_chrome::setup_popup_chrome(
+                            &window_app,
+                            &_window,
+                            &label,
+                            &url,
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[appmaka] {label_prefix} window failed for {log_ctx}: {e}");
+                }
             }
         });
 }
@@ -1193,7 +1227,9 @@ pub fn close_all_account_windows(app: AppHandle) -> Result<usize, String> {
 /// so the close command refuses anything else — a wrong label must never
 /// be able to close the launcher itself. Pure for unit tests.
 pub(crate) fn close_label_allowed(label: &str) -> bool {
-    label.starts_with("acct-") || label == crate::websearch::SEARCH_WINDOW_LABEL
+    label.starts_with("acct-")
+        || label.starts_with("popup-")
+        || label == crate::websearch::SEARCH_WINDOW_LABEL
 }
 
 /// Close one open window by its exact label (v0.9.10: the RAM dashboard's
@@ -1288,7 +1324,47 @@ pub fn list_open_account_windows(
                     }
                 }),
         )
+        // v0.9.11: popups are transient (never session-restored, never
+        // pinned), but they were invisible to the launcher — a popup lost
+        // behind other windows had no way back. List them with a live
+        // URL read so the dashboard can show, focus (click), close, and
+        // "add to applications" them.
+        .chain(app.webview_windows().values().filter_map(|w| {
+            let label = w.label().to_string();
+            if !label.starts_with("popup-") {
+                return None;
+            }
+            let url_str = w.url().map(|u| u.to_string()).unwrap_or_default();
+            let app_name = url_str
+                .parse::<url::Url>()
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .map(|h| prettified_host(&h))
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| "Popup".to_string());
+            Some(OpenAccountInfo {
+                label,
+                app_id: String::new(),
+                account_id: String::new(),
+                app_name,
+                account_label: url_str,
+                focused: w.is_focused().unwrap_or(false),
+                pinned: false,
+            })
+        }))
         .collect()
+}
+
+/// Prettified host for a dashboard popup row: strip a leading `www.` and
+/// capitalize. (Mirrors `preview::prettified_domain`, which works from a
+/// full URL string.)
+fn prettified_host(host: &str) -> String {
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let mut chars = host.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 /// One descendant process in the memory snapshot.
@@ -1401,19 +1477,22 @@ mod tests {
 
     /// The dashboard close button passes the row's exact label; the
     /// command must accept exactly the windows the dashboard can list
-    /// (account windows + the search window) and refuse everything else.
-    /// Refusing "main" is the critical case: a wrong-label close must
-    /// never be able to kill the launcher itself.
+    /// (account windows, popups, and the search window) and refuse
+    /// everything else. Refusing "main" is the critical case: a
+    /// wrong-label close must never be able to kill the launcher itself.
+    /// OAuth modals stay refused: they are transient sign-in windows the
+    /// dashboard never lists.
     #[test]
     fn close_label_allows_only_dashboard_windows() {
         assert!(close_label_allowed("acct-app1-acct1"));
         assert!(close_label_allowed("acct-a-b"));
+        assert!(close_label_allowed("popup-3"));
         assert!(close_label_allowed(crate::websearch::SEARCH_WINDOW_LABEL));
         assert!(!close_label_allowed("main"));
         assert!(!close_label_allowed(""));
-        assert!(!close_label_allowed("popup-acct-app1-acct1"));
-        assert!(!close_label_allowed("oauth-acct-app1-acct1"));
+        assert!(!close_label_allowed("oauth-3"));
         assert!(!close_label_allowed("xacct-app1-acct1"));
         assert!(!close_label_allowed("ACCT-app1-acct1"));
+        assert!(!close_label_allowed("xpopup-3"));
     }
 }

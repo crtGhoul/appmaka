@@ -56,9 +56,86 @@ fn extract_title(html: &str) -> Option<String> {
     )
 }
 
+/// Best-effort `theme-color` meta tag value, normalized to lowercase
+/// `#rrggbb`. Same fetch as `fetch_page_title` (browser UA, 10 s timeout,
+/// 512 KiB cap); returns None on any failure or when the tag is absent or
+/// unparseable. Used for the popup title-bar tint (v0.9.11) — never a
+/// hard requirement, the native bar stays when this is None.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn fetch_theme_color(url: &str) -> Option<String> {
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return None;
+    }
+    let mut body = Vec::new();
+    ureq::get(url)
+        .set("User-Agent", UA)
+        .timeout(Duration::from_secs(10))
+        .call()
+        .ok()?
+        .into_reader()
+        .take(MAX_BODY)
+        .read_to_end(&mut body)
+        .ok()?;
+    let html = String::from_utf8_lossy(&body);
+    extract_theme_color(&html)
+}
+
+/// Case-insensitive `<meta name="theme-color" content="…">` extraction.
+/// Accepts `#rgb` and `#rrggbb`; anything else (named colors, `rgb()`,
+/// CSS variables) is out of scope for a title-bar tint.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn extract_theme_color(html: &str) -> Option<String> {
+    let lower = html.to_lowercase();
+    let mut search_from = 0;
+    while let Some(open) = lower[search_from..].find("<meta") {
+        let tag_start = search_from + open;
+        let tag_end = tag_start + lower[tag_start..].find('>')?;
+        let tag = &lower[tag_start..tag_end];
+        if tag.contains("name=\"theme-color\"") || tag.contains("name='theme-color'") {
+            if let Some(color) = attr_value(tag, "content") {
+                if let Some(hex) = normalize_theme_hex(&color) {
+                    return Some(hex);
+                }
+            }
+        }
+        search_from = tag_end + 1;
+    }
+    None
+}
+
+/// Value of `attr="…"` (or `attr='…'`) inside one lowercased tag.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn attr_value(tag: &str, attr: &str) -> Option<String> {
+    let needle = format!("{attr}=");
+    let start = tag.find(&needle)? + needle.len();
+    let rest = tag[start..].trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let end = rest[1..].find(quote)?;
+    Some(rest[1..1 + end].to_string())
+}
+
+/// `#rgb` → `#rrggbb`, `#rrggbb` → lowercase; else None.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn normalize_theme_hex(raw: &str) -> Option<String> {
+    let s = raw.trim().strip_prefix('#')?;
+    let expanded = match s.len() {
+        3 => s.chars().flat_map(|c| [c, c]).collect::<String>(),
+        6 => s.to_string(),
+        _ => return None,
+    };
+    if !expanded.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("#{}", expanded.to_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::extract_title;
+    use super::{extract_theme_color, extract_title};
 
     #[test]
     fn extracts_simple_title() {
@@ -75,5 +152,33 @@ mod tests {
     #[test]
     fn missing_title_is_none() {
         assert_eq!(extract_title("<html><body>nope</body></html>"), None);
+    }
+
+    #[test]
+    fn theme_color_double_quotes() {
+        let html = r##"<head><meta name="theme-color" content="#1a2B3c"></head>"##;
+        assert_eq!(extract_theme_color(html).as_deref(), Some("#1a2b3c"));
+    }
+
+    #[test]
+    fn theme_color_short_hex_expands() {
+        let html = r##"<head><meta name='theme-color' content='#abc'></head>"##;
+        assert_eq!(extract_theme_color(html).as_deref(), Some("#aabbcc"));
+    }
+
+    #[test]
+    fn theme_color_ignores_other_metas_and_bad_values() {
+        let html = r##"<head><meta name="viewport" content="width=1"><meta name="theme-color" content="red"></head>"##;
+        assert_eq!(extract_theme_color(html), None);
+        let html2 = r##"<head><meta name="theme-color" content="#12"></head>"##;
+        assert_eq!(extract_theme_color(html2), None);
+        let html3 = "<head></head>";
+        assert_eq!(extract_theme_color(html3), None);
+    }
+
+    #[test]
+    fn theme_color_case_insensitive_tag() {
+        let html = r##"<HEAD><META NAME="THEME-COLOR" CONTENT="#FFF"></HEAD>"##;
+        assert_eq!(extract_theme_color(html).as_deref(), Some("#ffffff"));
     }
 }

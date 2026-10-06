@@ -573,6 +573,36 @@ button.cmd-row:focus-visible {
   outline-offset: 1px;
 }
 
+/* v0.9.11: quiet "Add to applications" per popup row. Text button, same
+   hover language as the row close. */
+.ram-row-add {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ram-row-add:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f2f3f5;
+}
+
+.ram-row-add:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 1px;
+}
+
+.ram-row-add:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .ram-close-all {
   padding: 9px 16px;
   background: rgba(255, 255, 255, 0.1);

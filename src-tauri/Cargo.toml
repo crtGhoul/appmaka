@@ -59,6 +59,7 @@ webview2-com = "=0.39.1"
 # and Win32_UI_Input_KeyboardAndMouse (SendInput for the mask keystroke).
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
@@ -93,7 +94,7 @@ authors = ["AppMaka"]
 description = "Turn any website into a desktop web app"
 edition = "2021"
 name = "appmaka"
-version = "0.9.10"
+version = "0.9.11"
 
 # v0.9.8: native save dialog inside the download `Requested` handler.
 # The download callback runs on the main thread on both platforms (WebView2's
