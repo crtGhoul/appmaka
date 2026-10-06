@@ -880,6 +880,9 @@ fn main() {
             // compiled out of release builds.
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_popup_flow(app.handle());
+            // v0.9.12 clipboard pinning E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_clipboard_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
@@ -1102,6 +1105,9 @@ fn main() {
             clipboard::set_clipboard_win_tap,
             // v0.9.4: popup tab (All | Text | Images), persisted
             clipboard::set_clipboard_popup_tab,
+            // v0.9.12: clipboard pinning + "Pinned only" filter, persisted
+            clipboard::set_clipboard_pinned,
+            clipboard::set_clipboard_pinned_only,
             // v0.8.2: MSI-aware self-update (install-type detection + MSI path)
             msi_update::get_install_type,
             msi_update::install_msi_update,

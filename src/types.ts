@@ -260,6 +260,8 @@ export interface ClipboardListEntry {
   preview: string;
   chars: number;
   truncated: boolean;
+  /** v0.9.12: user-pinned; persisted across restarts. */
+  pinned: boolean;
   createdAtMs: number;
   imagePath: string | null;
   width: number | null;
@@ -274,4 +276,8 @@ export interface ClipboardSettings {
   winTap: boolean;
   /** The Win-key tap needs a low-level keyboard hook: Windows only. */
   winTapSupported: boolean;
+  /** v0.9.4: popup tab ("all" | "text" | "image"), persisted. */
+  popupTab: string;
+  /** v0.9.12: "Pinned only" filter switch, persisted. */
+  popupPinnedOnly: boolean;
 }

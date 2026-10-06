@@ -113,6 +113,10 @@ pub struct ClipboardEntry {
     /// Sampled fingerprint of the image, used to suppress re-recording.
     #[serde(default)]
     pub img_hash: Option<u64>,
+    /// v0.9.12: pinned by the user in the popup. Defaults off so old
+    /// history files keep every entry unpinned.
+    #[serde(default)]
+    pub pinned: bool,
     pub created_at_ms: u64,
 }
 
@@ -128,6 +132,8 @@ pub struct ClipboardListEntry {
     pub preview: String,
     pub chars: usize,
     pub truncated: bool,
+    /// v0.9.12: whether the user pinned this entry.
+    pub pinned: bool,
     pub created_at_ms: u64,
     pub image_path: Option<String>,
     pub width: Option<u32>,
@@ -148,6 +154,9 @@ pub struct ClipboardSettings {
     /// v0.9.4: popup tab ("all" | "text" | "image"), persisted across
     /// summons and restarts.
     pub popup_tab: String,
+    /// v0.9.12: "Pinned only" filter switch in the popup header, persisted
+    /// like the tab.
+    pub popup_pinned_only: bool,
 }
 
 /// On-disk shape of clipboard.json. Unknown fields are ignored on load so
@@ -169,6 +178,10 @@ struct ClipboardFile {
     /// list so old files behave exactly as before.
     #[serde(default = "default_popup_tab")]
     popup_tab: String,
+    /// v0.9.12: "Pinned only" filter. Defaults off so old files show the
+    /// full history, exactly as before.
+    #[serde(default)]
+    popup_pinned_only: bool,
 }
 
 fn default_cap() -> usize {
@@ -202,6 +215,7 @@ impl Default for ClipboardFile {
             hotkey: DEFAULT_HOTKEY.to_string(),
             win_tap: false,
             popup_tab: default_popup_tab(),
+            popup_pinned_only: false,
         }
     }
 }
@@ -216,6 +230,8 @@ struct ClipboardData {
     win_tap: bool,
     /// v0.9.4: popup tab, persisted in clipboard.json.
     popup_tab: String,
+    /// v0.9.12: "Pinned only" filter, persisted in clipboard.json.
+    popup_pinned_only: bool,
     last_seen: Option<String>,
     last_image_fp: Option<u64>,
 }
@@ -258,6 +274,7 @@ pub fn load(app: &AppHandle) -> ClipboardState {
     // install must not try to enable it on Linux.
     let win_tap = file.win_tap && cfg!(windows);
     let popup_tab = normalize_popup_tab(&file.popup_tab);
+    let popup_pinned_only = file.popup_pinned_only;
     let mut entries: VecDeque<ClipboardEntry> = file.entries.into();
     // Enforce per-kind caps on load too (a hand-edited or future file
     // could exceed them); evicted image PNGs are deleted.
@@ -276,6 +293,7 @@ pub fn load(app: &AppHandle) -> ClipboardState {
             hotkey,
             win_tap,
             popup_tab,
+            popup_pinned_only,
             last_seen: None,
             last_image_fp: None,
         }),
@@ -301,6 +319,7 @@ fn persist(app: &AppHandle, data: &ClipboardData) -> Result<(), String> {
         hotkey: data.hotkey.clone(),
         win_tap: data.win_tap,
         popup_tab: data.popup_tab.clone(),
+        popup_pinned_only: data.popup_pinned_only,
     };
     let json =
         serde_json::to_string_pretty(&file).map_err(|e| format!("could not encode: {e}"))?;
@@ -442,6 +461,7 @@ fn make_entry(text: String) -> ClipboardEntry {
         height: None,
         bytes: None,
         img_hash: None,
+        pinned: false,
         created_at_ms: unix_millis(),
     }
 }
@@ -457,6 +477,7 @@ fn make_image_entry(image_file: String, width: u32, height: u32, bytes: u64, fp:
         height: Some(height),
         bytes: Some(bytes),
         img_hash: Some(fp),
+        pinned: false,
         created_at_ms: unix_millis(),
     }
 }
@@ -828,6 +849,7 @@ pub fn list_clipboard(app: AppHandle) -> Result<Vec<ClipboardListEntry>, String>
                     preview,
                     chars,
                     truncated,
+                    pinned: e.pinned,
                     created_at_ms: e.created_at_ms,
                     image_path,
                     width: e.width,
@@ -950,6 +972,7 @@ pub fn get_clipboard_settings(app: AppHandle) -> Result<ClipboardSettings, Strin
         win_tap: data.win_tap,
         win_tap_supported: cfg!(windows),
         popup_tab: data.popup_tab.clone(),
+        popup_pinned_only: data.popup_pinned_only,
     })
 }
 
@@ -1000,6 +1023,49 @@ pub fn set_clipboard_popup_tab(app: AppHandle, tab: String) -> Result<String, St
         data.popup_tab = tab.clone();
         persist(&app, data).map(|_| tab.clone())
     })?
+}
+
+/// Pin or unpin one clipboard entry (v0.9.12). The pin is persisted; an
+/// entry evicted by the caps simply disappears, pin and all.
+/// JS: `invoke("set_clipboard_pinned", { entryId, pinned })`.
+#[tauri::command]
+pub fn set_clipboard_pinned(
+    app: AppHandle,
+    entry_id: String,
+    pinned: bool,
+) -> Result<bool, String> {
+    with_state(&app, |data| {
+        if !apply_pin(&mut data.entries, &entry_id, pinned) {
+            return Err("That clipboard entry is gone.".to_string());
+        }
+        persist(&app, data).map(|_| pinned)
+    })?
+}
+
+/// Remember the popup's "Pinned only" filter across summons and restarts
+/// (v0.9.12) — same persistence contract as the tab.
+/// JS: `invoke("set_clipboard_pinned_only", { pinnedOnly })`.
+#[tauri::command]
+pub fn set_clipboard_pinned_only(
+    app: AppHandle,
+    pinned_only: bool,
+) -> Result<bool, String> {
+    with_state(&app, |data| {
+        data.popup_pinned_only = pinned_only;
+        persist(&app, data).map(|_| pinned_only)
+    })?
+}
+
+/// Set or clear the pin on one entry. Pure for testing: true when the
+/// entry existed.
+fn apply_pin(entries: &mut VecDeque<ClipboardEntry>, id: &str, pinned: bool) -> bool {
+    match entries.iter_mut().find(|e| e.id == id) {
+        Some(e) => {
+            e.pinned = pinned;
+            true
+        }
+        None => false,
+    }
 }
 
 /// Change the text history cap (10–1000). Truncates text entries
@@ -1085,6 +1151,7 @@ mod tests {
                     height: None,
                     bytes: None,
                     img_hash: None,
+                    pinned: false,
                     created_at_ms: i,
                 },
                 3,
@@ -1106,6 +1173,7 @@ mod tests {
             height: None,
             bytes: None,
             img_hash: None,
+            pinned: false,
             created_at_ms: 0,
         }
     }
@@ -1120,6 +1188,7 @@ mod tests {
             height: Some(100),
             bytes: Some(40000),
             img_hash: Some(1),
+            pinned: false,
             created_at_ms: 0,
         }
     }
@@ -1265,12 +1334,14 @@ mod tests {
                 height: None,
                 bytes: None,
                 img_hash: None,
+                pinned: false,
                 created_at_ms: 42,
             }],
             cap: 50,
             hotkey: "Ctrl+Shift+X".to_string(),
             win_tap: true,
             popup_tab: "image".to_string(),
+            popup_pinned_only: false,
         };
         let encoded = serde_json::to_string(&full).unwrap();
         let decoded: ClipboardFile = serde_json::from_str(&encoded).unwrap();
@@ -1352,5 +1423,59 @@ mod tests {
         let mut only_image = VecDeque::new();
         only_image.push_back(image_entry("i1"));
         assert!(merge_selected_texts(&only_image, &["i1".to_string()]).is_err());
+    }
+
+    #[test]
+    fn apply_pin_sets_clears_and_reports_missing() {
+        let mut entries = VecDeque::new();
+        entries.push_back(text_entry("t1"));
+        entries.push_back(image_entry("i1"));
+
+        assert!(apply_pin(&mut entries, "t1", true));
+        assert!(entries.iter().find(|e| e.id == "t1").unwrap().pinned);
+        // Other entries untouched.
+        assert!(!entries.iter().find(|e| e.id == "i1").unwrap().pinned);
+
+        assert!(apply_pin(&mut entries, "t1", false));
+        assert!(!entries.iter().find(|e| e.id == "t1").unwrap().pinned);
+
+        // Unknown id: no change, reported as missing.
+        assert!(!apply_pin(&mut entries, "gone", true));
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn pin_round_trip_and_legacy_default() {
+        // Legacy entries (no `pinned` field) load unpinned.
+        let legacy: ClipboardEntry =
+            serde_json::from_str(r#"{"id":"clip-9","text":"hi","createdAtMs":42}"#).unwrap();
+        assert!(!legacy.pinned);
+
+        // A pinned entry survives a serialize/deserialize round trip.
+        let mut pinned = text_entry("p1");
+        pinned.pinned = true;
+        let encoded = serde_json::to_string(&pinned).unwrap();
+        assert!(encoded.contains("\"pinned\":true"));
+        let decoded: ClipboardEntry = serde_json::from_str(&encoded).unwrap();
+        assert!(decoded.pinned);
+
+        // The filter flag round-trips and defaults off for old files.
+        let f: ClipboardFile = serde_json::from_str("{}").unwrap();
+        assert!(!f.popup_pinned_only);
+        let f: ClipboardFile =
+            serde_json::from_str(r#"{"popupPinnedOnly":true}"#).unwrap();
+        assert!(f.popup_pinned_only);
+        let full = ClipboardFile {
+            entries: vec![pinned],
+            cap: DEFAULT_CAP,
+            hotkey: DEFAULT_HOTKEY.to_string(),
+            win_tap: false,
+            popup_tab: default_popup_tab(),
+            popup_pinned_only: true,
+        };
+        let decoded: ClipboardFile =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert!(decoded.popup_pinned_only);
+        assert!(decoded.entries[0].pinned);
     }
 }

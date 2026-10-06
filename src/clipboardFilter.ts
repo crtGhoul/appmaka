@@ -1,5 +1,6 @@
 /**
- * Clipboard popup tab filter (v0.9.4: All | Text | Images).
+ * Clipboard popup tab filter (v0.9.4: All | Text | Images; v0.9.12:
+ * "Pinned only" switch composing with the tabs).
  *
  * Pure module — no Tauri imports — so the filtering rules are unit
  * tested under node (see the v0.9.4 smoke report). The popup
@@ -23,6 +24,8 @@ export interface TabFilterEntry {
   kind: "text" | "image";
   preview: string;
   imagePath: string | null;
+  /** v0.9.12: user-pinned entries survive restarts via the backend. */
+  pinned: boolean;
 }
 
 /**
@@ -35,19 +38,23 @@ export function normalizeTab(tab: unknown): ClipboardTab {
 }
 
 /**
- * Tab first, then the existing search rules: images carry no searchable
- * text, so they match a bare "image" query and are hidden by anything
- * else. Image rows whose PNG is gone from disk are dropped — a blank
- * row would be worse than no row.
+ * Tab first, then the "Pinned only" switch (v0.9.12 — composes with the
+ * tab: Text + Pinned only = pinned text, and so on), then the existing
+ * search rules: images carry no searchable text, so they match a bare
+ * "image" query and are hidden by anything else. Image rows whose PNG
+ * is gone from disk are dropped — a blank row would be worse than no
+ * row.
  */
 export function filterClipboardEntries<E extends TabFilterEntry>(
   entries: E[],
   tab: ClipboardTab,
-  query: string
+  query: string,
+  pinnedOnly: boolean = false
 ): E[] {
   const inTab =
     tab === "all" ? entries : entries.filter((e) => e.kind === tab);
-  const alive = inTab.filter((e) => e.kind !== "image" || e.imagePath);
+  const inPinned = pinnedOnly ? inTab.filter((e) => e.pinned) : inTab;
+  const alive = inPinned.filter((e) => e.kind !== "image" || e.imagePath);
   const q = query.trim().toLowerCase();
   if (!q) return alive;
   return alive.filter((e) =>
@@ -55,6 +62,15 @@ export function filterClipboardEntries<E extends TabFilterEntry>(
       ? "image".includes(q)
       : e.preview.toLowerCase().includes(q)
   );
+}
+
+/**
+ * Empty-state line for the "Pinned only" view when nothing is pinned
+ * (and no search query is active). Plain words; the pin affordance is
+ * on every row, so the hint points at it.
+ */
+export function emptyPinnedCopy(): string {
+  return "No pinned items yet. Pin an item to keep it here.";
 }
 
 /**

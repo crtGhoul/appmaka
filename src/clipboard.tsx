@@ -6,6 +6,7 @@ import {
   CLIPBOARD_TABS,
   CLIPBOARD_TAB_LABELS,
   ClipboardTab,
+  emptyPinnedCopy,
   emptyTabCopy,
   filterClipboardEntries,
   normalizeTab,
@@ -41,6 +42,8 @@ interface ClipboardListEntry {
   preview: string;
   chars: number;
   truncated: boolean;
+  /** v0.9.12: user-pinned; persisted by the backend across restarts. */
+  pinned: boolean;
   createdAtMs: number;
   imagePath: string | null;
   width: number | null;
@@ -66,6 +69,10 @@ function ClipboardPopup() {
   // v0.9.4: tab separating pictures from text. Defaults to the mixed
   // list; the saved value loads on mount and every change persists.
   const [tab, setTab] = useState<ClipboardTab>("all");
+  // v0.9.12: "Pinned only" filter switch. Composes with the tab
+  // (Text + Pinned only = pinned text, and so on); persists across
+  // summons and restarts exactly like the tab.
+  const [pinnedOnly, setPinnedOnly] = useState(false);
   // v0.9.3 multi-select: check off several text entries, copy them as one
   // payload. Images stay out (the OS clipboard holds one image).
   const [selectMode, setSelectMode] = useState(false);
@@ -108,6 +115,24 @@ function ClipboardPopup() {
     setChecked(new Set());
   };
 
+  // Pin or unpin one entry. The list state updates optimistically so
+  // unpinning while "Pinned only" is on drops the row at once; the
+  // 1s poll would correct any drift on the next tick anyway.
+  const togglePin = async (entry: ClipboardListEntry) => {
+    const next = !entry.pinned;
+    setEntries((prev) =>
+      prev.map((e) => (e.id === entry.id ? { ...e, pinned: next } : e))
+    );
+    try {
+      await invoke("set_clipboard_pinned", {
+        entryId: entry.id,
+        pinned: next,
+      });
+    } catch {
+      void refresh();
+    }
+  };
+
   // Switching tabs clears checks: copySelected acts on the visible
   // filtered rows, so a stale check from another tab would make the
   // "Copy selected (N)" count lie.
@@ -116,6 +141,12 @@ function ClipboardPopup() {
     setSelected(0);
     setChecked(new Set());
     void invoke("set_clipboard_popup_tab", { tab: t }).catch(() => {});
+  };
+
+  const changePinnedOnly = (v: boolean) => {
+    setPinnedOnly(v);
+    setSelected(0);
+    void invoke("set_clipboard_pinned_only", { pinnedOnly: v }).catch(() => {});
   };
 
   const cycleTab = (dir: 1 | -1) => {
@@ -132,9 +163,15 @@ function ClipboardPopup() {
     setSelectMode(false);
     setChecked(new Set());
     void refresh();
-    // Restore the saved tab; a failure keeps the mixed list.
-    void invoke<{ popupTab?: unknown }>("get_clipboard_settings")
-      .then((s) => setTab(normalizeTab(s.popupTab)))
+    // Restore the saved tab and "Pinned only" switch; a failure keeps
+    // the mixed list with the switch off.
+    void invoke<{ popupTab?: unknown; popupPinnedOnly?: unknown }>(
+      "get_clipboard_settings"
+    )
+      .then((s) => {
+        setTab(normalizeTab(s.popupTab));
+        setPinnedOnly(s.popupPinnedOnly === true);
+      })
       .catch(() => {});
     // Poll while open: a push event from the backend proved unreliable for
     // secondary windows, and one tiny invoke per second is cheap.
@@ -169,13 +206,13 @@ function ClipboardPopup() {
   }, []);
 
   const filtered = useMemo(
-    () => filterClipboardEntries(entries, tab, query),
-    [entries, tab, query]
+    () => filterClipboardEntries(entries, tab, query, pinnedOnly),
+    [entries, tab, query, pinnedOnly]
   );
 
   useEffect(() => {
     setSelected(0);
-  }, [query, tab]);
+  }, [query, tab, pinnedOnly]);
 
   async function choose(entry: ClipboardListEntry | undefined) {
     if (!entry) return;
@@ -242,6 +279,8 @@ function ClipboardPopup() {
       </>
     ) : query.trim() ? (
       <>No matches for "{query}".</>
+    ) : pinnedOnly ? (
+      <>{emptyPinnedCopy()}</>
     ) : (
       <>{emptyTabCopy(tab) || "Nothing here yet."}</>
     );
@@ -302,6 +341,16 @@ function ClipboardPopup() {
             {CLIPBOARD_TAB_LABELS[t]}
           </button>
         ))}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={pinnedOnly}
+          className={"clip-pinnedonly" + (pinnedOnly ? " active" : "")}
+          onClick={() => changePinnedOnly(!pinnedOnly)}
+          title="Show only pinned items"
+        >
+          Pinned only
+        </button>
       </div>
       {error ? (
         <div className="clip-error" role="alert">
@@ -371,6 +420,32 @@ function ClipboardPopup() {
                   </>
                 )}
                 </button>
+                {!selectMode && (
+                  <button
+                    type="button"
+                    className={"clip-pin" + (entry.pinned ? " active" : "")}
+                    onClick={() => void togglePin(entry)}
+                    aria-pressed={entry.pinned}
+                    aria-label={entry.pinned ? "Unpin this item" : "Pin this item"}
+                    title={entry.pinned ? "Unpin" : "Pin"}
+                    tabIndex={-1}
+                  >
+                    <svg
+                      width="13"
+                      height="13"
+                      viewBox="0 0 24 24"
+                      fill={entry.pinned ? "currentColor" : "none"}
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden={true}
+                    >
+                      <path d="M9 4h6l-1 7 3 3v2H7v-2l3-3z" />
+                      <path d="M12 16v5" />
+                    </svg>
+                  </button>
+                )}
               </li>
             );
           })}

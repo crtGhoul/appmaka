@@ -67,6 +67,14 @@
   .clip-tabs button:hover { background: #f2f3f6; color: #1f2329; }
   .clip-tabs button.active { background: #eef0ff; color: #4f46e5; font-weight: 600; }
   .clip-tabs button:focus-visible { outline: 2px solid #4f46e5; outline-offset: 1px; }
+  /* v0.9.12: "Pinned only" switch sits at the right end of the tabs row.
+     Same quiet treatment as the tabs; accent only when on. */
+  .clip-tabs .clip-pinnedonly { margin-left: auto; }
+  .clip-tabs .clip-pinnedonly.active {
+    background: #eef0ff;
+    color: #4f46e5;
+    font-weight: 600;
+  }
   .clip-search input {
     font: inherit;
     width: 100%;
@@ -103,6 +111,29 @@
   /* v0.9.3 multi-select: checkbox sits beside the row; the row button
      stays the interactive element (the input is a visual indicator). */
   .clip-row { display: flex; align-items: flex-start; }
+  .clip-row .clip-item { flex: 1 1 auto; min-width: 0; }
+  /* v0.9.12: per-row pin toggle. Quiet gray at rest; accent when the
+     entry is pinned. Sits beside the row, never inside the copy
+     button (nested buttons are invalid HTML). */
+  .clip-pin {
+    flex: none;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    margin-right: 4px;
+    padding: 0;
+    color: #b0b5bd;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .clip-pin:hover { background: #f2f3f6; color: #6b7078; }
+  .clip-pin.active { color: #4f46e5; }
+  .clip-pin:focus-visible { outline: 2px solid #4f46e5; outline-offset: 1px; }
   .clip-row .clip-item { flex: 1 1 auto; min-width: 0; }
   .clip-check {
     flex: none;
