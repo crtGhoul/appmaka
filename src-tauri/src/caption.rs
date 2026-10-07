@@ -711,11 +711,19 @@ mod imp {
         enum Down {
             Drag,
             Restore(HWND),
+            // v0.11.2: orphaned strip (owner window dead) — destroy it on
+            // click instead of leaving an unclosable ghost on the desktop.
+            Drop(String),
             None,
         }
         let down = with_chrome(|ch| {
             let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
             let cp = ch.captions.get_mut(&label)?;
+            // IsWindow is a pure query — no messages — safe under the
+            // borrow, like IsZoomed below.
+            if !IsWindow(Some(cp.owner)).as_bool() {
+                return Some(Down::Drop(label));
+            }
             // v0.10.0: tabbed strips hit-test tabs first (logical px).
             // GetClientRect is a pure query — safe under the borrow.
             let tab_hit = cp.tabbed.as_ref().and_then(|td| {
@@ -790,6 +798,11 @@ mod imp {
                     WPARAM(SC_RESTORE as usize),
                     LPARAM(0),
                 );
+            }
+            // Orphaned strip: destroy it. remove_caption takes only a
+            // short borrow and calls DestroyWindow with none held.
+            Down::Drop(lbl) => {
+                remove_caption(&lbl);
             }
             _ => {}
         }
@@ -1485,6 +1498,9 @@ mod imp {
         }
         enum Plan {
             Skip,
+            // v0.11.2: owner window is dead — the strip is an orphaned
+            // ghost. Destroy it rather than leaving it stranded visible.
+            Drop,
             Place {
                 snap: Snap,
                 tx: i32,
@@ -1496,7 +1512,7 @@ mod imp {
         let plan = with_chrome(|ch| {
             let cp = ch.captions.get(label)?;
             if !IsWindow(Some(cp.owner)).as_bool() {
-                return Some(Plan::Skip);
+                return Some(Plan::Drop);
             }
             let h = (BAR_H_LOGICAL * cp.scale).round() as i32;
             if IsZoomed(cp.owner).as_bool() {
@@ -1544,6 +1560,9 @@ mod imp {
         };
         match plan {
             Plan::Skip => {}
+            Plan::Drop => {
+                remove_caption(label);
+            }
             Plan::Place { snap, tx, ty, w, h } => {
                 let _ = ShowWindow(snap.hwnd, SW_SHOWNOACTIVATE);
                 // Never strand the strip off the top of the screen: nudge

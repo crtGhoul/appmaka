@@ -843,12 +843,16 @@ fn switch_tab_inner(
         Ok(window) => {
             if let Some(w) = plan.old_window.as_ref() {
                 let _ = w.close();
-            } else {
-                // The old window was already gone (e.g. closed via X
-                // between the lock and the build): drop its strip.
-                #[cfg(windows)]
-                crate::caption::page_window_closed(&plan.old_label);
             }
+            // v0.11.2: the old generation's strip must die with the
+            // switch, unconditionally. The caption HWND lives on the
+            // chrome thread and is NOT torn down by w.close(); the
+            // Destroyed handler can't resolve the old label either (the
+            // group already carries the new one), so skipping this call
+            // strands an orphaned, unclosable strip on the desktop.
+            // Idempotent: a second call is a no-op.
+            #[cfg(windows)]
+            crate::caption::page_window_closed(&plan.old_label);
             // Snapshot the strip data under a short lock, then attach with
             // the lock released: attach_strip queries scale_factor(),
             // which blocks on the main event loop (same hang family).
@@ -1075,18 +1079,35 @@ pub fn close_tabbed_window(app: &AppHandle, tabstate: &TabState, group_id: &str)
     Ok(())
 }
 
-/// Resolve a live tabbed-window label to its group id.
+/// Extract the group id from a generation-suffixed tabbed-window label
+/// (`tabbed-{group_id}-g{generation}`). Pure logic, unit-tested.
+#[cfg(windows)]
+fn group_id_from_label(label: &str) -> Option<&str> {
+    let rest = label.strip_prefix("tabbed-")?;
+    let (gid, gen) = rest.rsplit_once("-g")?;
+    gen.parse::<u64>().ok()?;
+    Some(gid)
+}
+
+/// Resolve a live or prior-generation tabbed-window label to its group
+/// id. Exact label match first; falls back to parsing the group id out
+/// of the label so clicks on an in-flight older strip still reach the
+/// live group instead of silently doing nothing.
 #[cfg(windows)]
 pub fn group_id_for_label(app: &AppHandle, label: &str) -> Option<String> {
-    app.try_state::<TabState>()?.inner.lock().ok()?.iter().find_map(
-        |(id, g)| {
-            if g.label == label {
-                Some(id.clone())
-            } else {
-                None
-            }
-        },
-    )
+    // Bind the state guard: try_state returns a temporary whose borrow
+    // must outlive the lock guard (E0716 otherwise).
+    let tab_state = app.try_state::<TabState>()?;
+    let state = tab_state.inner.lock().ok()?;
+    if let Some((id, _)) = state.iter().find(|(_, g)| g.label == label) {
+        return Some(id.clone());
+    }
+    if let Some(gid) = group_id_from_label(label) {
+        if state.contains_key(gid) {
+            return Some(gid.to_string());
+        }
+    }
+    None
 }
 
 /// Fire-and-forget close of a whole tabbed window by live label (strip X
@@ -1145,10 +1166,17 @@ pub fn gesture_close_active_tab(app: &AppHandle, label: &str) {
 
 /// The X button / gesture closed the page window directly: drop the group
 /// (it no longer has a window), close the Linux strip, persist. Called
-/// from the page window's Destroyed handler. During a tab switch the
-/// group already carries the NEW label, so the old label resolves to
-/// nothing and this is a no-op by construction.
+/// from the page window's Destroyed handler.
+///
+/// v0.11.2: the strip for `label` is dropped unconditionally at entry. A
+/// destroyed window must never keep its caption: the strip HWND lives on
+/// the chrome thread and outlives cross-thread owner teardown, and during
+/// a tab switch the group already carries the NEW label so the old label
+/// resolves to nothing below. page_window_closed is a non-blocking
+/// channel send and idempotent, so this is safe on the main thread.
 pub fn on_tabbed_window_destroyed(app: &AppHandle, label: &str) {
+    #[cfg(windows)]
+    crate::caption::page_window_closed(label);
     // v0.10.1: this runs on the main thread (WindowEvent::Destroyed). It
     // must NEVER block on the TabState lock: if a worker holds the lock
     // while waiting on a main-thread Tauri call (e.g. scale_factor), a
@@ -1726,5 +1754,17 @@ mod tests {
         // (v0.10.0 returned early here and the tab never loaded.)
         assert!(switch_needs_rebuild(0, 0, true));
         assert!(switch_needs_rebuild(2, 2, true));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn group_id_from_generation_label() {
+        // Current and older generations resolve to the group id.
+        assert_eq!(group_id_from_label("tabbed-g25932-1-g0"), Some("g25932-1"));
+        assert_eq!(group_id_from_label("tabbed-g25932-1-g6"), Some("g25932-1"));
+        // Not a tabbed label, or no numeric generation: no match.
+        assert_eq!(group_id_from_label("page-acct-1"), None);
+        assert_eq!(group_id_from_label("tabbed-g25932-1"), None);
+        assert_eq!(group_id_from_label("tabbed-g25932-1-gx"), None);
     }
 }
