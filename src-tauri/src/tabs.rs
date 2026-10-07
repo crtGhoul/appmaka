@@ -100,6 +100,14 @@ fn new_group_id() -> String {
 // Pure logic: unit-tested on every platform
 // ---------------------------------------------------------------------------
 
+/// Pure decision: does switching to `index` require rebuilding the live
+/// webview? The live window always shows `active` — except right after the
+/// first tab lands in an empty group (`force`), when the window is still
+/// on about:blank and must be rebuilt to load the tab.
+fn switch_needs_rebuild(active: usize, index: usize, force: bool) -> bool {
+    force || index != active
+}
+
 /// Keyboard tab-switch action from the Windows low-level hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(any(test, windows)), allow(dead_code))]
@@ -654,6 +662,7 @@ pub fn open_tabbed_window(
     let id = params.restore_id.unwrap_or_else(new_group_id);
     let label = window_label(&id, 0);
     let entry = valid_tabs.get(active);
+    crate::caption::tint_log(app, &format!("tabs: open start group={id} tabs={}", valid_tabs.len()));
     let window = build_tabbed_window(
         app,
         store,
@@ -666,6 +675,7 @@ pub fn open_tabbed_window(
             geometry: None,
         },
     )?;
+    crate::caption::tint_log(app, &format!("tabs: open built label={label}"));
     let group = TabGroup {
         id: id.clone(),
         label: label.clone(),
@@ -675,6 +685,7 @@ pub fn open_tabbed_window(
         tint: None,
     };
     attach_strip(app, store, &group, &window, true);
+    crate::caption::tint_log(app, &format!("tabs: open strip attached label={label}"));
     let info = tab_info(store, &group, false);
     tabstate
         .inner
@@ -688,6 +699,11 @@ pub fn open_tabbed_window(
 /// Switch the active tab: hide the old window, rebuild with the new tab's
 /// session, close the old window. On build failure the old window is
 /// reshown and TabState rolls back, so the user never loses their tab.
+///
+/// v0.10.1: the TabState mutex is never held across a Tauri window call.
+/// Every window getter/setter (`url()`, `outer_position()`, `hide()`…)
+/// blocks on the main event loop; holding the mutex across one wedged the
+/// whole app on Windows (same family as the v0.10.0 Linux switch hang).
 pub fn switch_tab(
     app: &AppHandle,
     store: &AppStore,
@@ -696,12 +712,43 @@ pub fn switch_tab(
     group_id: &str,
     index: usize,
 ) -> Result<TabInfo, String> {
-    // Snapshot what the switch needs under one short lock.
+    switch_tab_inner(app, store, adblock, tabstate, group_id, index, false)
+}
+
+/// Forced switch: rebuild even when `index == group.active`. Used when the
+/// first tab is added to an empty group — the live window is still on
+/// about:blank, so the normal early-return would leave the tab unloaded
+/// and the strip stale.
+pub(crate) fn switch_tab_forced(
+    app: &AppHandle,
+    store: &AppStore,
+    adblock: &AdblockState,
+    tabstate: &TabState,
+    group_id: &str,
+    index: usize,
+) -> Result<TabInfo, String> {
+    switch_tab_inner(app, store, adblock, tabstate, group_id, index, true)
+}
+
+fn switch_tab_inner(
+    app: &AppHandle,
+    store: &AppStore,
+    adblock: &AdblockState,
+    tabstate: &TabState,
+    group_id: &str,
+    index: usize,
+    force: bool,
+) -> Result<TabInfo, String> {
+    crate::caption::tint_log(
+        app,
+        &format!("tabs: switch start group={group_id} index={index} force={force}"),
+    );
+    // Phase 1: snapshot identity under one short lock. No window calls
+    // here — see the doc comment on switch_tab.
     struct Plan {
         old_label: String,
         old_active: usize,
         old_window: Option<WebviewWindow>,
-        geometry: Option<SavedGeometry>,
         entry: TabEntry,
         generation: u64,
     }
@@ -719,26 +766,13 @@ pub fn switch_tab(
         if index >= group.tabs.len() {
             return Err("Tab index out of range.".to_string());
         }
-        if index == group.active {
+        if !switch_needs_rebuild(group.active, index, force) {
             let info = tab_info(store, group, false);
             return Ok(info);
         }
         let old_label = group.label.clone();
         let old_active = group.active;
         let old_window = app.get_webview_window(&old_label);
-        // Remember where the old tab was, before it goes away.
-        if let (Some(w), Some(old_entry)) = (
-            old_window.as_ref(),
-            group.tabs.get_mut(group.active),
-        ) {
-            if let Ok(u) = w.url() {
-                let s = u.to_string();
-                if s != "about:blank" {
-                    old_entry.last_url = Some(s);
-                }
-            }
-        }
-        let geometry = old_window.as_ref().and_then(save_geometry);
         let entry = group.tabs[index].clone();
         let generation = group.generation + 1;
         // Commit the new identity BEFORE touching windows: any concurrent
@@ -752,11 +786,42 @@ pub fn switch_tab(
             old_label,
             old_active,
             old_window,
-            geometry,
             entry,
             generation,
         }
     };
+
+    // Phase 2: query the old window with NO lock held. url() and the
+    // geometry getters all block on the main event loop; the mutex stays
+    // free so a slow main thread can never wedge the app.
+    let (last_url, geometry) = match plan.old_window.as_ref() {
+        Some(w) => {
+            let url = w
+                .url()
+                .ok()
+                .map(|u| u.to_string())
+                .filter(|s| s != "about:blank");
+            (url, save_geometry(w))
+        }
+        None => (None, None),
+    };
+    // Phase 3: remember where the old tab was. Best-effort: only if the
+    // group is still at the generation we committed.
+    if let Some(u) = last_url {
+        if let Ok(mut state) = tabstate.inner.lock() {
+            if let Some(group) = state.get_mut(group_id) {
+                if group.generation == plan.generation {
+                    if let Some(e) = group.tabs.get_mut(plan.old_active) {
+                        e.last_url = Some(u);
+                    }
+                }
+            }
+        }
+    }
+    crate::caption::tint_log(
+        app,
+        &format!("tabs: switch queries done group={group_id} gen={}", plan.generation),
+    );
 
     if let Some(w) = plan.old_window.as_ref() {
         let _ = w.hide();
@@ -771,7 +836,7 @@ pub fn switch_tab(
             entry: Some(&plan.entry),
             group_id,
             placement: None,
-            geometry: plan.geometry,
+            geometry,
         },
     );
     match build {
@@ -784,6 +849,20 @@ pub fn switch_tab(
                 #[cfg(windows)]
                 crate::caption::page_window_closed(&plan.old_label);
             }
+            // Snapshot the strip data under a short lock, then attach with
+            // the lock released: attach_strip queries scale_factor(),
+            // which blocks on the main event loop (same hang family).
+            let snapshot_group = {
+                let state = tabstate
+                    .inner
+                    .lock()
+                    .map_err(|e| format!("tab state lock poisoned: {e}"))?;
+                state.get(group_id).cloned()
+            };
+            if let Some(g) = snapshot_group.as_ref() {
+                attach_strip(app, store, g, &window, false);
+            }
+            let _ = window.set_focus();
             let info = {
                 let state = tabstate
                     .inner
@@ -792,10 +871,12 @@ pub fn switch_tab(
                 let group = state
                     .get(group_id)
                     .ok_or_else(|| "Tabbed window was closed during the switch.".to_string())?;
-                attach_strip(app, store, group, &window, false);
-                let _ = window.set_focus();
                 tab_info(store, group, false)
             };
+            crate::caption::tint_log(
+                app,
+                &format!("tabs: switch done group={group_id} label={new_label}"),
+            );
             crate::session::write_session(app);
             Ok(info)
         }
@@ -849,7 +930,7 @@ pub fn add_tab(
     if let Some(i) = existing {
         return switch_tab(app, store, adblock, tabstate, group_id, i);
     }
-    let index = {
+    let (index, was_empty) = {
         let mut state = tabstate
             .inner
             .lock()
@@ -857,14 +938,22 @@ pub fn add_tab(
         let group = state
             .get_mut(group_id)
             .ok_or_else(|| "Tabbed window not found.".to_string())?;
+        let was_empty = group.tabs.is_empty();
         group.tabs.push(TabEntry {
             app_id: app_id.to_string(),
             account_id: account_id.to_string(),
             last_url: None,
         });
-        group.tabs.len() - 1
+        (group.tabs.len() - 1, was_empty)
     };
-    let info = switch_tab(app, store, adblock, tabstate, group_id, index)?;
+    // First tab in an empty group: the live window is still on about:blank,
+    // so a normal switch would early-return (index == active) and leave the
+    // tab unloaded with a stale strip. Force the rebuild.
+    let info = if was_empty {
+        switch_tab_forced(app, store, adblock, tabstate, group_id, index)?
+    } else {
+        switch_tab(app, store, adblock, tabstate, group_id, index)?
+    };
     crate::session::write_session(app);
     Ok(info)
 }
@@ -1060,33 +1149,69 @@ pub fn gesture_close_active_tab(app: &AppHandle, label: &str) {
 /// group already carries the NEW label, so the old label resolves to
 /// nothing and this is a no-op by construction.
 pub fn on_tabbed_window_destroyed(app: &AppHandle, label: &str) {
-    let group_id = {
-        match app.try_state::<TabState>() {
-            Some(ts) => match ts.inner.lock() {
-                Ok(mut state) => {
-                    let id = state
-                        .iter()
-                        .find(|(_, g)| g.label == label)
-                        .map(|(id, _)| id.clone());
-                    if let Some(ref id) = id {
-                        state.remove(id);
-                    }
-                    id
-                }
-                Err(_) => None,
-            },
-            None => None,
+    // v0.10.1: this runs on the main thread (WindowEvent::Destroyed). It
+    // must NEVER block on the TabState lock: if a worker holds the lock
+    // while waiting on a main-thread Tauri call (e.g. scale_factor), a
+    // blocking lock() here deadlocks the app ("Not Responding", 0% CPU).
+    // Try the lock; if a worker holds it, defer the removal to a worker
+    // thread that may block safely.
+    fn remove_group(app: &AppHandle, label: &str) -> Option<String> {
+        let ts = app.try_state::<TabState>()?;
+        let mut state = ts.inner.try_lock().ok()?;
+        let id = state
+            .iter()
+            .find(|(_, g)| g.label == label)
+            .map(|(id, _)| id.clone());
+        if let Some(ref id) = id {
+            state.remove(id);
         }
-    };
-    if let Some(id) = group_id {
+        id
+    }
+    fn finish_cleanup(app: &AppHandle, label: &str, id: &str) {
         #[cfg(windows)]
         {
             crate::caption::page_window_closed(label);
-            let _ = &id;
+            let _ = id;
         }
         #[cfg(not(windows))]
-        close_strip_window(app, &id);
+        {
+            let _ = label;
+            close_strip_window(app, id);
+        }
         crate::session::write_session(app);
+    }
+
+    if let Some(id) = remove_group(app, label) {
+        finish_cleanup(app, label, &id);
+    } else if app.try_state::<TabState>().is_some() {
+        // The lock is held by a worker: do the removal off the main thread.
+        let app = app.clone();
+        let label = label.to_string();
+        std::thread::Builder::new()
+            .name("appmaka-tab-destroy-cleanup".to_string())
+            .spawn(move || {
+                // Blocking lock is safe here: this is not the main thread,
+                // so it cannot deadlock against a main-thread Tauri call.
+                let id = app.try_state::<TabState>().and_then(|ts| {
+                    ts.inner
+                        .lock()
+                        .ok()
+                        .and_then(|mut state| {
+                            let id = state
+                                .iter()
+                                .find(|(_, g)| g.label == label)
+                                .map(|(id, _)| id.clone());
+                            if let Some(ref id) = id {
+                                state.remove(id);
+                            }
+                            id
+                        })
+                });
+                if let Some(id) = id {
+                    finish_cleanup(&app, &label, &id);
+                }
+            })
+            .ok();
     }
 }
 
@@ -1585,5 +1710,21 @@ mod tests {
         assert_eq!(pin_key("g1-2"), "tabbed:g1-2");
         assert!(is_tabbed_label("tabbed-g1-2-g7"));
         assert!(!is_tabbed_label("acct-a-b"));
+    }
+
+    #[test]
+    fn rebuild_decision() {
+        // Same tab, no force: nothing to do (the live window already
+        // shows it).
+        assert!(!switch_needs_rebuild(0, 0, false));
+        assert!(!switch_needs_rebuild(2, 2, false));
+        // Different tab: rebuild.
+        assert!(switch_needs_rebuild(0, 1, false));
+        assert!(switch_needs_rebuild(1, 0, false));
+        // First tab in an empty group: the live window is still on
+        // about:blank, so force rebuilds even for the active index.
+        // (v0.10.0 returned early here and the tab never loaded.)
+        assert!(switch_needs_rebuild(0, 0, true));
+        assert!(switch_needs_rebuild(2, 2, true));
     }
 }
