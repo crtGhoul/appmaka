@@ -627,6 +627,8 @@ export function LauncherSettingsPanel({
   const [saving, setSaving] = useState(false);
   const [rescanning, setRescanning] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // v0.11.0: "Copy diagnostics" feedback.
+  const [diagCopied, setDiagCopied] = useState(false);
   // Whether the saved summon hotkey is actually registered with the OS.
   // Startup registration can fail silently (e.g. another app owns Alt+Space);
   // the banner below tells the user instead of showing a dead hotkey.
@@ -768,6 +770,19 @@ export function LauncherSettingsPanel({
     }
   }
 
+  // v0.11.0: copy recent errors + version + OS for pasting into chat.
+  async function handleCopyDiagnostics() {
+    setFormError(null);
+    try {
+      await invoke("copy_diagnostics");
+      setDiagCopied(true);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+    }
+  }
+
   return (
     <div className="launcher-settings">
       {hotkeyStatus && !hotkeyStatus.registered && (
@@ -896,6 +911,16 @@ export function LauncherSettingsPanel({
         <span className="help">
           {programsCount} installed {programsCount === 1 ? "program" : "programs"} indexed from
           the Start Menu and Desktop. Microsoft Store apps aren't listed yet.
+        </span>
+      </div>
+
+      <div className="inline-form">
+        <button type="button" onClick={() => void handleCopyDiagnostics()}>
+          {diagCopied ? "Copied" : "Copy diagnostics"}
+        </button>
+        <span className="help">
+          Copies recent errors, the app version, and your OS version — paste
+          it straight into chat when reporting a problem.
         </span>
       </div>
 

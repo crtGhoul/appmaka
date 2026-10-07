@@ -298,6 +298,39 @@ body {
   cursor: pointer;
 }
 
+/* Copyable error dialog (v0.11.0): expandable technical details. */
+.error-details {
+  margin: 12px 0 0;
+}
+
+.error-details summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: #a5b4fc;
+}
+
+.error-details-body {
+  margin-top: 8px;
+}
+
+.error-details-body pre {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+}
+
 .modal-primary:hover:not(:disabled) {
   background: #939dfa;
 }

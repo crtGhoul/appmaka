@@ -430,3 +430,111 @@ fn run_clipboard_flow(app: &AppHandle) {
     let _ = clipboard::set_clipboard_pinned_only(app.clone(), false);
     eprintln!("[e2e] clipboard flow done");
 }
+
+// ---------------------------------------------------------------------------
+// v0.11.0 error-dialog + tint E2E drivers (Xvfb smoke).
+//
+// APPMAKA_DEBUG_ERROR_MODE=error: records a synthetic backend error with
+// notify=true (the dialog path) and logs the ring-buffer entry. The dialog
+// itself is frontend; the entry proves the backend half (record +
+// sanitize + the emit call, which would panic on a bad payload).
+//
+// APPMAKA_DEBUG_TINT_MODE=tint: opens two seeded page windows at local
+// test pages (APPMAKA_DEBUG_TINT_BASE=http://127.0.0.1:PORT) — one with a
+// theme-color meta tag, one with only a body background — runs the full
+// tint::resolve_now chain against each, and logs the decisions. This
+// exercises the fallback chain headless (HTTP fetch + live-DOM eval under
+// WebKitGTK); DWM application itself is Windows-only and stays logic-only.
+//
+// Same contract as the other flows: debug builds only, inert without the
+// env vars, detached threads, never blocks startup.
+/// Called once from setup. Returns immediately.
+pub fn maybe_run_error_flow(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_ERROR_MODE").unwrap_or_default() != "error" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-error".to_string())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            let id = crate::errors::record(
+                &app,
+                "e2e-test",
+                "Synthetic E2E failure.",
+                "technical: forced by APPMAKA_DEBUG_ERROR_MODE; token=should-be-redacted",
+                true,
+            );
+            let entries = crate::errors::get_recent_errors(app.clone());
+            match entries.iter().find(|e| e.id == id) {
+                Some(e) => eprintln!(
+                    "[e2e] error: id={} kind={} entries={} redacted={}",
+                    e.id,
+                    e.kind,
+                    entries.len(),
+                    !e.technical.contains("should-be-redacted")
+                ),
+                None => eprintln!("[e2e] error: ENTRY MISSING id={id}"),
+            }
+            eprintln!("[e2e] error: flow done");
+        });
+}
+
+/// Called once from setup. Returns immediately.
+pub fn maybe_run_tint_flow(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_TINT_MODE").unwrap_or_default() != "tint" {
+        return;
+    }
+    let base = std::env::var("APPMAKA_DEBUG_TINT_BASE").unwrap_or_default();
+    if base.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-tint".to_string())
+        .spawn(move || run_tint_flow(&app, &base));
+}
+
+fn run_tint_flow(app: &AppHandle, base: &str) {
+    use std::time::Duration;
+    std::thread::sleep(Duration::from_secs(6));
+    let (Some(store), Some(adblock), Some(winstate)) = (
+        app.try_state::<crate::store::AppStore>(),
+        app.try_state::<crate::adblock::AdblockState>(),
+        app.try_state::<crate::windows::WindowState>(),
+    ) else {
+        eprintln!("[e2e] tint: missing state");
+        return;
+    };
+    for (app_id, acc_id, page, want_source, want_rgb) in [
+        ("app-meta", "acc-meta", "meta.html", "theme-meta-http", "#123456"),
+        ("app-bg", "acc-bg", "bg.html", "page-background", "#0a141e"),
+    ] {
+        let url = format!("{base}/{page}");
+        if let Err(e) =
+            crate::windows::open_account(app, &store, &adblock, &winstate, app_id, acc_id)
+        {
+            eprintln!("[e2e] tint: open {page} failed: {e}");
+            continue;
+        }
+        let label = crate::windows::account_window_label(app_id, acc_id);
+        // Let the page load before resolving (the fast HTTP path needs no
+        // DOM, but the bg fallback's eval does).
+        std::thread::sleep(Duration::from_secs(8));
+        let d = crate::tint::resolve_now(app, &label, &url);
+        let rgb = d
+            .rgb
+            .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}"))
+            .unwrap_or_else(|| "default".to_string());
+        let src = match d.source {
+            crate::tint::TintSource::ThemeMetaHttp => "theme-meta-http",
+            crate::tint::TintSource::ThemeMetaDom => "theme-meta-dom",
+            crate::tint::TintSource::PageBackground => "page-background",
+            crate::tint::TintSource::Default => "default",
+        };
+        eprintln!(
+            "[e2e] tint: page={page} source={src} rgb={rgb} want_source={want_source} want_rgb={want_rgb}"
+        );
+    }
+    eprintln!("[e2e] tint: flow done");
+}

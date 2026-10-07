@@ -2,7 +2,8 @@
 //!
 //! 1. "Add to applications…" appended to the popup's system menu
 //!    (right-click the title bar), via GetSystemMenu/AppendMenuW.
-//! 2. Title-bar tint from the site's `theme-color` meta tag, via
+//! 2. Title-bar tint via the universal chain in `tint.rs` (v0.11.0):
+//!    theme-color meta → live-DOM probe → default, applied with
 //!    DwmSetWindowAttribute(DWMWA_CAPTION_COLOR) on Windows 11+.
 //!
 //! Everything here is best-effort and infallible by contract (AGENTS.md):
@@ -35,8 +36,9 @@
 //!   `extern "system"` boundary would abort the process instantly
 //!   (v0.9.6). On panic we fall back to `DefWindowProcW`.
 //!
-//! `DwmSetWindowAttribute` runs on detached tint threads, never on a proc
-//! thread; on pre-Windows-11 it fails and the bar stays as-is, silently.
+//! `DwmSetWindowAttribute` runs on detached tint threads inside `tint.rs`,
+//! never on a proc thread; on pre-Windows-11 it fails and the bar stays
+//! as-is, silently.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -67,14 +69,6 @@ static SUBCLASSES: OnceLock<Mutex<HashMap<isize, SubclassEntry>>> = OnceLock::ne
 
 fn subclasses() -> &'static Mutex<HashMap<isize, SubclassEntry>> {
     SUBCLASSES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Last URL tinted per popup label — navigation fires often (including
-/// subframes), and refetching an unchanged address would just burn HTTP.
-static LAST_TINT: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-
-fn last_tint() -> &'static Mutex<HashMap<String, String>> {
-    LAST_TINT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Install the system-menu item and subclass the popup's window proc.
@@ -142,62 +136,12 @@ pub fn setup_popup_chrome(
         .ok();
 }
 
-/// Re-tint after a navigation. Called on a detached thread from the
-/// `on_navigation` hook (which must never block the navigation decision).
+/// Re-tint after a navigation. Thin wrapper over the universal tint chain
+/// (v0.11.0): theme-color meta → live-DOM probe → default, applied via
+/// DWM. Called on a detached thread from the `on_navigation` hook (which
+/// must never block the navigation decision).
 pub fn tint_popup_caption(app: &AppHandle, label: &str, url: &url::Url) {
-    let url_str = url.to_string();
-    // Skip when the address hasn't changed since the last tint.
-    if let Ok(map) = last_tint().try_lock() {
-        if map.get(label).is_some_and(|u| u == &url_str) {
-            return;
-        }
-    }
-    let window = match app.get_webview_window(label) {
-        Some(w) => w,
-        None => return,
-    };
-    let hwnd = match window.hwnd() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let hex = match crate::page_title::fetch_theme_color(&url_str) {
-        Some(h) => h,
-        None => return,
-    };
-    let (r, g, b) = match parse_hex_color(&hex) {
-        Some(t) => t,
-        None => return,
-    };
-    apply_caption_color(hwnd, r, g, b);
-    if let Ok(mut map) = last_tint().try_lock() {
-        map.insert(label.to_string(), url_str);
-    }
-}
-
-/// `#rrggbb` → `(r, g, b)`. Defensive: the fetcher already normalizes,
-/// but the tint path must never mis-parse into a garbage color.
-fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8)> {
-    let s = hex.strip_prefix('#')?;
-    if s.len() != 6 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let v = u32::from_str_radix(s, 16).ok()?;
-    Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
-}
-
-/// COLORREF is 0x00BBGGRR. Pre-Windows 11 the call fails; the silent
-/// fallback is the current bar.
-fn apply_caption_color(hwnd: HWND, r: u8, g: u8, b: u8) {
-    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR};
-    let colorref: u32 = r as u32 | ((g as u32) << 8) | ((b as u32) << 16);
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_CAPTION_COLOR,
-            &colorref as *const u32 as *const std::ffi::c_void,
-            std::mem::size_of::<u32>() as u32,
-        );
-    }
+    crate::tint::request_retint(app, label, url, crate::tint::TintTarget::NativeCaption);
 }
 
 /// The subclass proc. See the re-entrancy analysis at the top of this
@@ -291,22 +235,6 @@ fn subclass_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hex_color;
-
-    #[test]
-    fn hex_parses_to_rgb() {
-        assert_eq!(parse_hex_color("#1a2b3c"), Some((0x1a, 0x2b, 0x3c)));
-        assert_eq!(parse_hex_color("#FFFFFF"), Some((0xff, 0xff, 0xff)));
-    }
-
-    #[test]
-    fn hex_rejects_garbage() {
-        assert_eq!(parse_hex_color("1a2b3c"), None);
-        assert_eq!(parse_hex_color("#abc"), None);
-        assert_eq!(parse_hex_color("#gggggg"), None);
-        assert_eq!(parse_hex_color(""), None);
-    }
-
     // The range invariant is enforced at compile time by the const block
     // next to the id; this test documents the intent for readers.
     #[test]

@@ -53,6 +53,14 @@ mod clipboard_img;
 /// platform-gated inside.
 mod tabs;
 
+/// Copyable error dialogs (v0.11.0): central recent-errors ring buffer,
+/// `appmaka:error` event for the dialog, copy-diagnostics commands.
+mod errors;
+
+/// Universal title-bar blending (v0.11.0): one fallback chain
+/// (theme-color meta → live-DOM probe → default) for every window type.
+mod tint;
+
 use adblock::AdblockState;
 use launcher::{LauncherState, NativeProgram};
 use launcher_settings::{HotkeyStatus, LauncherSettings};
@@ -894,6 +902,8 @@ fn main() {
             app.manage(PreviewState::default());
             // Tabbed app windows (v0.10.0): live group bookkeeping.
             app.manage(tabs::TabState::default());
+            // Copyable error dialogs (v0.11.0): recent-errors ring buffer.
+            app.manage(Mutex::new(errors::ErrorLog::default()));
             // Session restore (v0.9.5): live search-window info for the
             // session file, plus the one-time "Ask me" offer flag.
             app.manage(session::SearchLiveState::default());
@@ -944,6 +954,18 @@ fn main() {
                     },
                     Err(e) => {
                         eprintln!("launcher hotkey: {e}");
+                        // v0.11.0: recorded for Copy diagnostics. The
+                        // settings banner shows it, so no dialog here.
+                        crate::errors::record(
+                            app.handle(),
+                            "hotkey",
+                            &format!(
+                                "The launcher shortcut {} couldn't be registered.",
+                                settings.hotkey
+                            ),
+                            &e,
+                            false,
+                        );
                         HotkeyStatus {
                             hotkey: settings.hotkey.clone(),
                             registered: false,
@@ -981,6 +1003,11 @@ fn main() {
             // v0.10.0 tabbed-window E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_tabs_flow(app.handle());
+            // v0.11.0 error-dialog + tint E2E drivers (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_error_flow(app.handle());
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_tint_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
@@ -1152,6 +1179,10 @@ fn main() {
             close_tab,
             close_tabbed_window,
             list_tabbed_windows,
+            // v0.11.0: copyable error dialogs
+            errors::get_recent_errors,
+            errors::copy_error_details,
+            errors::copy_diagnostics,
             // v0.7.0: back/forward navigation command (the visible floating
             // toolbar was removed in v0.8.4; Alt+Left/Right drive history
             // in-page, and this command stays registered for compatibility)

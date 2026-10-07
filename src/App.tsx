@@ -11,6 +11,8 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { isAppHidden } from "./visibility";
 import { RamDashboard } from "./RamDashboard";
 import { ForgetLoginDialog, forgetLogin } from "./ForgetLoginDialog";
+import { ErrorDialog } from "./ErrorDialog";
+import type { ErrorEntry } from "./ErrorDialog";
 import LinkPicker from "./LinkPicker";
 import type { LinkPickerAccount } from "./LinkPicker";
 import LinkRules from "./LinkRules";
@@ -1861,6 +1863,21 @@ function AppShell() {
   const [workspaceList, setWorkspaceList] = useState<WorkspaceList | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
+  // v0.11.0: copyable error dialogs. The backend emits `appmaka:error`
+  // for failures with no other surface (a popup that wouldn't open, a
+  // restore window that died). The latest error wins; the ring buffer
+  // keeps the full history for Copy diagnostics.
+  const [errorEntry, setErrorEntry] = useState<ErrorEntry | null>(null);
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    listen<ErrorEntry>("appmaka:error", (event) => setErrorEntry(event.payload))
+      .then((unlisten) => {
+        off = unlisten;
+      })
+      .catch(() => {});
+    return () => off?.();
+  }, []);
+
   // Refresh the program list whenever a scan finishes (startup scan or a
   // manual rescan), instead of only the one ~8s re-poll below.
   useProgramsScannedRefresh(setPrograms);
@@ -3401,6 +3418,13 @@ function AppShell() {
           accountLabel={forgetLoginTarget.account.label}
           onConfirm={() => void handleForgetLoginConfirm()}
           onCancel={() => setForgetLoginTarget(null)}
+        />
+      )}
+
+      {errorEntry && (
+        <ErrorDialog
+          entry={errorEntry}
+          onClose={() => setErrorEntry(null)}
         />
       )}
 

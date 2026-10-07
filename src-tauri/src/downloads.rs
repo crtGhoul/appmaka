@@ -652,6 +652,18 @@ pub fn make_download_handler(
                 if entry.state == "complete" {
                     write_zone_identifier(&entry.path, &entry.url);
                 }
+                // v0.11.0: failed downloads are recorded for Copy
+                // diagnostics. The downloads page shows the failure itself,
+                // so no dialog here.
+                if entry.state == "failed" {
+                    crate::errors::record(
+                        &app,
+                        "download",
+                        &format!("The download failed: {}", entry.filename),
+                        &format!("download failed: url={} path={}", entry.url, entry.path),
+                        false,
+                    );
+                }
                 emit_progress(&app, &entry);
             }
             true

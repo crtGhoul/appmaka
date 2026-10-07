@@ -1222,41 +1222,29 @@ fn refresh_strip(
 // Title-bar blending: active tab's theme-color -> strip background
 // ---------------------------------------------------------------------------
 
-/// Detached-thread entry: fetch the page's theme-color and tint the strip.
-/// Best-effort and silent, like popup_chrome.rs. Called on tab switch and
-/// on navigation (Windows only — Linux tints via the HTML strip).
-#[cfg(windows)]
+/// Detached-thread entry: tint the strip with the active tab's color.
+/// Called on tab switch and on navigation.
+///
+/// The group state's hex (fast HTTP path, synchronous) feeds the Linux
+/// HTML strip and the dashboard via the list response; on Windows the
+/// native strip additionally follows the full universal chain
+/// (theme-color → live-DOM probe → default) through `tint::request_retint`
+/// (v0.11.0).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn tint_tabbed_caption(app: &AppHandle, label: &str, url: &url::Url) {
     let url_str = url.to_string();
-    // Skip about:blank and non-http(s) — nothing to fetch.
-    if !(url_str.starts_with("http://") || url_str.starts_with("https://")) {
-        // Clear any previous tint (e.g. switched to the empty state).
-        set_group_tint(app, label, None);
-        crate::caption::tabbed_window_set_tint(label, None);
-        return;
-    }
-    let hex = match crate::page_title::fetch_theme_color(&url_str) {
-        Some(h) => h,
-        None => {
-            set_group_tint(app, label, None);
-            crate::caption::tabbed_window_set_tint(label, None);
-            return;
-        }
-    };
-    let (r, g, b) = match parse_hex_color(&hex) {
-        Some(t) => t,
-        None => return,
-    };
-    set_group_tint(app, label, Some(hex));
-    crate::caption::tabbed_window_set_tint(label, Some((r, g, b)));
+    let decision = crate::tint::resolve_fast(&url_str);
+    set_group_tint(
+        app,
+        label,
+        decision
+            .rgb
+            .map(|(r, g, b)| format!("#{r:02x}{g:02x}{b:02x}")),
+    );
+    crate::tint::request_retint(app, label, url, crate::tint::TintTarget::TabStrip);
 }
 
-/// No-op on Linux: the HTML strip tints itself from the list response.
-#[cfg(not(windows))]
-#[allow(dead_code)]
-pub fn tint_tabbed_caption(_app: &AppHandle, _label: &str, _url: &url::Url) {}
-
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn set_group_tint(app: &AppHandle, label: &str, tint: Option<String>) {
     if let Some(ts) = app.try_state::<TabState>() {
         if let Ok(mut state) = ts.inner.lock() {
@@ -1265,17 +1253,6 @@ fn set_group_tint(app: &AppHandle, label: &str, tint: Option<String>) {
             }
         }
     }
-}
-
-/// `#rrggbb` -> `(r, g, b)`. Same defensive shape as popup_chrome.rs.
-#[cfg_attr(not(any(test, windows)), allow(dead_code))]
-fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8)> {
-    let s = hex.strip_prefix('#')?;
-    if s.len() != 6 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let v = u32::from_str_radix(s, 16).ok()?;
-    Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
 }
 
 // ---------------------------------------------------------------------------
@@ -1316,7 +1293,7 @@ fn tab_strip_snapshot(store: &AppStore, group: &TabGroup) -> crate::caption::Tab
         tint: group
             .tint
             .as_deref()
-            .and_then(parse_hex_color),
+            .and_then(crate::tint::parse_css_color),
     }
 }
 
@@ -1608,14 +1585,5 @@ mod tests {
         assert_eq!(pin_key("g1-2"), "tabbed:g1-2");
         assert!(is_tabbed_label("tabbed-g1-2-g7"));
         assert!(!is_tabbed_label("acct-a-b"));
-    }
-
-    #[test]
-    fn hex_color_parsing() {
-        assert_eq!(parse_hex_color("#ff0000"), Some((255, 0, 0)));
-        assert_eq!(parse_hex_color("#1b1b1b"), Some((27, 27, 27)));
-        assert_eq!(parse_hex_color("ff0000"), None);
-        assert_eq!(parse_hex_color("#fff"), None);
-        assert_eq!(parse_hex_color("#zzzzzz"), None);
     }
 }

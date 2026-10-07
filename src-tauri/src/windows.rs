@@ -235,7 +235,7 @@ pub fn open_account_placed(
         .popup_policy
         .clone()
         .unwrap_or_else(|| web_app.settings.popup_policy.clone());
-    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(page_url))
+    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(page_url.clone()))
         .data_directory(session_dir.clone())
         .title(&title);
     // v0.9.6 (Windows): frameless — the native title bar and its X go away,
@@ -267,6 +267,27 @@ pub fn open_account_placed(
         // In-app download manager (v0.7.0): downloads stay in the account
         // window's own session instead of kicking out to the system browser.
         .on_download(crate::downloads::make_download_handler(app.clone()));
+    // v0.11.0: universal title-bar blending — re-tint the caption strip
+    // when the page navigates (theme-color can change per page). The hook
+    // must never block the navigation decision: it only hands the URL to
+    // a detached thread, and tint::request_retint dedupes + guards races.
+    #[cfg(windows)]
+    {
+        let tint_app = app.clone();
+        let tint_label = label.clone();
+        builder = builder.on_navigation(move |nav_url: &url::Url| {
+            let app = tint_app.clone();
+            let lbl = tint_label.clone();
+            let u = nav_url.clone();
+            std::thread::Builder::new()
+                .name(format!("appmaka-page-retint-{lbl}"))
+                .spawn(move || {
+                    crate::tint::request_retint(&app, &lbl, &u, crate::tint::TintTarget::PageStrip)
+                })
+                .ok();
+            true
+        });
+    }
     // Cosmetic filtering: engine-generated hide selectors injected before
     // first paint. Skipped entirely when no engine is loaded (fail open).
     // The target=_blank shim is always injected: without it WebKitGTK drops
@@ -279,15 +300,29 @@ pub fn open_account_placed(
     if !css.is_empty() {
         builder = builder.initialization_script(cosmetic_init_script(&css));
     }
-    let window = builder
-        .build()
-        .map_err(|e| format!("could not open account window: {e}"))?;
+    let window = builder.build().map_err(|e| {
+        let msg = format!("could not open account window: {e}");
+        // v0.11.0: recorded for Copy diagnostics. The launcher shows the
+        // inline error itself, so no dialog here.
+        crate::errors::record(
+            app,
+            "window-open",
+            "Could not open the app window.",
+            &msg,
+            false,
+        );
+        msg
+    })?;
     // v0.9.6: on Windows keep the DWM drop shadow on the frameless window
     // and attach our caption strip. On other platforms the caption calls
     // are no-ops.
     #[cfg(windows)]
     let _ = window.set_shadow(true);
     crate::caption::page_window_opened(app, &label, &window);
+    // v0.11.0: universal title-bar blending — tint the strip with the
+    // site's color (theme-color meta → page background → default).
+    #[cfg(windows)]
+    crate::tint::request_retint(app, &label, &page_url, crate::tint::TintTarget::PageStrip);
 
     // Per-account adblock override wins; None means "inherit the app setting"
     // (v0.8.1). This seeds the flag the Windows network blocker reads; the
@@ -633,6 +668,15 @@ fn spawn_contained_window(
                 }
                 Err(e) => {
                     eprintln!("[appmaka] {label_prefix} window failed for {log_ctx}: {e}");
+                    // v0.11.0: contained windows (popups, OAuth) have no
+                    // other error surface — record and pop the dialog.
+                    crate::errors::record(
+                        &window_app,
+                        "window-open",
+                        &format!("Could not open the {label_prefix} window."),
+                        &format!("{label_prefix} window failed for {log_ctx}: {e}"),
+                        true,
+                    );
                 }
             }
         });

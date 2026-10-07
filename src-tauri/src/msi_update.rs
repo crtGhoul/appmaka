@@ -93,9 +93,23 @@ pub async fn install_msi_update<R: Runtime>(
     #[cfg(windows)]
     {
         let app = app.clone();
-        tokio::task::spawn_blocking(move || run_msi_update(&app, &nsis_url, &version))
+        let record_app = app.clone();
+        let result = tokio::task::spawn_blocking(move || run_msi_update(&app, &nsis_url, &version))
             .await
-            .map_err(|e| format!("the update was interrupted ({e})."))?
+            .map_err(|e| format!("the update was interrupted ({e})."))
+            .and_then(|r| r);
+        if let Err(e) = &result {
+            // v0.11.0: recorded for Copy diagnostics. The updater panel
+            // shows the inline error itself, so no dialog here.
+            crate::errors::record(
+                &record_app,
+                "updater",
+                "The update couldn't be downloaded or installed.",
+                e,
+                false,
+            );
+        }
+        result
     }
 }
 

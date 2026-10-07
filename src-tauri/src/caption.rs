@@ -265,6 +265,12 @@ mod imp {
             label: String,
             tint: Option<(u8, u8, u8)>,
         },
+        /// v0.11.0: universal blending — tint a plain page window's strip
+        /// with its resolved site color (None clears back to dark).
+        SetPageTint {
+            label: String,
+            tint: Option<(u8, u8, u8)>,
+        },
         TabKey {
             label: String,
             action: crate::tabs::TabKeyAction,
@@ -292,6 +298,9 @@ mod imp {
         mouse_in: bool,
         /// v0.10.0: tab data for tabbed windows; None for plain page strips.
         tabbed: Option<TabStripData>,
+        /// v0.11.0: resolved site tint for plain page strips (None = the
+        /// dark default). Tabbed windows use `tabbed.tint` instead.
+        page_tint: Option<(u8, u8, u8)>,
         /// v0.10.0: hover/pressed tab-strip hit (TabHit), for painting.
         hover_tab: Option<crate::tabs::TabHit>,
         pressed_tab: Option<crate::tabs::TabHit>,
@@ -382,7 +391,7 @@ mod imp {
         }
         // Snapshot everything the paint needs under one short borrow, then
         // paint with no borrow held (the v0.9.7 two-phase rule).
-        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, hover_tab, pressed_tab) =
+        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, page_tint, hover_tab, pressed_tab) =
             with_chrome(|ch| {
                 let label = ch.by_hwnd.get(&(hwnd.0 as isize))?;
                 let cp = ch.captions.get(label)?;
@@ -394,18 +403,20 @@ mod imp {
                     cp.hover_max,
                     cp.pressed_max,
                     cp.tabbed.clone(),
+                    cp.page_tint,
                     cp.hover_tab,
                     cp.pressed_tab,
                 ))
             })
-            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None));
+            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None, None));
 
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
         // v0.10.0: the tabbed strip paints the active tab's theme-color as
-        // its background (the "blend the title bar" request); plain strips
-        // keep the dark default.
-        let tint = tabbed.as_ref().and_then(|t| t.tint);
+        // its background (the "blend the title bar" request); v0.11.0:
+        // plain page strips paint their resolved site tint the same way.
+        // Unresolved strips keep the dark default.
+        let tint = tabbed.as_ref().and_then(|t| t.tint).or(page_tint);
         let (br, bg_, bb) = tint.unwrap_or((27, 27, 27));
         let bg = CreateSolidBrush(rgb(br, bg_, bb));
         FillRect(hdc, &rc, bg);
@@ -1647,6 +1658,7 @@ mod imp {
                     pressed_max: false,
                     mouse_in: false,
                     tabbed,
+                    page_tint: None,
                     hover_tab: None,
                     pressed_tab: None,
                     syncing: false,
@@ -1917,6 +1929,24 @@ mod imp {
                     }
                 }
             }
+            ChromeCmd::SetPageTint { label, tint } => {
+                // Same two-phase discipline: mutate under a short borrow,
+                // invalidate after it is released.
+                let hwnd = with_chrome(|ch| {
+                    let cp = ch.captions.get_mut(&label)?;
+                    // Plain strips only: tabbed windows own their tint via
+                    // SetTabTint (the active tab's color).
+                    if cp.tabbed.is_none() {
+                        cp.page_tint = tint;
+                    }
+                    Some(cp.hwnd)
+                });
+                if let Some(hwnd) = hwnd {
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+            }
             ChromeCmd::TabKey { label, action } => {
                 // Ctrl+Tab et al: resolve the target tab and switch on a
                 // worker thread (window building never on the chrome
@@ -2155,12 +2185,33 @@ mod imp {
             }
         }
     }
+
+    /// v0.11.0: tint a plain page window's strip with its resolved site
+    /// color (None clears back to the dark default). No-op for tabbed
+    /// windows — those own their tint via `tabbed_window_set_tint`.
+    pub fn page_window_set_tint(label: &str, tint: Option<(u8, u8, u8)>) {
+        if let Some((tx, wake)) = CHROME_CTL.get() {
+            let _ = tx.send(ChromeCmd::SetPageTint {
+                label: label.to_string(),
+                tint,
+            });
+            unsafe {
+                let _ = SetEvent(wake.0);
+            }
+        }
+    }
+
+    /// v0.11.0: tint-decision log for `tint.rs`. Same file and rotation
+    /// policy as `caption_log` so one log tells the whole top-bar story.
+    pub fn tint_log(app: &AppHandle, msg: &str) {
+        caption_log(app, msg);
+    }
 }
 
 #[cfg(windows)]
 pub use imp::{
-    page_window_closed, page_window_moved, page_window_opened, tabbed_window_opened,
-    tabbed_window_set_tint, tabbed_window_updated, TabStripData,
+    page_window_closed, page_window_moved, page_window_opened, page_window_set_tint,
+    tabbed_window_opened, tabbed_window_set_tint, tabbed_window_updated, tint_log, TabStripData,
 };
 
 #[cfg(not(windows))]
@@ -2206,6 +2257,15 @@ pub fn tabbed_window_updated(_label: &str, _tabs: TabStripData) {}
 #[cfg(not(windows))]
 #[allow(dead_code)]
 pub fn tabbed_window_set_tint(_label: &str, _tint: Option<(u8, u8, u8)>) {}
+
+/// v0.11.0 non-Windows stubs: no caption strips on Linux.
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn page_window_set_tint(_label: &str, _tint: Option<(u8, u8, u8)>) {}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn tint_log(_app: &tauri::AppHandle, _msg: &str) {}
 
 #[cfg(test)]
 mod tests {

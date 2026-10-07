@@ -659,8 +659,36 @@ fn restore_filtered(app: &AppHandle, keep: &dyn Fn(&SessionWindow) -> bool) -> u
     // Release builds never contain this code.
     #[cfg(debug_assertions)]
     let mut fault_n = 0usize;
+    // v0.11.0: failed restores get a plain-language name for the dialog.
+    let describe = |w: &SessionWindow| -> String {
+        match w {
+            SessionWindow::Account {
+                app_id, account_id, ..
+            } => store
+                .get(app_id)
+                .ok()
+                .and_then(|a| {
+                    a.accounts
+                        .into_iter()
+                        .find(|ac| ac.id == *account_id)
+                        .map(|ac| (a.name, ac.label))
+                })
+                .map(|(name, label)| {
+                    if label.is_empty() {
+                        format!("the {name} window")
+                    } else {
+                        format!("{name} — {label}")
+                    }
+                })
+                .unwrap_or_else(|| "an app window".to_string()),
+            SessionWindow::Search { query, .. } => {
+                format!("the search window ({query})")
+            }
+            SessionWindow::Tabbed { .. } => "the tabbed window".to_string(),
+        }
+    };
     let mut open_one = |w: &SessionWindow| -> bool {
-        open_isolated(|| {
+        match open_isolated(|| {
             #[cfg(debug_assertions)]
             {
                 fault_n += 1;
@@ -715,7 +743,22 @@ fn restore_filtered(app: &AppHandle, keep: &dyn Fn(&SessionWindow) -> bool) -> u
                 .map(|_| ())
             }
             }
-        })
+        }) {
+            Ok(()) => true,
+            Err(e) => {
+                // v0.11.0: a failed restore used to be silent — record it
+                // and pop the copyable dialog so the user can report it.
+                let what = describe(w);
+                crate::errors::record(
+                    app,
+                    "restore",
+                    &format!("Could not restore {what} from your last session."),
+                    &format!("session restore failed for {what}: {e}"),
+                    true,
+                );
+                false
+            }
+        }
     };
     restore_entries(&restorable, &mut open_one, &mut || {
         std::thread::sleep(Duration::from_millis(150))
@@ -726,10 +769,11 @@ fn restore_filtered(app: &AppHandle, keep: &dyn Fn(&SessionWindow) -> bool) -> u
 /// failure and never propagates. (A panic on the restore thread would
 /// only kill the thread, but isolation keeps the remaining windows
 /// opening and the accounting honest.)
-fn open_isolated(f: impl FnOnce() -> Result<(), String>) -> bool {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
-        .map(|r| r.is_ok())
-        .unwrap_or(false)
+fn open_isolated(f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(_) => Err("the window open panicked.".to_string()),
+    }
 }
 
 /// Open entries in open order with a stagger between them (no thundering
@@ -1099,9 +1143,9 @@ mod tests {
 
     #[test]
     fn panicking_window_open_is_contained() {
-        assert!(!open_isolated(|| -> Result<(), String> { panic!("boom") }));
-        assert!(open_isolated(|| Ok(())));
-        assert!(!open_isolated(|| Err("nope".to_string())));
+        assert!(open_isolated(|| -> Result<(), String> { panic!("boom") }).is_err());
+        assert!(open_isolated(|| Ok(())).is_ok());
+        assert!(open_isolated(|| Err("nope".to_string())).is_err());
     }
 
     #[test]
@@ -1144,6 +1188,7 @@ mod tests {
                 }
                 Ok(())
             })
+            .is_ok()
         };
         let n2 = restore_entries(&entries, &mut open_flaky, &mut || {});
         assert_eq!(n2, 2);
