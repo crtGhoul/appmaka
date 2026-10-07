@@ -634,6 +634,16 @@ fn read_os_image(app: &AppHandle) -> Result<tauri::image::Image<'_>, String> {
     }
 }
 
+#[cfg(windows)]
+fn os_clipboard_seq() -> Option<u32> {
+    clipboard_win::raw::seq_num().map(|n| n.get())
+}
+
+#[cfg(not(windows))]
+fn os_clipboard_seq() -> Option<u32> {
+    None
+}
+
 /// Background watcher: one text read + compare and one image probe per
 /// tick. Started once from main.rs setup.
 pub fn start_watcher(app: AppHandle) {
@@ -652,8 +662,17 @@ pub fn start_watcher(app: AppHandle) {
     }
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(POLL_INTERVAL);
+        let mut last_seq = os_clipboard_seq();
         loop {
             interval.tick().await;
+            let current_seq = os_clipboard_seq();
+            if current_seq.is_some() && current_seq == last_seq {
+                // Clipboard sequence number is unchanged: skip text reading,
+                // image probe, DIB decoding, and hash calculations entirely.
+                // Eliminates continuous ~66-80 MB/tick heap allocation churn.
+                continue;
+            }
+            last_seq = current_seq;
             match app.clipboard().read_text() {
                 Ok(text) => {
                     observe(&app, text);

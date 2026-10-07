@@ -238,6 +238,17 @@ mod imp {
     }
 
     unsafe extern "system" fn hook_proc(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
+        // Never unwind across the FFI boundary: a panic in a hook proc
+        // aborts the process (AGENTS.md Win32/FFI Rule 1). Fail open.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hook_proc_inner(n_code, w_param, l_param)
+        })) {
+            Ok(lr) => lr,
+            Err(_) => CallNextHookEx(None, n_code, w_param, l_param),
+        }
+    }
+
+    unsafe fn hook_proc_inner(n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
         if n_code >= 0 {
             let w = w_param.0 as u32;
             let down = w == WM_KEYDOWN || w == WM_SYSKEYDOWN;

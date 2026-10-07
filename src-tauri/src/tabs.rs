@@ -1251,18 +1251,21 @@ pub fn live_tab_groups(app: &AppHandle) -> Vec<LiveTabGroup> {
     };
     match app.try_state::<TabState>() {
         Some(ts) => match ts.inner.lock() {
-            Ok(state) => state
-                .values()
-                .filter(|g| app.get_webview_window(&g.label).is_some())
-                .map(|g| LiveTabGroup {
-                    id: g.id.clone(),
-                    tabs: g.tabs.clone(),
-                    active: g.active,
-                    label: g.label.clone(),
-                    pinned: crate::pin::is_pinned(app, &pin_key(&g.id)),
-                    tab_names: g.tabs.iter().map(|t| tab_summary(&store, t)).collect(),
-                })
-                .collect(),
+            Ok(state) => {
+                let snapshots: Vec<TabGroup> = state.values().cloned().collect();
+                snapshots
+                    .into_iter()
+                    .filter(|g| app.get_webview_window(&g.label).is_some())
+                    .map(|g| LiveTabGroup {
+                        id: g.id.clone(),
+                        tabs: g.tabs.clone(),
+                        active: g.active,
+                        label: g.label.clone(),
+                        pinned: crate::pin::is_pinned(app, &pin_key(&g.id)),
+                        tab_names: g.tabs.iter().map(|t| tab_summary(&store, t)).collect(),
+                    })
+                    .collect()
+            }
             Err(_) => Vec::new(),
         },
         None => Vec::new(),
