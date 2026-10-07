@@ -94,7 +94,7 @@ authors = ["AppMaka"]
 description = "Turn any website into a desktop web app"
 edition = "2021"
 name = "appmaka"
-version = "0.9.12"
+version = "0.10.0"
 
 # v0.9.8: native save dialog inside the download `Requested` handler.
 # The download callback runs on the main thread on both platforms (WebView2's

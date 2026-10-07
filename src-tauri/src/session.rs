@@ -59,6 +59,20 @@ pub enum SessionWindow {
         #[serde(default)]
         pinned: bool,
     },
+    /// v0.10.0: tabbed app window. `id` is the stable group id (pins key
+    /// off `tabbed:{id}`); old files lack the variant entirely.
+    Tabbed {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        tabs: Vec<crate::tabs::TabEntry>,
+        #[serde(default)]
+        active: usize,
+        #[serde(default)]
+        rect: Option<WindowRect>,
+        #[serde(default)]
+        pinned: bool,
+    },
 }
 
 impl SessionWindow {
@@ -67,6 +81,7 @@ impl SessionWindow {
         match self {
             SessionWindow::Account { pinned, .. } => *pinned,
             SessionWindow::Search { pinned, .. } => *pinned,
+            SessionWindow::Tabbed { pinned, .. } => *pinned,
         }
     }
 }
@@ -116,6 +131,9 @@ pub fn parse_session(raw: &str) -> Session {
                 ..
             } => !app_id.is_empty() && !account_id.is_empty(),
             SessionWindow::Search { query, .. } => !query.trim().is_empty(),
+            SessionWindow::Tabbed { id, tabs, .. } => {
+                !id.is_empty() && tabs.iter().any(|t| t.valid())
+            }
         })
         .collect();
     Session { windows }
@@ -193,6 +211,7 @@ pub fn merge_rect(
 pub fn build_session(
     accounts: Vec<(String, String, Option<WindowRect>, u64)>,
     search: Option<(String, Option<WindowRect>, u64)>,
+    tabbed: Vec<crate::tabs::TabbedRestoreSpec>,
     pinned_for: &dyn Fn(&str) -> bool,
 ) -> Session {
     let mut entries: Vec<(u64, SessionWindow)> = Vec::new();
@@ -215,6 +234,21 @@ pub fn build_session(
                 query,
                 rect,
                 pinned: pinned_for(SEARCH_WINDOW_LABEL),
+            },
+        ));
+    }
+    // v0.10.0: tabbed windows. Pins key off the stable group id
+    // (`tabbed:{id}`), never the generation-suffixed window label.
+    for (id, tabs, active, rect, opened_at) in tabbed {
+        let pinned = pinned_for(&crate::tabs::pin_key(&id));
+        entries.push((
+            opened_at,
+            SessionWindow::Tabbed {
+                id,
+                tabs,
+                active,
+                rect,
+                pinned,
             },
         ));
     }
@@ -241,6 +275,11 @@ pub fn partition_restorable<'a>(
                 ..
             } => account_exists(app_id, account_id),
             SessionWindow::Search { .. } => true,
+            // A tabbed window restores when at least one tab still
+            // exists; dead tabs are dropped at open time.
+            SessionWindow::Tabbed { tabs, .. } => tabs
+                .iter()
+                .any(|t| account_exists(&t.app_id, &t.account_id)),
         })
         .collect()
 }
@@ -394,6 +433,14 @@ fn prev_search_rect(session: &Session) -> Option<WindowRect> {
     })
 }
 
+/// v0.10.0: last known rect of a tabbed group, by stable group id.
+fn prev_tabbed_rect(session: &Session, id: &str) -> Option<WindowRect> {
+    session.windows.iter().find_map(|w| match w {
+        SessionWindow::Tabbed { id: gid, rect, .. } if gid == id => rect.clone(),
+        _ => None,
+    })
+}
+
 /// Current logical-pixel rect of a window. None when minimized (minimized
 /// windows report junk coordinates — the caller keeps the last good
 /// position) or when the geometry is unreadable.
@@ -496,9 +543,26 @@ pub fn write_session(app: &AppHandle) {
         });
     save_session(
         app,
-        &build_session(accounts, search, &|label| {
-            crate::pin::is_pinned(app, label)
-        }),
+        &build_session(
+            accounts,
+            search,
+            // v0.10.0: live tabbed groups. Written with "now" as the
+            // ordering key, so tabbed windows deterministically restore
+            // after account windows.
+            crate::tabs::live_tab_groups(app)
+                .into_iter()
+                .map(|g| {
+                    let rect = merge_rect(
+                        app.get_webview_window(&g.label)
+                            .as_ref()
+                            .and_then(live_window_rect),
+                        prev_tabbed_rect(&prev, &g.id),
+                    );
+                    (g.id, g.tabs, g.active, rect, unix_millis())
+                })
+                .collect(),
+            &|label| crate::pin::is_pinned(app, label),
+        ),
     );
 }
 
@@ -569,10 +633,11 @@ fn restore_filtered(app: &AppHandle, keep: &dyn Fn(&SessionWindow) -> bool) -> u
     if session.windows.is_empty() {
         return 0;
     }
-    let (Some(store), Some(adblock), Some(winstate)) = (
+    let (Some(store), Some(adblock), Some(winstate), Some(tabstate)) = (
         app.try_state::<AppStore>(),
         app.try_state::<AdblockState>(),
         app.try_state::<WindowState>(),
+        app.try_state::<crate::tabs::TabState>(),
     ) else {
         return 0;
     };
@@ -622,6 +687,32 @@ fn restore_filtered(app: &AppHandle, keep: &dyn Fn(&SessionWindow) -> bool) -> u
             SessionWindow::Search { query, rect, .. } => {
                 let placement = placement_for_rect(rect.as_ref(), &monitors);
                 crate::websearch::open_search_window_placed(app, &adblock, query, placement)
+            }
+            // v0.10.0: tabbed windows restore with their saved tab set;
+            // the active tab opens live, the rest are lazy (nothing
+            // exists until first click). Dead tabs are dropped by the
+            // open call itself.
+            SessionWindow::Tabbed {
+                id,
+                tabs,
+                active,
+                rect,
+                ..
+            } => {
+                let placement = placement_for_rect(rect.as_ref(), &monitors);
+                crate::tabs::open_tabbed_window(
+                    app,
+                    &store,
+                    &adblock,
+                    &tabstate,
+                    crate::tabs::OpenTabbedParams {
+                        initial: tabs.clone(),
+                        active: *active,
+                        placement,
+                        restore_id: Some(id.clone()),
+                    },
+                )
+                .map(|_| ())
             }
             }
         })
@@ -804,6 +895,23 @@ pub fn take_restore_offer(app: &AppHandle) -> Option<SessionRestoreOffer> {
                 let short: String = query.chars().take(32).collect();
                 names.push(format!("Search: \"{short}\""));
             }
+            // v0.10.0: name the first few tabs so the offer reads like
+            // the account entries above it.
+            SessionWindow::Tabbed { tabs, .. } => {
+                let mut tab_names: Vec<String> = Vec::new();
+                if let Some(s) = store.as_deref() {
+                    for t in tabs.iter().take(3) {
+                        if let Ok(a) = s.get(&t.app_id) {
+                            tab_names.push(a.name.clone());
+                        }
+                    }
+                }
+                if tab_names.is_empty() {
+                    names.push(format!("Tabbed window ({} tabs)", tabs.len()));
+                } else {
+                    names.push(format!("Tabbed: {}", tab_names.join(", ")));
+                }
+            }
         }
     }
     Some(SessionRestoreOffer {
@@ -835,6 +943,7 @@ mod tests {
                 ("app2".into(), "acc2".into(), None, 50),
             ],
             Some(("hello".into(), rect(0, 0, 1200, 800), 75)),
+            vec![],
             &|_| false,
         );
         // Sorted by open time regardless of input order.
@@ -952,6 +1061,7 @@ mod tests {
                 ("app1".into(), "here".into(), None, 2),
             ],
             Some(("q".into(), None, 3)),
+            vec![],
             &|_| false,
         );
         let exists = |app_id: &str, account_id: &str| app_id == "app1" && account_id == "here";
@@ -1003,6 +1113,7 @@ mod tests {
                 ("a".into(), "3".into(), None, 2),
             ],
             None,
+            vec![],
             &|_| false,
         );
         let exists = |_: &str, _: &str| true;
@@ -1045,6 +1156,7 @@ mod tests {
         let session = build_session(
             vec![("app1".into(), "acc1".into(), None, 1)],
             Some(("q".into(), None, 2)),
+            vec![],
             &|label| label == "acct-app1-acc1",
         );
         assert!(session.windows[0].pinned());
@@ -1079,6 +1191,7 @@ mod tests {
                 ("app1".into(), "askme".into(), None, 2),
             ],
             None,
+            vec![],
             &|label| label == "acct-app1-keep",
         );
         // Normal ask-mode: pinned entries restore directly, offer skips them.

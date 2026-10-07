@@ -524,6 +524,32 @@ button.cmd-row:focus-visible {
   font-size: 12px;
 }
 
+/* v0.10.0: tabbed-window rows — section subtitle + per-tab chips. */
+.modal-subtitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f2f3f5;
+  margin: 14px 0 6px;
+}
+
+.ram-tab-chip {
+  display: inline-block;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.65);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin: 1px 4px 1px 0;
+  white-space: nowrap;
+}
+
+.ram-tab-chip.active {
+  color: #c7d2fe;
+  background: rgba(129, 140, 248, 0.16);
+  border-color: rgba(129, 140, 248, 0.4);
+}
+
 /* v0.9.9: "Don't close this window" toggle sits under each window row. */
 .ram-row-wrap {
   flex-wrap: wrap;

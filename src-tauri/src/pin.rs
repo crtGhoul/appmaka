@@ -104,6 +104,11 @@ pub(crate) fn seed_labels(windows: &[crate::session::SessionWindow]) -> Vec<Stri
             crate::session::SessionWindow::Search { .. } => {
                 crate::websearch::SEARCH_WINDOW_LABEL.to_string()
             }
+            // v0.10.0: tabbed groups pin by stable group id, never the
+            // generation-suffixed window label.
+            crate::session::SessionWindow::Tabbed { id, .. } => {
+                crate::tabs::pin_key(id)
+            }
         })
         .collect()
 }

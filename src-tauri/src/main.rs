@@ -47,6 +47,11 @@ mod debug_e2e;
 /// Clipboard image reading beyond the plugin's format list (v0.9.2):
 /// direct DIB reads on Windows, image/bmp fallback on Linux.
 mod clipboard_img;
+/// Tabbed app windows (v0.10.0): one window, many apps, one live webview.
+/// The pure tab logic compiles everywhere (unit-tested on all platforms);
+/// only the Win32 strip painting/hook and the Linux strip window are
+/// platform-gated inside.
+mod tabs;
 
 use adblock::AdblockState;
 use launcher::{LauncherState, NativeProgram};
@@ -217,6 +222,94 @@ async fn open_account(
     account_id: String,
 ) -> Result<(), String> {
     windows::open_account(&app, &store, &adblock, &winstate, &app_id, &account_id)
+}
+
+// ---------------------------------------------------------------------------
+// v0.10.0: tabbed app windows — command wrappers live here (like
+// open_account above); the core logic lives in tabs.rs.
+// ---------------------------------------------------------------------------
+
+/// Open a new tabbed window. Starts empty (about:blank); the user adds
+/// tabs via +. Async: builds a window (never on a sync IPC thread).
+/// JS: `invoke("open_tabbed_window", {})`
+#[tauri::command]
+async fn open_tabbed_window(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    tabstate: State<'_, tabs::TabState>,
+) -> Result<tabs::TabInfo, String> {
+    tabs::open_tabbed_window(&app, &store, &adblock, &tabstate, tabs::OpenTabbedParams::default())
+}
+
+/// Switch the active tab (rebuilds the webview on the new tab's session).
+/// JS: `invoke("switch_tab", { groupId, index })`
+#[tauri::command]
+async fn switch_tab(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    tabstate: State<'_, tabs::TabState>,
+    group_id: String,
+    index: usize,
+) -> Result<tabs::TabInfo, String> {
+    tabs::switch_tab(&app, &store, &adblock, &tabstate, &group_id, index)
+}
+
+/// Add an (app, account) tab and switch to it.
+/// JS: `invoke("add_tab", { groupId, appId, accountId })`
+#[tauri::command]
+async fn add_tab(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    tabstate: State<'_, tabs::TabState>,
+    group_id: String,
+    app_id: String,
+    account_id: String,
+) -> Result<tabs::TabInfo, String> {
+    tabs::add_tab(
+        &app,
+        &store,
+        &adblock,
+        &tabstate,
+        &group_id,
+        &app_id,
+        &account_id,
+    )
+}
+
+/// Close one tab. Closing the last tab closes the group.
+/// JS: `invoke("close_tab", { groupId, index })`
+#[tauri::command]
+async fn close_tab(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    tabstate: State<'_, tabs::TabState>,
+    group_id: String,
+    index: usize,
+) -> Result<tabs::TabInfo, String> {
+    tabs::close_tab(&app, &store, &adblock, &tabstate, &group_id, index)
+}
+
+/// Close a whole tabbed window (dashboard row / strip X). Pinned groups
+/// get the one native confirm. Sync: closing never deadlocks.
+/// JS: `invoke("close_tabbed_window", { groupId })`
+#[tauri::command]
+fn close_tabbed_window(
+    app: AppHandle,
+    tabstate: State<'_, tabs::TabState>,
+    group_id: String,
+) -> Result<(), String> {
+    tabs::close_tabbed_window(&app, &tabstate, &group_id)
+}
+
+/// Dashboard rows: one per open tabbed window.
+/// JS: `invoke("list_tabbed_windows")`
+#[tauri::command]
+fn list_tabbed_windows(app: AppHandle) -> Vec<tabs::TabbedWindowInfo> {
+    tabs::list_tabbed_windows(&app)
 }
 
 #[tauri::command]
@@ -799,6 +892,8 @@ fn main() {
             app.manage(store);
             app.manage(WindowState::default());
             app.manage(PreviewState::default());
+            // Tabbed app windows (v0.10.0): live group bookkeeping.
+            app.manage(tabs::TabState::default());
             // Session restore (v0.9.5): live search-window info for the
             // session file, plus the one-time "Ask me" offer flag.
             app.manage(session::SearchLiveState::default());
@@ -883,6 +978,9 @@ fn main() {
             // v0.9.12 clipboard pinning E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_clipboard_flow(app.handle());
+            // v0.10.0 tabbed-window E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_tabs_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
@@ -1047,6 +1145,13 @@ fn main() {
             // v0.9.9: "Don't close this window" pin commands
             pin::set_window_pinned,
             pin::window_pinned,
+            // v0.10.0: tabbed app windows
+            open_tabbed_window,
+            switch_tab,
+            add_tab,
+            close_tab,
+            close_tabbed_window,
+            list_tabbed_windows,
             // v0.7.0: back/forward navigation command (the visible floating
             // toolbar was removed in v0.8.4; Alt+Left/Right drive history
             // in-page, and this command stays registered for compatibility)

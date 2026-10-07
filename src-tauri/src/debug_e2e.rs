@@ -28,6 +28,246 @@ pub fn maybe_run_popup_flow(app: &AppHandle) {
         .spawn(move || run_flow(&app, &url, &mode));
 }
 
+// ---------------------------------------------------------------------------
+// v0.10.0 tabbed-window E2E driver (Xvfb smoke).
+//
+// Driven by `APPMAKA_DEBUG_TABS_MODE=tabs` (full flow) or `=verify`
+// (post-restart check). The headless E2E cannot click the native strip
+// (Windows) or the HTML strip (mouse doesn't reach the webview under
+// Xvfb), so this exercises the exact backend functions the strip, the
+// hook, and the dashboard call: open/add/switch/close_tab/gesture-close/
+// list, then the session restore path. The shell script seeds apps.json
+// with two apps first.
+//
+// Same contract as the other flows: debug builds only, inert without the
+// env var, detached thread, never blocks startup.
+
+/// Called once from setup. Returns immediately.
+pub fn maybe_run_tabs_flow(app: &AppHandle) {
+    let mode = std::env::var("APPMAKA_DEBUG_TABS_MODE").unwrap_or_default();
+    if mode != "tabs" && mode != "verify" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-tabs".to_string())
+        .spawn(move || {
+            if mode == "verify" {
+                run_tabs_verify(&app);
+            } else {
+                run_tabs_flow(&app);
+            }
+        });
+}
+
+fn run_tabs_flow(app: &AppHandle) {
+    use crate::tabs;
+    // Let startup, state load, and the store settle.
+    std::thread::sleep(std::time::Duration::from_secs(6));
+
+    let store = match app.try_state::<crate::store::AppStore>() {
+        Some(s) => s,
+        None => {
+            eprintln!("[e2e] tabs: no AppStore state");
+            return;
+        }
+    };
+    let adblock = match app.try_state::<crate::adblock::AdblockState>() {
+        Some(s) => s,
+        None => {
+            eprintln!("[e2e] tabs: no AdblockState");
+            return;
+        }
+    };
+    let tabstate = match app.try_state::<tabs::TabState>() {
+        Some(s) => s,
+        None => {
+            eprintln!("[e2e] tabs: no TabState");
+            return;
+        }
+    };
+    let apps: Vec<String> = match store.list() {
+        Ok(list) => list.iter().map(|a| a.id.clone()).collect(),
+        Err(e) => {
+            eprintln!("[e2e] tabs: store.list failed: {e}");
+            return;
+        }
+    };
+    eprintln!("[e2e] tabs: seeded apps: {}", apps.join(","));
+    if apps.len() < 2 {
+        eprintln!("[e2e] tabs: need 2 seeded apps");
+        return;
+    }
+    let first_account = |app_id: &str| -> Option<String> {
+        store
+            .get(app_id)
+            .ok()
+            .and_then(|a| a.accounts.first().map(|ac| ac.id.clone()))
+    };
+    let acc0 = first_account(&apps[0]).unwrap_or_default();
+    let acc1 = first_account(&apps[1]).unwrap_or_default();
+
+    // 1. Open an empty tabbed window.
+    let info = match tabs::open_tabbed_window(
+        app,
+        &store,
+        &adblock,
+        &tabstate,
+        tabs::OpenTabbedParams::default(),
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[e2e] tabs: open failed: {e}");
+            return;
+        }
+    };
+    let gid = info.group_id.clone();
+    eprintln!(
+        "[e2e] tabs: opened group {} tabs={} active={}",
+        gid,
+        info.tabs.len(),
+        info.active
+    );
+
+    // 2. Add two tabs.
+    let info = match tabs::add_tab(app, &store, &adblock, &tabstate, &gid, &apps[0], &acc0) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[e2e] tabs: add tab 0 failed: {e}");
+            return;
+        }
+    };
+    eprintln!(
+        "[e2e] tabs: after add0 tabs={} active={}",
+        info.tabs.len(),
+        info.active
+    );
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let info = match tabs::add_tab(app, &store, &adblock, &tabstate, &gid, &apps[1], &acc1) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[e2e] tabs: add tab 1 failed: {e}");
+            return;
+        }
+    };
+    eprintln!(
+        "[e2e] tabs: after add1 tabs={} active={}",
+        info.tabs.len(),
+        info.active
+    );
+    std::thread::sleep(std::time::Duration::from_secs(4));
+
+    // 3. Switch back to tab 0: the live window must follow.
+    let info = match tabs::switch_tab(app, &store, &adblock, &tabstate, &gid, 0) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[e2e] tabs: switch failed: {e}");
+            return;
+        }
+    };
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let live_url = tabs::live_tab_groups(app)
+        .into_iter()
+        .find(|g| g.id == gid)
+        .and_then(|g| app.get_webview_window(&g.label))
+        .and_then(|w| w.url().ok())
+        .map(|u| u.to_string())
+        .unwrap_or_default();
+    eprintln!(
+        "[e2e] tabs: after switch active={} live_url={}",
+        info.active, live_url
+    );
+
+    // 4. Esc+LMB gesture with 2 tabs: closes the ACTIVE TAB, not the window.
+    tabs::gesture_close_active_tab(app, &info_label(app, &gid));
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let rows = tabs::list_tabbed_windows(app);
+    let g = rows.iter().find(|r| r.group_id == gid);
+    eprintln!(
+        "[e2e] tabs: after gesture tabs={} group_alive={}",
+        g.map(|r| r.tabs.len()).unwrap_or(0),
+        g.is_some()
+    );
+
+    // 5. Close the last tab: the group goes away (browser behavior).
+    if let Some(g) = g {
+        let _ = tabs::close_tab(app, &store, &adblock, &tabstate, &gid, g.active);
+    }
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let alive = tabs::list_tabbed_windows(app)
+        .iter()
+        .any(|r| r.group_id == gid);
+    eprintln!("[e2e] tabs: after last-tab close group_alive={alive}");
+
+    // 6. Reopen with 2 tabs for the persistence round-trip: the shell
+    // script kills -9 the app, relaunches with mode=verify, and the
+    // session restore must bring the tab set back.
+    let info = tabs::open_tabbed_window(
+        app,
+        &store,
+        &adblock,
+        &tabstate,
+        tabs::OpenTabbedParams {
+            initial: vec![
+                tabs::TabEntry {
+                    app_id: apps[0].clone(),
+                    account_id: acc0.clone(),
+                    last_url: None,
+                },
+                tabs::TabEntry {
+                    app_id: apps[1].clone(),
+                    account_id: acc1.clone(),
+                    last_url: None,
+                },
+            ],
+            active: 1,
+            ..Default::default()
+        },
+    );
+    match info {
+        Ok(i) => {
+            std::thread::sleep(std::time::Duration::from_secs(4));
+            eprintln!(
+                "[e2e] tabs: persist group {} tabs={} active={}",
+                i.group_id,
+                i.tabs.len(),
+                i.active
+            );
+        }
+        Err(e) => eprintln!("[e2e] tabs: persist open failed: {e}"),
+    }
+    eprintln!("[e2e] tabs: flow done");
+}
+
+/// Current live window label for a group (for the gesture entry point).
+fn info_label(app: &AppHandle, group_id: &str) -> String {
+    crate::tabs::live_tab_groups(app)
+        .into_iter()
+        .find(|g| g.id == group_id)
+        .map(|g| g.label)
+        .unwrap_or_default()
+}
+
+/// Post-restart: run the real session restore, then report the tabbed
+/// groups. The shell script asserts the tab set + active tab survived.
+fn run_tabs_verify(app: &AppHandle) {
+    use crate::tabs;
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    let n = crate::session::restore_session_now(app);
+    eprintln!("[e2e] tabs: restore_session_now reopened {n}");
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    for g in tabs::list_tabbed_windows(app) {
+        let names: Vec<String> = g.tabs.iter().map(|t| t.app_name.clone()).collect();
+        eprintln!(
+            "[e2e] tabs: restored group tabs={} active={} names={}",
+            g.tabs.len(),
+            g.active,
+            names.join(",")
+        );
+    }
+    eprintln!("[e2e] tabs: verify done");
+}
+
 fn run_flow(app: &AppHandle, url: &str, mode: &str) {
     // Give the app time to finish starting up before opening anything.
     std::thread::sleep(std::time::Duration::from_secs(5));

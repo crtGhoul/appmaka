@@ -1994,6 +1994,25 @@ function AppShell() {
     }
   }
 
+  // v0.10.0: one obvious entry point for tabbed windows. Opens an empty
+  // tabbed window (about:blank); the user adds apps via the + picker.
+  // Spotlight behavior: a successful open dismisses the overlay.
+  const [openingTabs, setOpeningTabs] = useState(false);
+  async function handleOpenTabbedWindow() {
+    if (openingTabs) return;
+    setOpeningTabs(true);
+    setError(null);
+    try {
+      await invoke("open_tabbed_window", {});
+      setQuery("");
+      await invoke("hide_library");
+    } catch (err) {
+      setError(errMsg(err));
+    } finally {
+      setOpeningTabs(false);
+    }
+  }
+
   useEffect(() => {
     void checkRestoreOffer();
     void refreshWindowPins();
@@ -2912,6 +2931,15 @@ function AppShell() {
               onClick={() => void handleRestoreSession()}
             >
               Restore session
+            </button>
+            <button
+              type="button"
+              className="text-button"
+              title="Open one window with tabs for several apps"
+              onClick={() => void handleOpenTabbedWindow()}
+              disabled={openingTabs}
+            >
+              {openingTabs ? "Opening…" : "Open tabbed window"}
             </button>
           </div>
           <div className="folder-grid-wrap">

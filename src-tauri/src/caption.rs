@@ -248,6 +248,37 @@ mod imp {
         ClosePage {
             label: String,
         },
+        // v0.10.0: tabbed windows. The strip paints tabs from a snapshot;
+        // clicks/keys arrive as commands and are fanned out to tabs.rs on
+        // worker threads (window building never happens in the proc).
+        AddTabbedCaption {
+            owner: isize,
+            label: String,
+            scale: f64,
+            tabs: TabStripData,
+        },
+        UpdateTabbedTabs {
+            label: String,
+            tabs: TabStripData,
+        },
+        SetTabTint {
+            label: String,
+            tint: Option<(u8, u8, u8)>,
+        },
+        TabKey {
+            label: String,
+            action: crate::tabs::TabKeyAction,
+        },
+    }
+
+    /// Tab names + active index + theme tint snapshot for one tabbed strip
+    /// (v0.10.0). Built by tabs.rs; the strip only ever paints from the
+    /// latest snapshot — no store lookups on the chrome thread.
+    #[derive(Debug, Clone)]
+    pub struct TabStripData {
+        pub tabs: Vec<String>,
+        pub active: usize,
+        pub tint: Option<(u8, u8, u8)>,
     }
 
     struct Caption {
@@ -259,6 +290,11 @@ mod imp {
         hover_max: bool,
         pressed_max: bool,
         mouse_in: bool,
+        /// v0.10.0: tab data for tabbed windows; None for plain page strips.
+        tabbed: Option<TabStripData>,
+        /// v0.10.0: hover/pressed tab-strip hit (TabHit), for painting.
+        hover_tab: Option<crate::tabs::TabHit>,
+        pressed_tab: Option<crate::tabs::TabHit>,
         /// True while we are moving the caption ourselves (from the owner's
         /// Moved/Resized events): WM_WINDOWPOSCHANGED must not echo the move
         /// back onto the owner.
@@ -344,7 +380,9 @@ mod imp {
         if hdc.is_invalid() {
             return;
         }
-        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max) =
+        // Snapshot everything the paint needs under one short borrow, then
+        // paint with no borrow held (the v0.9.7 two-phase rule).
+        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, hover_tab, pressed_tab) =
             with_chrome(|ch| {
                 let label = ch.by_hwnd.get(&(hwnd.0 as isize))?;
                 let cp = ch.captions.get(label)?;
@@ -355,15 +393,28 @@ mod imp {
                     cp.pressed_min,
                     cp.hover_max,
                     cp.pressed_max,
+                    cp.tabbed.clone(),
+                    cp.hover_tab,
+                    cp.pressed_tab,
                 ))
             })
-            .unwrap_or((1.0, HWND::default(), false, false, false, false));
+            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None));
 
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
-        let bg = CreateSolidBrush(rgb(27, 27, 27));
+        // v0.10.0: the tabbed strip paints the active tab's theme-color as
+        // its background (the "blend the title bar" request); plain strips
+        // keep the dark default.
+        let tint = tabbed.as_ref().and_then(|t| t.tint);
+        let (br, bg_, bb) = tint.unwrap_or((27, 27, 27));
+        let bg = CreateSolidBrush(rgb(br, bg_, bb));
         FillRect(hdc, &rc, bg);
         let _ = DeleteObject(hbrush_to_obj(bg));
+
+        // v0.10.0: tab strip for tabbed windows.
+        if let Some(td) = tabbed.as_ref() {
+            paint_tabs(hdc, hwnd, scale, td, tint, hover_tab, pressed_tab);
+        }
 
         // Maximize/restore button (v0.9.9): one slot left of minimize,
         // same dark styling. Glyph follows the owner's zoom state — a
@@ -445,7 +496,196 @@ mod imp {
             FillRect(hdc, &grc, glyph);
             let _ = DeleteObject(hbrush_to_obj(glyph));
         }
+        // v0.10.0: tabbed strips get a window close (X) button in the
+        // third slot — an empty group has no tab to close, so the window
+        // needs its own X. Plain page strips keep min/max only.
+        if tabbed.is_some() {
+            paint_x_button(hdc, hwnd, scale, tint, hover_tab, pressed_tab);
+        }
         let _ = EndPaint(hwnd, &ps);
+    }
+
+    /// Window close (X) button for tabbed strips: third slot from the
+    /// right, drawn as text so no diagonal-bar geometry is needed.
+    unsafe fn paint_x_button(
+        hdc: HDC,
+        hwnd: HWND,
+        scale: f64,
+        tint: Option<(u8, u8, u8)>,
+        hover_tab: Option<crate::tabs::TabHit>,
+        pressed_tab: Option<crate::tabs::TabHit>,
+    ) {
+        use crate::tabs::TabHit;
+        let Some(btn) = button_rect_at(hwnd, scale, 2) else {
+            return;
+        };
+        let hovered = hover_tab == Some(TabHit::CloseWindow);
+        let pressed = pressed_tab == Some(TabHit::CloseWindow);
+        if hovered || pressed {
+            // Close hover goes red, like the native button.
+            let bbg = CreateSolidBrush(if pressed {
+                rgb(196, 43, 28)
+            } else {
+                rgb(232, 17, 35)
+            });
+            FillRect(hdc, &btn, bbg);
+            let _ = DeleteObject(hbrush_to_obj(bbg));
+        }
+        let light = tint.map(|(r, g, b)| crate::tabs::tint_wants_light_text(r, g, b));
+        let color = match (hovered || pressed, light) {
+            (true, _) => rgb(255, 255, 255),
+            (false, Some(false)) => rgb(40, 40, 40),
+            _ => rgb(204, 204, 204),
+        };
+        draw_text_centered(hdc, btn, "×", scale, color);
+    }
+
+    /// DrawTextW helper: single-line, vertically centered text in a rect.
+    /// Selects a Segoe UI font, restores the DC, deletes the font.
+    unsafe fn draw_text_centered(hdc: HDC, rc: RECT, text: &str, scale: f64, color: COLORREF) {
+        draw_text_in(hdc, rc, text, scale, color, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
+    unsafe fn draw_text_in(
+        hdc: HDC,
+        mut rc: RECT,
+        text: &str,
+        scale: f64,
+        color: COLORREF,
+        format: DRAW_TEXT_FORMAT,
+    ) {
+        let height = -((12.0 * scale).round() as i32).max(1);
+        let font = CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            w!("Segoe UI"),
+        );
+        if font.is_invalid() {
+            return;
+        }
+        let old = SelectObject(hdc, font.into());
+        let _ = SetTextColor(hdc, color);
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let mut wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        DrawTextW(hdc, &mut wide, &mut rc, format);
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(font.into());
+    }
+
+    /// Paint the tab strip: one tab per entry (active highlighted), a "+"
+    /// button after the last tab. Text truncates with an ellipsis.
+    unsafe fn paint_tabs(
+        hdc: HDC,
+        hwnd: HWND,
+        scale: f64,
+        td: &TabStripData,
+        tint: Option<(u8, u8, u8)>,
+        hover_tab: Option<crate::tabs::TabHit>,
+        pressed_tab: Option<crate::tabs::TabHit>,
+    ) {
+        use crate::tabs::TabHit;
+        use crate::tabs::layout::*;
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        let strip_w = rc.right as f64 / scale;
+        let light = tint.map(|(r, g, b)| crate::tabs::tint_wants_light_text(r, g, b));
+        // Glyph/text colors follow the tint luminance so tabs stay
+        // readable on light theme-colors.
+        let text_color = match light {
+            Some(false) => rgb(35, 35, 35),
+            _ => rgb(225, 225, 225),
+        };
+        let dim_color = match light {
+            Some(false) => rgb(90, 90, 90),
+            _ => rgb(160, 160, 160),
+        };
+        let active_bg = match light {
+            Some(false) => rgb(255, 255, 255),
+            _ => rgb(62, 62, 62),
+        };
+        let hover_bg = match light {
+            Some(false) => rgb(232, 232, 232),
+            _ => rgb(46, 46, 46),
+        };
+        let (ranges, add_x) = tab_ranges(strip_w, td.tabs.len());
+        let px = |v: f64| (v * scale).round() as i32;
+        for (i, name) in td.tabs.iter().enumerate() {
+            let (x0, x1) = ranges[i];
+            let active = i == td.active;
+            let tab_rc = RECT {
+                left: px(x0),
+                top: rc.top,
+                right: px(x1),
+                bottom: rc.bottom,
+            };
+            let hovered = hover_tab == Some(TabHit::Tab(i))
+                || hover_tab == Some(TabHit::CloseTab(i));
+            let pressed = pressed_tab == Some(TabHit::Tab(i));
+            if active {
+                let bbg = CreateSolidBrush(active_bg);
+                FillRect(hdc, &tab_rc, bbg);
+                let _ = DeleteObject(hbrush_to_obj(bbg));
+            } else if hovered || pressed {
+                let bbg = CreateSolidBrush(hover_bg);
+                FillRect(hdc, &tab_rc, bbg);
+                let _ = DeleteObject(hbrush_to_obj(bbg));
+            }
+            // Tab label: left-padded, room reserved for the close glyph.
+            let close_w = px(22.0);
+            let text_rc = RECT {
+                left: tab_rc.left + px(10.0),
+                top: tab_rc.top,
+                right: tab_rc.right - close_w,
+                bottom: tab_rc.bottom,
+            };
+            draw_text_in(
+                hdc,
+                text_rc,
+                name,
+                scale,
+                if active { text_color } else { dim_color },
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+            );
+            // Per-tab close glyph, emphasized on hover.
+            let x_hovered = hover_tab == Some(TabHit::CloseTab(i));
+            let x_rc = RECT {
+                left: tab_rc.right - close_w,
+                top: tab_rc.top,
+                right: tab_rc.right,
+                bottom: tab_rc.bottom,
+            };
+            draw_text_centered(
+                hdc,
+                x_rc,
+                "×",
+                scale,
+                if x_hovered { text_color } else { dim_color },
+            );
+        }
+        // "+" button after the last tab (at x=0 for an empty group).
+        let add_rc = RECT {
+            left: px(add_x),
+            top: rc.top,
+            right: px(add_x + ADD_W),
+            bottom: rc.bottom,
+        };
+        if hover_tab == Some(TabHit::Add) || pressed_tab == Some(TabHit::Add) {
+            let bbg = CreateSolidBrush(hover_bg);
+            FillRect(hdc, &add_rc, bbg);
+            let _ = DeleteObject(hbrush_to_obj(bbg));
+        }
+        draw_text_centered(hdc, add_rc, "+", scale, dim_color);
     }
 
     unsafe fn on_lbutton_down(hwnd: HWND, lparam: LPARAM) {
@@ -465,6 +705,40 @@ mod imp {
         let down = with_chrome(|ch| {
             let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
             let cp = ch.captions.get_mut(&label)?;
+            // v0.10.0: tabbed strips hit-test tabs first (logical px).
+            // GetClientRect is a pure query — safe under the borrow.
+            let tab_hit = cp.tabbed.as_ref().and_then(|td| {
+                let mut rc = RECT::default();
+                GetClientRect(hwnd, &mut rc).ok()?;
+                let scale = cp.scale;
+                let strip_w = rc.right as f64 / scale;
+                Some(crate::tabs::tab_hit_test(
+                    x as f64 / scale,
+                    y as f64 / scale,
+                    strip_w,
+                    td.tabs.len(),
+                    22.0,
+                ))
+            });
+            if let Some(hit) = tab_hit {
+                use crate::tabs::TabHit;
+                match hit {
+                    // Tab interactions: press-and-release; the click
+                    // dispatches on button-up (see on_lbutton_up).
+                    TabHit::Tab(_)
+                    | TabHit::CloseTab(_)
+                    | TabHit::Add
+                    | TabHit::CloseWindow => {
+                        cp.pressed_tab = Some(hit);
+                        cp.hover_tab = Some(hit);
+                        SetCapture(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return Some(Down::None);
+                    }
+                    // Min/max keep the existing button behavior below.
+                    TabHit::Min | TabHit::Max | TabHit::Drag => {}
+                }
+            }
             let over_max =
                 max_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
             let over_min =
@@ -512,7 +786,7 @@ mod imp {
 
     unsafe fn on_lbutton_up(hwnd: HWND, lparam: LPARAM) {
         let (x, y) = mouse_xy(lparam);
-        with_chrome(|ch| {
+        let tab_click = with_chrome(|ch| {
             let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
             let cp = ch.captions.get_mut(&label)?;
             if cp.pressed_max {
@@ -556,9 +830,161 @@ mod imp {
                     );
                 }
             }
+            // v0.10.0: tab-strip press-and-release. Recompute the hit at
+            // release; only a matching press+release dispatches.
+            let tab_click = cp.tabbed.as_ref().and_then(|td| {
+                let pressed = cp.pressed_tab.take()?;
+                if GetCapture() == hwnd {
+                    let _ = ReleaseCapture();
+                }
+                let mut rc = RECT::default();
+                GetClientRect(hwnd, &mut rc).ok()?;
+                let scale = cp.scale;
+                let hit = crate::tabs::tab_hit_test(
+                    x as f64 / scale,
+                    y as f64 / scale,
+                    rc.right as f64 / scale,
+                    td.tabs.len(),
+                    22.0,
+                );
+                (hit == pressed).then_some((label.clone(), hit))
+            });
             let _ = InvalidateRect(Some(hwnd), None, false);
-            Some(())
+            Some(tab_click)
         });
+        // Dispatch with no borrow held: tab actions build/close windows.
+        if let Some(Some((label, hit))) = tab_click {
+            dispatch_tab_click(hwnd, label, hit);
+        }
+    }
+
+    /// Run a tab-strip click action. Called with no chrome borrow held.
+    /// Window building/closing happens on worker threads — never in the
+    /// window proc (v0.9.7 re-entrancy rules).
+    unsafe fn dispatch_tab_click(hwnd: HWND, label: String, hit: crate::tabs::TabHit) {
+        use crate::tabs::TabHit;
+        let app = match with_chrome(|ch| Some(ch.app.clone())) {
+            Some(a) => a,
+            None => return,
+        };
+        let spawn_switch = |app: AppHandle, label: String, index: usize| {
+            std::thread::Builder::new()
+                .name("appmaka-tab-click".to_string())
+                .spawn(move || {
+                    let (Some(ts), Some(store), Some(adblock)) = (
+                        app.try_state::<crate::tabs::TabState>(),
+                        app.try_state::<crate::store::AppStore>(),
+                        app.try_state::<crate::adblock::AdblockState>(),
+                    ) else {
+                        return;
+                    };
+                    if let Some(gid) = crate::tabs::group_id_for_label(&app, &label) {
+                        let _ = crate::tabs::switch_tab(&app, &store, &adblock, &ts, &gid, index);
+                    }
+                })
+                .ok();
+        };
+        match hit {
+            TabHit::Tab(i) => spawn_switch(app, label, i),
+            TabHit::CloseTab(i) => {
+                std::thread::Builder::new()
+                    .name("appmaka-tab-close".to_string())
+                    .spawn(move || {
+                        let (Some(ts), Some(store), Some(adblock)) = (
+                            app.try_state::<crate::tabs::TabState>(),
+                            app.try_state::<crate::store::AppStore>(),
+                            app.try_state::<crate::adblock::AdblockState>(),
+                        ) else {
+                            return;
+                        };
+                        if let Some(gid) = crate::tabs::group_id_for_label(&app, &label) {
+                            let _ = crate::tabs::close_tab(&app, &store, &adblock, &ts, &gid, i);
+                        }
+                    })
+                    .ok();
+            }
+            TabHit::Add => show_add_tab_menu(&app, &label),
+            TabHit::CloseWindow => crate::tabs::request_close_group_by_label(&app, &label),
+            TabHit::Min | TabHit::Max | TabHit::Drag => {}
+        }
+        let _ = hwnd;
+    }
+
+    /// "+" picker: native popup menu listing every app/account (two-phase
+    /// like the snap menu — snapshot under no borrow, modal menu after).
+    /// The choice fans out to tabs::add_tab on a worker thread.
+    unsafe fn show_add_tab_menu(app: &AppHandle, label: &str) {
+        struct PickItem {
+            app_id: String,
+            account_id: String,
+            display: String,
+        }
+        let items: Vec<PickItem> = app
+            .try_state::<crate::store::AppStore>()
+            .and_then(|s| s.list().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|a| {
+                let multi = a.accounts.len() > 1;
+                let name = a.name.clone();
+                let id = a.id.clone();
+                a.accounts.into_iter().map(move |ac| PickItem {
+                    app_id: id.clone(),
+                    account_id: ac.id.clone(),
+                    display: if multi {
+                        format!("{} — {}", name, ac.label)
+                    } else {
+                        name.clone()
+                    },
+                })
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let menu = CreatePopupMenu().unwrap_or_default();
+        if menu.is_invalid() {
+            return;
+        }
+        for (i, item) in items.iter().enumerate() {
+            let mut wide: Vec<u16> = OsStr::new(&item.display)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            // AppendMenuW copies the string synchronously.
+            let _ = AppendMenuW(menu, MF_STRING, i + 1, PWSTR(wide.as_mut_ptr()));
+        }
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        // The strip stays alive for the modal menu: it is an owned window
+        // of the page, which outlives the menu either way.
+        let cmd = TrackPopupMenu(menu, TPM_RETURNCMD, pt.x, pt.y, Some(0), GetForegroundWindow(), None);
+        let _ = DestroyMenu(menu);
+        if !cmd.as_bool() {
+            return;
+        }
+        let Some(pick) = items.get(cmd.0 as usize - 1) else {
+            return;
+        };
+        let app = app.clone();
+        let label = label.to_string();
+        let (app_id, account_id) = (pick.app_id.clone(), pick.account_id.clone());
+        std::thread::Builder::new()
+            .name("appmaka-tab-add".to_string())
+            .spawn(move || {
+                let (Some(ts), Some(store), Some(adblock)) = (
+                    app.try_state::<crate::tabs::TabState>(),
+                    app.try_state::<crate::store::AppStore>(),
+                    app.try_state::<crate::adblock::AdblockState>(),
+                ) else {
+                    return;
+                };
+                if let Some(gid) = crate::tabs::group_id_for_label(&app, &label) {
+                    let _ =
+                        crate::tabs::add_tab(&app, &store, &adblock, &ts, &gid, &app_id, &account_id);
+                }
+            })
+            .ok();
     }
 
     /// Right-click on the maximize/restore button: our own minimal snap
@@ -684,6 +1110,29 @@ mod imp {
                 cp.hover_max = hover_max;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
+            // v0.10.0: tab hover for tabbed strips (pure query under the
+            // borrow, invalidate only on change).
+            let hover_tab = cp.tabbed.as_ref().and_then(|td| {
+                let mut rc = RECT::default();
+                GetClientRect(hwnd, &mut rc).ok()?;
+                let scale = cp.scale;
+                let hit = crate::tabs::tab_hit_test(
+                    x as f64 / scale,
+                    y as f64 / scale,
+                    rc.right as f64 / scale,
+                    td.tabs.len(),
+                    22.0,
+                );
+                use crate::tabs::TabHit;
+                match hit {
+                    TabHit::Drag | TabHit::Min | TabHit::Max => None,
+                    h => Some(h),
+                }
+            });
+            if hover_tab != cp.hover_tab {
+                cp.hover_tab = hover_tab;
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
             Some(())
         });
     }
@@ -695,6 +1144,7 @@ mod imp {
             cp.mouse_in = false;
             cp.hover_min = false;
             cp.hover_max = false;
+            cp.hover_tab = None;
             let _ = InvalidateRect(Some(hwnd), None, false);
             Some(())
         });
@@ -1147,7 +1597,7 @@ mod imp {
     /// caption_proc, and holding the RefCell across it was the v0.9.6
     /// crash (re-entrant borrow_mut → panic → unwind across extern
     /// "system" → instant process abort).
-    unsafe fn create_caption(owner: HWND, label: &str, scale: f64) {
+    unsafe fn create_caption(owner: HWND, label: &str, scale: f64, tabbed: Option<TabStripData>) {
         // Phase 1: duplicate check under a short borrow.
         let exists = with_chrome(|ch| Some(ch.captions.contains_key(label))).unwrap_or(false);
         if exists {
@@ -1196,6 +1646,9 @@ mod imp {
                     hover_max: false,
                     pressed_max: false,
                     mouse_in: false,
+                    tabbed,
+                    hover_tab: None,
+                    pressed_tab: None,
                     syncing: false,
                     last_x: 0,
                     last_y: 0,
@@ -1330,6 +1783,36 @@ mod imp {
                         return LRESULT(1);
                     }
                 }
+                // v0.10.0: Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1..9 switches
+                // tabs, but ONLY when a tabbed window (or its strip) is in
+                // the foreground — everywhere else the keys pass through
+                // untouched (browsers keep their own Ctrl+Tab).
+                const VK_TAB_U32: u32 = 0x09;
+                const VK_CONTROL_I32: i32 = 0x11;
+                const VK_SHIFT_I32: i32 = 0x10;
+                if kb.vkCode == VK_TAB_U32 || (0x31..=0x39).contains(&kb.vkCode) {
+                    let ctrl =
+                        (GetAsyncKeyState(VK_CONTROL_I32) as u16 & 0x8000) != 0;
+                    let shift =
+                        (GetAsyncKeyState(VK_SHIFT_I32) as u16 & 0x8000) != 0;
+                    if let Some(action) = crate::tabs::tab_key_action(kb.vkCode, ctrl, shift) {
+                        if let Some(label) = resolve_page_label(GetForegroundWindow()) {
+                            if crate::tabs::is_tabbed_label(&label) {
+                                CHROME.with(|c| {
+                                    let guard = c.try_borrow().ok();
+                                    if let Some(ch) =
+                                        guard.as_ref().and_then(|g| g.as_ref())
+                                    {
+                                        let _ = ch.tx.send(ChromeCmd::TabKey { label, action });
+                                        let _ = SetEvent(ch.wake);
+                                    }
+                                });
+                                // Swallow: the page never sees the tab-switch keys.
+                                return LRESULT(1);
+                            }
+                        }
+                    }
+                }
             }
         }
         CallNextHookEx(None, n_code, wparam, lparam)
@@ -1347,7 +1830,7 @@ mod imp {
             ChromeCmd::AddCaption { owner, label, scale } => {
                 // create_caption manages its own short borrows: the
                 // CreateWindowExW call must run with no borrow held.
-                create_caption(HWND(owner as *mut _), &label, scale);
+                create_caption(HWND(owner as *mut _), &label, scale, None);
             }
             ChromeCmd::RemoveCaption { label } => {
                 remove_caption(&label);
@@ -1356,26 +1839,110 @@ mod imp {
                 reposition_caption(&label);
             }
             ChromeCmd::ClosePage { label } => {
-                // Borrow only to fetch the app handle and window: close()
-                // can synchronously destroy the owned caption (WM_DESTROY
-                // runs on this thread), which must not happen under our
-                // borrow. The v0.9.9 pin check takes only a short mutex
-                // lock — no Win32 call under it (v0.9.7 rules).
-                let ctx = CHROME.with(|c| {
-                    c.borrow().as_ref().map(|ch| {
-                        (ch.app.clone(), ch.app.get_webview_window(&label))
-                    })
-                });
-                if let Some((app, Some(w))) = ctx {
-                    if crate::pin::is_pinned(&app, &label) {
-                        // Pinned ("Don't close this window"): the
-                        // hold-LEFT+Esc gesture asks instead of closing.
-                        // ask_then_close shows the native dialog on its own
-                        // thread — safe from this worker thread.
-                        crate::pin::ask_then_close(&app, &label);
-                    } else {
-                        let _ = w.close();
+                // Borrow only to fetch the app handle: close() can
+                // synchronously destroy the owned caption (WM_DESTROY runs
+                // on this thread), which must not happen under our borrow.
+                // The v0.9.9 pin check takes only a short mutex lock — no
+                // Win32 call under it (v0.9.7 rules).
+                //
+                // v0.10.0: in a tabbed window the Esc+LMB gesture closes
+                // the ACTIVE TAB (last tab closes the window, pin-aware),
+                // not the whole window. The tab close may block on the pin
+                // confirm, so it runs on a worker thread — never on the
+                // chrome thread's message pump.
+                if crate::tabs::is_tabbed_label(&label) {
+                    let app = CHROME.with(|c| {
+                        c.borrow().as_ref().map(|ch| ch.app.clone())
+                    });
+                    if let Some(app) = app {
+                        std::thread::Builder::new()
+                            .name("appmaka-tab-gesture".to_string())
+                            .spawn(move || {
+                                crate::tabs::gesture_close_active_tab(&app, &label)
+                            })
+                            .ok();
                     }
+                } else {
+                    let ctx = CHROME.with(|c| {
+                        c.borrow().as_ref().map(|ch| {
+                            (ch.app.clone(), ch.app.get_webview_window(&label))
+                        })
+                    });
+                    if let Some((app, Some(w))) = ctx {
+                        if crate::pin::is_pinned(&app, &label) {
+                            // Pinned ("Don't close this window"): the
+                            // hold-LEFT+Esc gesture asks instead of closing.
+                            // ask_then_close shows the native dialog on its own
+                            // thread — safe from this worker thread.
+                            crate::pin::ask_then_close(&app, &label);
+                        } else {
+                            let _ = w.close();
+                        }
+                    }
+                }
+            }
+            // v0.10.0: tabbed-window commands.
+            ChromeCmd::AddTabbedCaption {
+                owner,
+                label,
+                scale,
+                tabs,
+            } => {
+                create_caption(HWND(owner as *mut _), &label, scale, Some(tabs));
+            }
+            ChromeCmd::UpdateTabbedTabs { label, tabs } => {
+                // Mutate under a short borrow, invalidate after it is
+                // released (two-phase discipline).
+                let hwnd = with_chrome(|ch| {
+                    let cp = ch.captions.get_mut(&label)?;
+                    cp.tabbed = Some(tabs);
+                    Some(cp.hwnd)
+                });
+                if let Some(hwnd) = hwnd {
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+            }
+            ChromeCmd::SetTabTint { label, tint } => {
+                if let Some(hwnd) = with_chrome(|ch| {
+                    let cp = ch.captions.get_mut(&label)?;
+                    if let Some(td) = cp.tabbed.as_mut() {
+                        td.tint = tint;
+                    }
+                    Some(cp.hwnd)
+                }) {
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+            }
+            ChromeCmd::TabKey { label, action } => {
+                // Ctrl+Tab et al: resolve the target tab and switch on a
+                // worker thread (window building never on the chrome
+                // thread, and switch_tab may briefly block on locks).
+                let app = CHROME.with(|c| {
+                    c.borrow().as_ref().map(|ch| ch.app.clone())
+                });
+                if let Some(app) = app {
+                    std::thread::Builder::new()
+                        .name("appmaka-tab-key".to_string())
+                        .spawn(move || {
+                            let (Some(ts), Some(store), Some(adblock)) = (
+                                app.try_state::<crate::tabs::TabState>(),
+                                app.try_state::<crate::store::AppStore>(),
+                                app.try_state::<crate::adblock::AdblockState>(),
+                            ) else {
+                                return;
+                            };
+                            let target = crate::tabs::resolve_key_switch(&ts, &label, action);
+                            if let Some((gid, idx)) = target {
+                                let _ = crate::tabs::switch_tab(
+                                    &app, &store, &adblock, &ts, &gid, idx,
+                                );
+                            }
+                        })
+                        .ok();
                 }
             }
         }
@@ -1521,10 +2088,80 @@ mod imp {
             }
         }
     }
+
+    // ------------------------------------------------------------------
+    // v0.10.0: tabbed-window strip API
+    // ------------------------------------------------------------------
+
+    /// Attach a tab strip to a tabbed page window. Same infallible
+    /// contract as page_window_opened: any failure leaves a plain
+    /// frameless window with working tabs via the dashboard.
+    pub fn tabbed_window_opened(
+        app: &AppHandle,
+        label: &str,
+        window: &WebviewWindow,
+        tabs: TabStripData,
+    ) {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Ok(hwnd) = window.hwnd() else { return };
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let Some((tx, wake)) = ensure_chrome(app) else {
+                return;
+            };
+            let _ = tx.send(ChromeCmd::AddTabbedCaption {
+                owner: hwnd.0 as isize,
+                label: label.to_string(),
+                scale,
+                tabs,
+            });
+            unsafe {
+                let _ = SetEvent(wake.0);
+            }
+        }));
+        if r.is_err() {
+            caption_log(
+                app,
+                &format!(
+                    "tabbed_window_opened panicked for '{label}'; window continues without tabs"
+                ),
+            );
+        }
+    }
+
+    /// Refresh the tab strip's tabs (added/closed/switched) without
+    /// rebuilding the window.
+    pub fn tabbed_window_updated(label: &str, tabs: TabStripData) {
+        if let Some((tx, wake)) = CHROME_CTL.get() {
+            let _ = tx.send(ChromeCmd::UpdateTabbedTabs {
+                label: label.to_string(),
+                tabs,
+            });
+            unsafe {
+                let _ = SetEvent(wake.0);
+            }
+        }
+    }
+
+    /// Re-tint the strip with the active tab's theme-color (None clears
+    /// back to the default dark).
+    pub fn tabbed_window_set_tint(label: &str, tint: Option<(u8, u8, u8)>) {
+        if let Some((tx, wake)) = CHROME_CTL.get() {
+            let _ = tx.send(ChromeCmd::SetTabTint {
+                label: label.to_string(),
+                tint,
+            });
+            unsafe {
+                let _ = SetEvent(wake.0);
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
-pub use imp::{page_window_closed, page_window_moved, page_window_opened};
+pub use imp::{
+    page_window_closed, page_window_moved, page_window_opened, tabbed_window_opened,
+    tabbed_window_set_tint, tabbed_window_updated, TabStripData,
+};
 
 #[cfg(not(windows))]
 pub fn page_window_opened(
@@ -1540,6 +2177,35 @@ pub fn page_window_moved(_label: &str) {}
 
 #[cfg(not(windows))]
 pub fn page_window_closed(_label: &str) {}
+
+/// v0.10.0 non-Windows stubs: the tab strip is an HTML window on Linux
+/// (see tabs.rs); these are no-ops elsewhere.
+#[cfg(not(windows))]
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct TabStripData {
+    pub tabs: Vec<String>,
+    pub active: usize,
+    pub tint: Option<(u8, u8, u8)>,
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn tabbed_window_opened(
+    _app: &tauri::AppHandle,
+    _label: &str,
+    _window: &tauri::WebviewWindow,
+    _tabs: TabStripData,
+) {
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn tabbed_window_updated(_label: &str, _tabs: TabStripData) {}
+
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn tabbed_window_set_tint(_label: &str, _tint: Option<(u8, u8, u8)>) {}
 
 #[cfg(test)]
 mod tests {

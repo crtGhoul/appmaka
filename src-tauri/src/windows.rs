@@ -1203,7 +1203,18 @@ pub fn close_all_account_windows(app: AppHandle) -> Result<usize, String> {
     // One-shot approvals land in ConfirmedCloses, so the per-window guard
     // inside close_tracked_window lets approved labels through without
     // re-asking.
-    let approved = crate::pin::confirm_batch_close(&app, &labels);
+    //
+    // v0.10.0: tabbed windows own a live webview each, so the RAM
+    // dashboard's "close all" includes them. Their pins key off
+    // `tabbed:{group}` (stable across tab switches), folded into the same
+    // one batch confirm.
+    let tabbed: Vec<(String, String)> = app
+        .try_state::<crate::tabs::TabState>()
+        .map(|ts| crate::tabs::all_groups_for_close_all(&ts))
+        .unwrap_or_default();
+    let mut confirm_labels = labels.clone();
+    confirm_labels.extend(tabbed.iter().map(|(_, key)| key.clone()));
+    let approved = crate::pin::confirm_batch_close(&app, &confirm_labels);
     let mut closed = 0usize;
     for label in &labels {
         if crate::pin::is_pinned(&app, label) && !approved.contains(label) {
@@ -1211,6 +1222,15 @@ pub fn close_all_account_windows(app: AppHandle) -> Result<usize, String> {
         }
         close_tracked_window(&app, label, CloseIntent::User);
         closed += 1;
+    }
+    for (id, key) in &tabbed {
+        if crate::pin::is_pinned(&app, key) && !approved.contains(key) {
+            continue;
+        }
+        if let Some(ts) = app.try_state::<crate::tabs::TabState>() {
+            crate::tabs::close_group(&app, &ts, id);
+            closed += 1;
+        }
     }
     // Popups are not tracked in WindowState; sweep them by live-window
     // label so no account-related webview survives a close-all.

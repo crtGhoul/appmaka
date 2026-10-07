@@ -26,6 +26,8 @@ export default defineConfig(async () => ({
         main: "index.html",
         "preview-header": "preview-header.html",
         clipboard: "clipboard.html",
+        // v0.10.0: Linux tab-strip window (Windows paints a native strip).
+        tabstrip: "tabstrip.html",
       },
     },
   },

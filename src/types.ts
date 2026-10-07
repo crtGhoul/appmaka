@@ -200,6 +200,24 @@ export interface OpenAccountWindow {
   pinned: boolean;
 }
 
+/** v0.10.0: one open tabbed window, from `list_tabbed_windows`. */
+export interface TabSummary {
+  appId: string;
+  accountId: string;
+  appName: string;
+  accountLabel: string;
+}
+
+export interface TabbedWindowInfo {
+  groupId: string;
+  label: string;
+  tabs: TabSummary[];
+  active: number;
+  tint: string | null;
+  focused: boolean;
+  pinned: boolean;
+}
+
 /**
  * Process memory snapshot, from `memory_snapshot`. Keys are camelCase in
  * JSON because Tauri serializes Rust `total_rss_kb` as `totalRssKb`.

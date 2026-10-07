@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { MemorySnapshot, OpenAccountWindow } from "./types";
+import type { MemorySnapshot, OpenAccountWindow, TabbedWindowInfo } from "./types";
 
 function errMsg(err: unknown): string {
   return typeof err === "string" ? err : "Something went wrong.";
@@ -27,6 +27,8 @@ export function RamDashboard({
   onClose: () => void;
 }) {
   const [windows, setWindows] = useState<OpenAccountWindow[]>([]);
+  // v0.10.0: open tabbed windows, one row per group.
+  const [tabbed, setTabbed] = useState<TabbedWindowInfo[]>([]);
   const [snapshot, setSnapshot] = useState<MemorySnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [closing, setClosing] = useState(false);
@@ -39,11 +41,13 @@ export function RamDashboard({
     setLoading(true);
     setError(null);
     try {
-      const [wins, snap] = await Promise.all([
+      const [wins, groups, snap] = await Promise.all([
         invoke<OpenAccountWindow[]>("list_open_account_windows"),
+        invoke<TabbedWindowInfo[]>("list_tabbed_windows"),
         invoke<MemorySnapshot>("memory_snapshot"),
       ]);
       setWindows(wins);
+      setTabbed(groups);
       setSnapshot(snap);
     } catch (err) {
       setError(errMsg(err));
@@ -95,6 +99,37 @@ export function RamDashboard({
     }
   }
 
+  // v0.10.0: close a whole tabbed window. Pinned groups get the one
+  // native confirm via the backend, like pinned account windows.
+  async function closeTabbedGroup(g: TabbedWindowInfo) {
+    setError(null);
+    try {
+      await invoke("close_tabbed_window", { groupId: g.groupId });
+      await refresh();
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  }
+
+  // v0.10.0: "Don't close this window" for a tabbed group. The backend
+  // keys pins by `tabbed:{groupId}` (stable across tab switches), so the
+  // dashboard passes that key as the label.
+  async function toggleTabbedPin(g: TabbedWindowInfo) {
+    const next = !g.pinned;
+    setTabbed((prev) =>
+      prev.map((x) => (x.groupId === g.groupId ? { ...x, pinned: next } : x))
+    );
+    try {
+      await invoke("set_window_pinned", {
+        label: `tabbed:${g.groupId}`,
+        pinned: next,
+      });
+    } catch (err) {
+      setError(errMsg(err));
+      await refresh();
+    }
+  }
+
   // v0.9.9: "Don't close this window" toggle. Optimistic update; a failure
   // rolls the checkbox back via refresh().
   async function togglePin(w: OpenAccountWindow) {
@@ -136,12 +171,14 @@ export function RamDashboard({
   }
 
   // Even estimate per window; guarded against a zero count and backends
-  // whose main-process number exceeds the total.
+  // whose main-process number exceeds the total. v0.10.0: a tabbed window
+  // holds one live webview, so it counts as one window.
   const webviewTotalKb = Math.max(
     0,
     (snapshot?.totalRssKb ?? 0) - (snapshot?.mainRssKb ?? 0)
   );
-  const perWindowKb = windows.length > 0 ? webviewTotalKb / windows.length : 0;
+  const windowCount = windows.length + tabbed.length;
+  const perWindowKb = windowCount > 0 ? webviewTotalKb / windowCount : 0;
 
   return (
     <div
@@ -245,8 +282,63 @@ export function RamDashboard({
           </ul>
         )}
 
-        {snapshot?.supported && !loading && windows.length === 0 && (
+        {snapshot?.supported && !loading && windows.length === 0 && tabbed.length === 0 && (
           <p className="muted">No account windows are open.</p>
+        )}
+
+        {/* v0.10.0: one row per open tabbed window, with its tabs. */}
+        {tabbed.length > 0 && (
+          <>
+            <h3 className="modal-subtitle">Tabbed windows</h3>
+            <ul className="ram-list">
+              {tabbed.map((g) => (
+                <li key={g.groupId} className="ram-row ram-row-wrap">
+                  <span className="ram-row-main">
+                    <span className="ram-row-title">Tabbed window</span>
+                    <span className="ram-row-sub">
+                      {g.tabs.map((t, i) => (
+                        <span
+                          key={`${t.appId}:${t.accountId}`}
+                          className={i === g.active ? "ram-tab-chip active" : "ram-tab-chip"}
+                          title={t.accountLabel ? `${t.appName} — ${t.accountLabel}` : t.appName}
+                        >
+                          {t.appName}
+                        </span>
+                      ))}
+                    </span>
+                  </span>
+                  {g.focused && (
+                    <span className="ram-focused" title="This window is in focus">
+                      in focus
+                    </span>
+                  )}
+                  <span className="ram-row-mem muted" title="Estimated share of memory">
+                    {aboutMb(perWindowKb)} (estimated)
+                  </span>
+                  <label
+                    className="ram-pin-toggle"
+                    title="Asks before this window can be closed."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={g.pinned}
+                      onChange={() => void toggleTabbedPin(g)}
+                    />
+                    <span>Don't close this window</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="ram-row-close"
+                    title="Close this tabbed window"
+                    aria-label="Close tabbed window"
+                    onClick={() => void closeTabbedGroup(g)}
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
         )}
 
         {windows.length > 0 && (

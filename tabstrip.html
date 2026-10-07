@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AppMaka tabs</title>
+<style>
+  /* Tab strip window (v0.10.0, Linux): our own trusted UI rendered above
+     the tabbed page window. Dark like the Windows native strip; quiet,
+     one accent, plain labels. Bundled separately (vite.config.ts
+     "tabstrip" input, loaded by the backend as tabstrip.html). */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12.5px;
+    color: #e1e1e1;
+    background: #1b1b1b;
+    overflow: hidden;
+    user-select: none;
+  }
+  #root { height: 100%; display: flex; align-items: stretch; }
+  .tabs {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: stretch;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 64px;
+    max-width: 168px;
+    flex: 1 1 0;
+    padding: 0 6px 0 12px;
+    color: #a0a0a0;
+    background: none;
+    border: none;
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tab:hover { background: #2e2e2e; color: #e1e1e1; }
+  .tab.active { background: #3e3e3e; color: #f1f1f1; }
+  .tab:focus-visible { outline: 2px solid #4f46e5; outline-offset: -2px; }
+  .tab .name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tab .x {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    color: inherit;
+    font-size: 14px;
+    line-height: 1;
+  }
+  .tab .x:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
+  .add, .winx {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: #a0a0a0;
+    font: inherit;
+    cursor: pointer;
+  }
+  .add { width: 34px; font-size: 16px; }
+  .add:hover { background: #2e2e2e; color: #fff; }
+  .winx { width: 46px; font-size: 14px; }
+  .winx:hover { background: #e81123; color: #fff; }
+  .add:focus-visible, .winx:focus-visible { outline: 2px solid #4f46e5; outline-offset: -2px; }
+  .picker {
+    position: fixed;
+    top: 44px;
+    left: 8px;
+    z-index: 10;
+    min-width: 240px;
+    max-width: 340px;
+    max-height: 320px;
+    overflow-y: auto;
+    background: #252525;
+    border: 1px solid #3a3a3a;
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  }
+  .picker button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: #e1e1e1;
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .picker button:hover { background: #3e3e3e; }
+  .picker .empty { padding: 12px; color: #8a8f98; }
+  .loading { padding: 0 12px; color: #8a8f98; align-self: center; }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+<script type="module" src="./src/tabstrip.tsx"></script>
+</body>
+</html>
