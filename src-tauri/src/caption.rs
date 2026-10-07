@@ -238,6 +238,10 @@ mod imp {
             owner: isize,
             label: String,
             scale: f64,
+            /// Window title at creation ("App — Account"), drawn in the
+            /// strip so a plain page strip is a real title bar, not an
+            /// empty black bar.
+            title: String,
         },
         RemoveCaption {
             label: String,
@@ -295,7 +299,12 @@ mod imp {
         pressed_min: bool,
         hover_max: bool,
         pressed_max: bool,
+        /// v0.12.0: back-button hover/pressed for plain page strips.
+        hover_back: bool,
+        pressed_back: bool,
         mouse_in: bool,
+        /// v0.12.0: window title drawn in plain page strips.
+        page_title: String,
         /// v0.10.0: tab data for tabbed windows; None for plain page strips.
         tabbed: Option<TabStripData>,
         /// v0.11.0: resolved site tint for plain page strips (None = the
@@ -350,6 +359,22 @@ mod imp {
         button_rect_at(hwnd, scale, 1)
     }
 
+    /// v0.12.0: back button for plain page strips — a left-edge slot the
+    /// same size as the window buttons, mirroring button_rect_at.
+    fn back_button_rect(hwnd: HWND, scale: f64) -> Option<RECT> {
+        unsafe {
+            let mut rc = RECT::default();
+            GetClientRect(hwnd, &mut rc).ok()?;
+            let bw = (BTN_W_LOGICAL * scale).round() as i32;
+            Some(RECT {
+                left: rc.left,
+                top: rc.top,
+                right: rc.left + bw,
+                bottom: rc.bottom,
+            })
+        }
+    }
+
     fn button_rect_at(hwnd: HWND, scale: f64, slot: i32) -> Option<RECT> {
         unsafe {
             let mut rc = RECT::default();
@@ -391,7 +416,7 @@ mod imp {
         }
         // Snapshot everything the paint needs under one short borrow, then
         // paint with no borrow held (the v0.9.7 two-phase rule).
-        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, page_tint, hover_tab, pressed_tab) =
+        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, page_tint, hover_tab, pressed_tab, hover_back, pressed_back, page_title) =
             with_chrome(|ch| {
                 let label = ch.by_hwnd.get(&(hwnd.0 as isize))?;
                 let cp = ch.captions.get(label)?;
@@ -406,9 +431,12 @@ mod imp {
                     cp.page_tint,
                     cp.hover_tab,
                     cp.pressed_tab,
+                    cp.hover_back,
+                    cp.pressed_back,
+                    cp.page_title.clone(),
                 ))
             })
-            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None, None));
+            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None, None, false, false, String::new()));
 
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
@@ -512,6 +540,58 @@ mod imp {
         // needs its own X. Plain page strips keep min/max only.
         if tabbed.is_some() {
             paint_x_button(hdc, hwnd, scale, tint, hover_tab, pressed_tab);
+        }
+        // v0.12.0: plain page strips get a back button and the window
+        // title — the strip is a real title bar, not an empty black bar.
+        // Tabbed strips already have tabs; they keep their layout.
+        if tabbed.is_none() {
+            if let Some(btn) = back_button_rect(hwnd, scale) {
+                if hover_back || pressed_back {
+                    let bbg = CreateSolidBrush(if pressed_back {
+                        rgb(46, 46, 46)
+                    } else {
+                        rgb(58, 58, 58)
+                    });
+                    FillRect(hdc, &btn, bbg);
+                    let _ = DeleteObject(hbrush_to_obj(bbg));
+                }
+                let text_color = rgb(204, 204, 204);
+                draw_text_centered(
+                    hdc,
+                    btn,
+                    "←",
+                    scale,
+                    if hover_back || pressed_back {
+                        rgb(255, 255, 255)
+                    } else {
+                        text_color
+                    },
+                );
+                // Title: left-aligned after the back button, room reserved
+                // for the min/max/close slots on the right.
+                if !page_title.is_empty() {
+                    let btn_w = btn.right - btn.left;
+                    let pad = (8.0 * scale).round() as i32;
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rc);
+                    let title_rc = RECT {
+                        left: rc.left + btn_w + pad,
+                        top: rc.top,
+                        right: rc.right - btn_w * 3 - pad,
+                        bottom: rc.bottom,
+                    };
+                    if title_rc.right > title_rc.left {
+                        draw_text_in(
+                            hdc,
+                            title_rc,
+                            &page_title,
+                            scale,
+                            text_color,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+                        );
+                    }
+                }
+            }
         }
         let _ = EndPaint(hwnd, &ps);
     }
@@ -762,15 +842,22 @@ mod imp {
                 max_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
             let over_min =
                 button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
+            // v0.12.0: back button for plain page strips (tabbed strips
+            // keep their tab layout).
+            let over_back = cp.tabbed.is_none()
+                && back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
             if over_max {
                 cp.pressed_max = true;
                 SetCapture(hwnd);
             } else if over_min {
                 cp.pressed_min = true;
                 SetCapture(hwnd);
+            } else if over_back {
+                cp.pressed_back = true;
+                SetCapture(hwnd);
             }
             let _ = InvalidateRect(Some(hwnd), None, false);
-            if over_max || over_min {
+            if over_max || over_min || over_back {
                 Some(Down::None)
             } else if IsZoomed(cp.owner).as_bool() {
                 Some(Down::Restore(cp.owner))
@@ -879,6 +966,36 @@ mod imp {
         // Dispatch with no borrow held: tab actions build/close windows.
         if let Some(Some((label, hit))) = tab_click {
             dispatch_tab_click(hwnd, label, hit);
+        }
+        // v0.12.0: back-button press-and-release. Recompute the hit at
+        // release; only a matching press+release navigates back.
+        let back_click = with_chrome(|ch| {
+            let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
+            let cp = ch.captions.get_mut(&label)?;
+            if !cp.pressed_back {
+                return None;
+            }
+            cp.pressed_back = false;
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let over =
+                back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            over.then(|| label.clone())
+        });
+        // Dispatch with no borrow held: the eval goes to the webview.
+        if let Some(label) = back_click {
+            if let Some(app) = with_chrome(|ch| Some(ch.app.clone())) {
+                std::thread::Builder::new()
+                    .name("appmaka-strip-back".to_string())
+                    .spawn(move || {
+                        if let Some(w) = app.get_webview_window(&label) {
+                            let _ = w.eval("history.back()");
+                        }
+                    })
+                    .ok();
+            }
         }
     }
 
@@ -1129,9 +1246,16 @@ mod imp {
                 button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
             let hover_max =
                 max_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
-            if hover_min != cp.hover_min || hover_max != cp.hover_max {
+            // v0.12.0: back-button hover for plain page strips.
+            let hover_back = cp.tabbed.is_none()
+                && back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
+            if hover_min != cp.hover_min
+                || hover_max != cp.hover_max
+                || hover_back != cp.hover_back
+            {
                 cp.hover_min = hover_min;
                 cp.hover_max = hover_max;
+                cp.hover_back = hover_back;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             // v0.10.0: tab hover for tabbed strips (pure query under the
@@ -1168,6 +1292,7 @@ mod imp {
             cp.mouse_in = false;
             cp.hover_min = false;
             cp.hover_max = false;
+            cp.hover_back = false;
             cp.hover_tab = None;
             let _ = InvalidateRect(Some(hwnd), None, false);
             Some(())
@@ -1627,7 +1752,13 @@ mod imp {
     /// caption_proc, and holding the RefCell across it was the v0.9.6
     /// crash (re-entrant borrow_mut → panic → unwind across extern
     /// "system" → instant process abort).
-    unsafe fn create_caption(owner: HWND, label: &str, scale: f64, tabbed: Option<TabStripData>) {
+    unsafe fn create_caption(
+        owner: HWND,
+        label: &str,
+        scale: f64,
+        tabbed: Option<TabStripData>,
+        page_title: String,
+    ) {
         // Phase 1: duplicate check under a short borrow.
         let exists = with_chrome(|ch| Some(ch.captions.contains_key(label))).unwrap_or(false);
         if exists {
@@ -1675,7 +1806,10 @@ mod imp {
                     pressed_min: false,
                     hover_max: false,
                     pressed_max: false,
+                    hover_back: false,
+                    pressed_back: false,
                     mouse_in: false,
+                    page_title,
                     tabbed,
                     page_tint: None,
                     hover_tab: None,
@@ -1858,10 +1992,15 @@ mod imp {
     /// would orphan every strip and the gesture hook).
     unsafe fn handle_chrome_cmd(cmd: ChromeCmd) {
         match cmd {
-            ChromeCmd::AddCaption { owner, label, scale } => {
+            ChromeCmd::AddCaption {
+                owner,
+                label,
+                scale,
+                title,
+            } => {
                 // create_caption manages its own short borrows: the
                 // CreateWindowExW call must run with no borrow held.
-                create_caption(HWND(owner as *mut _), &label, scale, None);
+                create_caption(HWND(owner as *mut _), &label, scale, None, title);
             }
             ChromeCmd::RemoveCaption { label } => {
                 remove_caption(&label);
@@ -1919,7 +2058,13 @@ mod imp {
                 scale,
                 tabs,
             } => {
-                create_caption(HWND(owner as *mut _), &label, scale, Some(tabs));
+                create_caption(
+                    HWND(owner as *mut _),
+                    &label,
+                    scale,
+                    Some(tabs),
+                    String::new(),
+                );
             }
             ChromeCmd::UpdateTabbedTabs { label, tabs } => {
                 // Mutate under a short borrow, invalidate after it is
@@ -2100,6 +2245,9 @@ mod imp {
     fn page_window_opened_inner(app: &AppHandle, label: &str, window: &WebviewWindow) {
         let Ok(hwnd) = window.hwnd() else { return };
         let scale = window.scale_factor().unwrap_or(1.0);
+        // The window title ("App — Account") becomes the strip's title.
+        // Empty titles fall back to no text (the pre-v0.12.0 look).
+        let title = window.title().unwrap_or_default();
         let Some((tx, wake)) = ensure_chrome(app) else {
             return;
         };
@@ -2107,6 +2255,7 @@ mod imp {
             owner: hwnd.0 as isize,
             label: label.to_string(),
             scale,
+            title,
         });
         unsafe {
             let _ = SetEvent(wake.0);

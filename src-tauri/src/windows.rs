@@ -296,6 +296,15 @@ pub fn open_account_placed(
     // Back/forward keyboard nav (v0.7.0): bare webviews have no chrome, so
     // Alt+Left / Alt+Right get them here.
     builder = builder.initialization_script(NAV_KEYS_JS);
+    // v0.12.0: custom page cursor. Empty string when "off" — skipped.
+    let cursor_style = app
+        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
+        .unwrap_or_default();
+    let cursor_js = cursor_chrome_js(&cursor_style);
+    if !cursor_js.is_empty() {
+        builder = builder.initialization_script(cursor_js);
+    }
     let css = adblock.cosmetic_css_for(&web_app.url);
     if !css.is_empty() {
         builder = builder.initialization_script(cosmetic_init_script(&css));
@@ -408,6 +417,95 @@ pub(crate) fn cosmetic_init_script(css: &str) -> String {
         s.setAttribute('data-appmaka','cosmetic');s.textContent=css;\
         var root=document.head||document.documentElement;\
         if(root){{root.appendChild(s);}}}}catch(e){{}}}})();"
+    )
+}
+
+/// Custom page cursor (v0.12.0): a page-drawn pointer for app windows.
+/// Returns an empty string when the style is "off" or unrecognized, so
+/// callers can skip the injection entirely.
+///
+/// Why page-drawn: it stays visible even when a site hides the native
+/// cursor via CSS or the OS cursor theme fails to render inside the
+/// webview. Minimal RAM by construction — one rAF loop, transform-only
+/// movement (no layout), a handful of divs for the trail.
+pub(crate) fn cursor_chrome_js(style: &str) -> String {
+    let dots: usize = match style {
+        "dot" | "ring" => 1,
+        "trail" => 6,
+        _ => return String::new(),
+    };
+    let shape_css = match style {
+        "ring" => {
+            "width:26px;height:26px;margin:-13px 0 0 -13px;\
+             border:2px solid #8b5cf6;border-radius:50%;background:transparent;"
+        }
+        // "dot" and the trail head share the dot look; trail followers
+        // are smaller and fade via the per-dot opacity below.
+        _ => {
+            "width:8px;height:8px;margin:-4px 0 0 -4px;\
+             border-radius:50%;background:#8b5cf6;"
+        }
+    };
+    format!(
+        r#"(function () {{
+  try {{
+    var s = document.createElement("style");
+    s.setAttribute("data-appmaka", "cursor");
+    s.textContent = "html,body,*,*::before,*::after{{cursor:none!important}}";
+    (document.head || document.documentElement).appendChild(s);
+
+    var N = {dots};
+    var nodes = [];
+    for (var i = 0; i < N; i++) {{
+      var d = document.createElement("div");
+      d.setAttribute("data-appmaka", "cursor-dot");
+      d.style.cssText =
+        "position:fixed;left:0;top:0;z-index:2147483647;" +
+        "pointer-events:none;opacity:0;" +
+        {shape_css_json};
+      if (N > 1) {{
+        // Trail followers shrink and fade with distance from the head.
+        var f = 1 - i / N;
+        d.style.opacity = "";
+        d.style.width = Math.max(3, Math.round(8 * f)) + "px";
+        d.style.height = d.style.width;
+        var m = -Math.max(3, Math.round(8 * f)) / 2;
+        d.style.margin = m + "px 0 0 " + m + "px";
+      }}
+      document.documentElement.appendChild(d);
+      nodes.push({{ el: d, x: -100, y: -100, o: N > 1 ? 0.9 * (1 - i / N) + 0.1 : 1 }});
+    }}
+
+    var tx = -100, ty = -100, inside = false;
+    document.addEventListener("mousemove", function (e) {{
+      tx = e.clientX; ty = e.clientY;
+      if (!inside) {{
+        inside = true;
+        for (var i = 0; i < nodes.length; i++) nodes[i].el.style.opacity = nodes[i].o;
+      }}
+    }}, {{ passive: true }});
+    document.addEventListener("mouseleave", function () {{
+      inside = false;
+      for (var i = 0; i < nodes.length; i++) nodes[i].el.style.opacity = 0;
+    }});
+
+    // One rAF loop; the head snaps, followers lerp for the trail effect.
+    // transform-only: no layout, no paint beyond the dots themselves.
+    (function frame() {{
+      var px = tx, py = ty;
+      for (var i = 0; i < nodes.length; i++) {{
+        var n = nodes[i];
+        if (i === 0) {{ n.x = px; n.y = py; }}
+        else {{ n.x += (px - n.x) * 0.4; n.y += (py - n.y) * 0.4; }}
+        n.el.style.transform = "translate(" + n.x + "px," + n.y + "px)";
+        px = n.x; py = n.y;
+      }}
+      requestAnimationFrame(frame);
+    }})();
+  }} catch (e) {{}}
+}})();"#,
+        dots = dots,
+        shape_css_json = serde_json::to_string(shape_css).unwrap_or_default(),
     )
 }
 
@@ -1558,5 +1656,29 @@ mod tests {
         assert!(!close_label_allowed("xacct-app1-acct1"));
         assert!(!close_label_allowed("ACCT-app1-acct1"));
         assert!(!close_label_allowed("xpopup-3"));
+    }
+
+    #[test]
+    fn cursor_chrome_off_is_empty() {
+        assert!(cursor_chrome_js("off").is_empty());
+        assert!(cursor_chrome_js("").is_empty());
+        assert!(cursor_chrome_js("bogus").is_empty());
+    }
+
+    #[test]
+    fn cursor_chrome_styles() {
+        for style in ["dot", "ring", "trail"] {
+            let js = cursor_chrome_js(style);
+            assert!(!js.is_empty(), "{style}");
+            // Native cursor hidden; dots never intercept clicks.
+            assert!(js.contains("cursor:none"), "{style}");
+            assert!(js.contains("pointer-events:none"), "{style}");
+            // Transform-only movement, one rAF loop.
+            assert!(js.contains("requestAnimationFrame"), "{style}");
+            assert!(js.contains("translate("), "{style}");
+        }
+        // Trail has followers; dot/ring are a single node.
+        assert!(cursor_chrome_js("trail").contains("var N = 6"));
+        assert!(cursor_chrome_js("dot").contains("var N = 1"));
     }
 }

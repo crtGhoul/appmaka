@@ -1214,6 +1214,7 @@ fn main() {
             downloads::set_show_completion_notice,
             // v0.7.0: launcher search-engine setting
             launcher_settings::set_search_engine,
+            launcher_settings::set_custom_cursor,
             // v0.8.0: hidden-programs collapse state (polish)
             launcher_settings::set_hidden_section_collapsed,
             // v0.8.0: centralized hotkey registry + per-command hotkeys

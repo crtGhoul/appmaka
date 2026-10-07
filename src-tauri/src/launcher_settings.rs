@@ -132,6 +132,16 @@ pub struct LauncherSettings {
     /// Old files migrate to Restore.
     #[serde(default)]
     pub startup_mode: StartupMode,
+    /// Custom pointer drawn inside app windows (v0.12.0): "off" (default,
+    /// native cursor), "dot", "ring", or "trail". A page-drawn pointer stays
+    /// visible even when the site or the OS cursor theme hides the native
+    /// one. Old files migrate to "off".
+    #[serde(default = "default_custom_cursor")]
+    pub custom_cursor: String,
+}
+
+fn default_custom_cursor() -> String {
+    "off".to_string()
 }
 
 fn default_search_engine() -> String {
@@ -153,6 +163,7 @@ impl Default for LauncherSettings {
             search_engine: default_search_engine(),
             hidden_section_collapsed: None,
             startup_mode: StartupMode::default(),
+            custom_cursor: default_custom_cursor(),
         }
     }
 }
@@ -327,6 +338,27 @@ pub fn set_search_engine(
         .lock()
         .map_err(|e| format!("settings state poisoned: {e}"))?;
     settings.search_engine = engine;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Set the custom page cursor ("off", "dot", "ring", "trail").
+/// JS: `invoke("set_custom_cursor", { style })`. Takes effect on windows
+/// opened after the change; already-open windows keep their cursor.
+#[tauri::command]
+pub fn set_custom_cursor(
+    app: AppHandle,
+    style: String,
+) -> Result<LauncherSettings, String> {
+    let style = style.trim().to_lowercase();
+    if !["off", "dot", "ring", "trail"].contains(&style.as_str()) {
+        return Err("Unknown cursor style.".to_string());
+    }
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.custom_cursor = style;
     save(&app, &settings)?;
     Ok(settings.clone())
 }

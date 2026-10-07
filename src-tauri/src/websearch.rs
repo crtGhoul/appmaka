@@ -115,6 +115,146 @@ pub fn open_search_window_placed(
     Ok(())
 }
 
+/// AppMaka search chrome (v0.12.0): the websearch window loads the engine's
+/// own results page, whose stock header looks dated next to the launcher.
+/// This replaces it with one quiet AppMaka search field carrying an
+/// example placeholder, like the launcher's. Back navigation lives in the
+/// native caption strip (v0.12.0 back button); this bar is search only.
+///
+/// Runs on every document in the search webview, but only activates on
+/// engine results hosts; anywhere else it is a no-op. Pure page JS, no
+/// IPC — `withGlobalTauri` stays false.
+fn search_chrome_js(engine: &str) -> String {
+    let (search_base, host_pat) = if engine == "google" {
+        ("https://www.google.com/search?q=", "google.com")
+    } else {
+        ("https://duckduckgo.com/?q=", "duckduckgo.com")
+    };
+    // Static fallback selectors for the engine header, used when the
+    // adaptive walk below finds nothing (engines redesign; the walk is
+    // the primary path).
+    let fallback_selectors = if engine == "google" {
+        r##"["#searchform","header[role='banner']"]"##
+    } else {
+        r##"["#header","header.header",".header-wrap"]"##
+    };
+    format!(
+        r#"(function () {{
+  var SEARCH_BASE = {search_base_json};
+  var HOST_PAT = {host_pat_json};
+  var FALLBACKS = {fallback_selectors};
+  var BAR_ID = "appmaka-searchbar";
+
+  function onResultsHost() {{
+    try {{
+      return window.location.hostname.indexOf(HOST_PAT) !== -1;
+    }} catch (e) {{
+      return false;
+    }}
+  }}
+
+  // Hide the engine's own header: walk up from its search field to the
+  // nearest header-like ancestor (adaptive — survives redesigns), with
+  // static selectors as fallback.
+  function hideEngineHeader() {{
+    var q = document.querySelector('input[name="q"]');
+    var el = q;
+    var depth = 0;
+    while (el && el !== document.body && depth < 12) {{
+      var tag = el.tagName || "";
+      var cls = (typeof el.className === "string" ? el.className : "") || "";
+      var id = el.id || "";
+      if (tag === "HEADER" || id === "header" || /(^|\s)header(\s|$)/i.test(cls) || /header/i.test(id)) {{
+        el.style.setProperty("display", "none", "important");
+        return;
+      }}
+      el = el.parentElement;
+      depth++;
+    }}
+    for (var i = 0; i < FALLBACKS.length; i++) {{
+      var n = document.querySelector(FALLBACKS[i]);
+      if (n) n.style.setProperty("display", "none", "important");
+    }}
+  }}
+
+  function currentQuery() {{
+    try {{
+      return new URLSearchParams(window.location.search).get("q") || "";
+    }} catch (e) {{
+      return "";
+    }}
+  }}
+
+  function ensureBar() {{
+    if (document.getElementById(BAR_ID)) return;
+    var body = document.body;
+    if (!body) return;
+
+    var bar = document.createElement("div");
+    bar.id = BAR_ID;
+    bar.setAttribute("role", "search");
+
+    var input = document.createElement("input");
+    input.id = "appmaka-q";
+    input.type = "search";
+    input.placeholder = "Search the web… e.g. weather tomorrow";
+    input.setAttribute("aria-label", "Search the web");
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    try {{ input.value = currentQuery(); }} catch (e) {{}}
+    input.addEventListener("keydown", function (e) {{
+      if (e.key === "Enter") {{
+        var v = input.value.trim();
+        if (v) window.location.href = SEARCH_BASE + encodeURIComponent(v);
+      }}
+    }});
+
+    bar.appendChild(input);
+    body.insertBefore(bar, body.firstChild);
+    body.style.setProperty("padding-top", "49px", "important");
+  }}
+
+  function apply() {{
+    if (!onResultsHost()) return;
+    try {{ hideEngineHeader(); }} catch (e) {{}}
+    try {{ ensureBar(); }} catch (e) {{}}
+  }}
+
+  // The engine renders client-side; re-apply as the DOM settles.
+  apply();
+  try {{
+    new MutationObserver(function () {{ apply(); }}).observe(
+      document.documentElement,
+      {{ childList: true, subtree: true }}
+    );
+  }} catch (e) {{}}
+}})();"#,
+        search_base_json = serde_json::to_string(search_base).unwrap_or_default(),
+        host_pat_json = serde_json::to_string(host_pat).unwrap_or_default(),
+        fallback_selectors = fallback_selectors,
+    )
+}
+
+/// Companion CSS for the injected search bar. Quiet dark, one violet
+/// accent on focus — no decorative gradients (AGENTS.md anti-slop).
+const SEARCH_CHROME_CSS: &str = r#"
+#appmaka-searchbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 2147483647;
+  display: flex; align-items: center;
+  padding: 8px 12px;
+  background: #1b1b1d;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+#appmaka-q {
+  flex: 1 1 auto; height: 32px; border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06); color: #fff;
+  padding: 0 12px; font-size: 14px; outline: none;
+}
+#appmaka-q:focus { border-color: #8b5cf6; }
+#appmaka-q::placeholder { color: rgba(255, 255, 255, 0.38); }
+"#;
 /// JS: `invoke("open_web_search", { query })`.
 /// Async on purpose: window-creating commands are never synchronous
 /// (Windows WebView2 deadlock, wry#583) — and creation itself still goes
@@ -168,6 +308,21 @@ fn build_search_window(
     // Alt+Right history nav: bare webviews have no chrome.
     builder = builder.initialization_script(TARGET_BLANK_SHIM_JS);
     builder = builder.initialization_script(NAV_KEYS_JS);
+    // v0.12.0: AppMaka search chrome — return button + search field with
+    // an example placeholder, replacing the engine's dated header. The
+    // engine is baked in: the bar navigates with the same URL shape as
+    // build_search_url.
+    builder = builder.initialization_script(search_chrome_js(&search_engine(app)));
+    builder = builder.initialization_script(cosmetic_init_script(SEARCH_CHROME_CSS));
+    // v0.12.0: custom page cursor, same as account windows. Skipped when off.
+    let cursor_style = app
+        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
+        .unwrap_or_default();
+    let cursor_js = crate::windows::cursor_chrome_js(&cursor_style);
+    if !cursor_js.is_empty() {
+        builder = builder.initialization_script(cursor_js);
+    }
     let css = adblock.cosmetic_css_for(url.as_str());
     if !css.is_empty() {
         builder = builder.initialization_script(cosmetic_init_script(&css));
@@ -263,5 +418,37 @@ mod tests {
     fn search_window_label_is_fixed_for_reuse() {
         // The whole one-window discipline hangs on this label never varying.
         assert_eq!(SEARCH_WINDOW_LABEL, "websearch");
+    }
+
+    #[test]
+    fn search_chrome_bakes_engine_url() {
+        let ddg = search_chrome_js("duckduckgo");
+        assert!(ddg.contains("https://duckduckgo.com/?q="));
+        assert!(ddg.contains("duckduckgo.com"));
+        let g = search_chrome_js("google");
+        assert!(g.contains("https://www.google.com/search?q="));
+        assert!(g.contains("google.com"));
+        // Unknown engine falls back to DuckDuckGo, matching build_search_url.
+        let bing = search_chrome_js("bing");
+        assert!(bing.contains("https://duckduckgo.com/?q="));
+    }
+
+    #[test]
+    fn search_chrome_has_bar_and_example() {
+        let js = search_chrome_js("duckduckgo");
+        // Search field with an example placeholder, like the launcher's.
+        // (Back navigation lives in the native caption strip.)
+        assert!(js.contains("appmaka-q"));
+        assert!(js.contains("e.g."));
+        // Scoped to engine hosts; inert elsewhere.
+        assert!(js.contains("onResultsHost"));
+    }
+
+    #[test]
+    fn search_chrome_css_is_quiet() {
+        // Anti-slop: no decorative gradients in the injected bar.
+        assert!(!SEARCH_CHROME_CSS.contains("gradient"));
+        assert!(SEARCH_CHROME_CSS.contains("#appmaka-searchbar"));
+        assert!(SEARCH_CHROME_CSS.contains("#appmaka-q"));
     }
 }

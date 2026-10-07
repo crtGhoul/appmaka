@@ -618,6 +618,9 @@ export function LauncherSettingsPanel({
   const [searchEngine, setSearchEngine] = useState<"duckduckgo" | "google">(
     settings.search_engine ?? "duckduckgo"
   );
+  const [customCursor, setCustomCursor] = useState<
+    "off" | "dot" | "ring" | "trail"
+  >(settings.custom_cursor ?? "off");
   const [startupMode, setStartupMode] = useState<"restore" | "ask" | "fresh">(
     settings.startup_mode ?? "restore"
   );
@@ -728,6 +731,22 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setSearchEngine(settings.search_engine ?? "duckduckgo");
+    }
+  }
+
+  async function handleCustomCursor(style: "off" | "dot" | "ring" | "trail") {
+    setCustomCursor(style);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("set_custom_cursor", {
+        style,
+      });
+      onSaved(updated);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setCustomCursor(settings.custom_cursor ?? "off");
     }
   }
 
@@ -883,6 +902,29 @@ export function LauncherSettingsPanel({
         </select>
         <span className="help">
           Used by the launcher's ?query command. DuckDuckGo is the default.
+        </span>
+      </label>
+
+      <label className="inline-form">
+        <span>Custom cursor in app windows</span>
+        <select
+          value={customCursor}
+          onChange={(e) =>
+            void handleCustomCursor(
+              e.target.value as "off" | "dot" | "ring" | "trail"
+            )
+          }
+          aria-label="Custom cursor style for app windows"
+        >
+          <option value="off">Off (system cursor)</option>
+          <option value="dot">Dot</option>
+          <option value="ring">Ring</option>
+          <option value="trail">Trail</option>
+        </select>
+        <span className="help">
+          Draws a lightweight pointer inside app windows. Useful if the
+          system cursor ever goes invisible there. Applies to windows opened
+          after the change.
         </span>
       </label>
 

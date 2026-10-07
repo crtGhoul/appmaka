@@ -117,6 +117,11 @@ export interface LauncherSettings {
   /** Web-search engine for the launcher's `?query` command. Backend always sends it (serde default). */
   search_engine: "duckduckgo" | "google";
   /**
+   * Custom page cursor for app windows (v0.12.0). Backend always sends it
+   * (serde default): "off" | "dot" | "ring" | "trail".
+   */
+  custom_cursor: "off" | "dot" | "ring" | "trail";
+  /**
    * Whether the library's "Hidden programs" list is collapsed. Null when the
    * user never toggled it: the UI then defaults to collapsed whenever the
    * list is non-empty.
