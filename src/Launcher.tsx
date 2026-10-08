@@ -1168,6 +1168,11 @@ export function TileMenu({
 export interface TileMenuActions {
   onOpen: (r: SearchResult) => void;
   onOpenAccount: (app: WebApp, account: Account) => void;
+  /**
+   * v0.13.0: open an app/account in a new tabbed window (first tab).
+   * Optional so hosts without tab support don't have to provide it.
+   */
+  onOpenAsTabbed?: (app: WebApp, account: Account) => void;
   onTogglePin: (itemId: string) => void | Promise<void>;
   /**
    * v0.9.9: "Don't close this window" for an open account window, by
@@ -1250,18 +1255,31 @@ export function buildTileMenuEntries(
     const entries: MenuEntry[] = [
       { key: "open", label: "Open", onSelect: () => a.onOpen(r) },
     ];
-    if (r.app.accounts.length > 0) {
+    const sortedAccounts = [...r.app.accounts].sort((x, y) =>
+      x.label.localeCompare(y.label)
+    );
+    if (sortedAccounts.length > 0) {
       entries.push({
         key: "open-account",
         label: "Open account",
-        submenu: [...r.app.accounts]
-          .sort((x, y) => x.label.localeCompare(y.label))
-          .map((acct) => ({
-            key: `account:${acct.id}`,
-            label: acct.label,
-            onSelect: () => a.onOpenAccount(r.app, acct),
-          })),
+        submenu: sortedAccounts.map((acct) => ({
+          key: `account:${acct.id}`,
+          label: acct.label,
+          onSelect: () => a.onOpenAccount(r.app, acct),
+        })),
       });
+      // v0.13.0: open in a new tabbed window instead of a plain page.
+      if (a.onOpenAsTabbed) {
+        entries.push({
+          key: "open-tabbed",
+          label: "Open as tabbed window",
+          submenu: sortedAccounts.map((acct) => ({
+            key: `tabbed:${acct.id}`,
+            label: acct.label,
+            onSelect: () => a.onOpenAsTabbed!(r.app, acct),
+          })),
+        });
+      }
     }
     entries.push(
       pin,
@@ -1282,6 +1300,14 @@ export function buildTileMenuEntries(
       pin,
     ];
     if (acct) {
+      // v0.13.0: open this account in a new tabbed window.
+      if (a.onOpenAsTabbed) {
+        entries.splice(1, 0, {
+          key: "open-tabbed",
+          label: "Open as tabbed window",
+          onSelect: () => a.onOpenAsTabbed!(r.app, acct),
+        });
+      }
       const dontClose = dontCloseEntry(r.app.id, acct.id);
       if (dontClose) entries.push(dontClose);
       const closeWindow = closeWindowEntry(r.app.id, acct.id);

@@ -267,7 +267,7 @@ export interface Routine {
 }
 
 /** Routine window layout. Serialized snake_case in routines.json. */
-export type RoutineLayout = "cascade" | "side_by_side";
+export type RoutineLayout = "cascade" | "side_by_side" | "tabbed";
 
 // ---------------------------------------------------------------------------
 

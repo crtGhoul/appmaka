@@ -250,6 +250,36 @@ async fn open_tabbed_window(
     tabs::open_tabbed_window(&app, &store, &adblock, &tabstate, tabs::OpenTabbedParams::default())
 }
 
+/// Open a new tabbed window with the given app/account as the first tab.
+/// JS: `invoke("open_app_in_tabbed_window", { appId, accountId })`
+/// Async: builds a window (never on a sync IPC thread).
+#[tauri::command]
+async fn open_app_in_tabbed_window(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    tabstate: State<'_, tabs::TabState>,
+    app_id: String,
+    account_id: String,
+) -> Result<tabs::TabInfo, String> {
+    tabs::open_tabbed_window(
+        &app,
+        &store,
+        &adblock,
+        &tabstate,
+        tabs::OpenTabbedParams {
+            initial: vec![tabs::TabEntry {
+                app_id,
+                account_id,
+                last_url: None,
+            }],
+            active: 0,
+            placement: None,
+            restore_id: None,
+        },
+    )
+}
+
 /// Switch the active tab (rebuilds the webview on the new tab's session).
 /// JS: `invoke("switch_tab", { groupId, index })`
 #[tauri::command]
@@ -1174,6 +1204,7 @@ fn main() {
             pin::window_pinned,
             // v0.10.0: tabbed app windows
             open_tabbed_window,
+            open_app_in_tabbed_window,
             switch_tab,
             add_tab,
             close_tab,

@@ -191,6 +191,7 @@ mod imp {
     use tauri::{AppHandle, Manager, WebviewWindow};
     use windows::core::{w, PWSTR};
     use windows::Win32::Foundation::*;
+    use windows::Win32::Graphics::Dwm::*;
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::*;
@@ -302,6 +303,10 @@ mod imp {
         /// v0.12.0: back-button hover/pressed for plain page strips.
         hover_back: bool,
         pressed_back: bool,
+        /// v0.13.0: close (X) button hover/pressed for plain page strips.
+        /// Tabbed strips use hover_tab/pressed_tab with TabHit::CloseWindow.
+        hover_close: bool,
+        pressed_close: bool,
         mouse_in: bool,
         /// v0.12.0: window title drawn in plain page strips.
         page_title: String,
@@ -416,7 +421,7 @@ mod imp {
         }
         // Snapshot everything the paint needs under one short borrow, then
         // paint with no borrow held (the v0.9.7 two-phase rule).
-        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, page_tint, hover_tab, pressed_tab, hover_back, pressed_back, page_title) =
+        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, page_tint, hover_tab, pressed_tab, hover_back, pressed_back, hover_close, pressed_close, page_title) =
             with_chrome(|ch| {
                 let label = ch.by_hwnd.get(&(hwnd.0 as isize))?;
                 let cp = ch.captions.get(label)?;
@@ -433,10 +438,12 @@ mod imp {
                     cp.pressed_tab,
                     cp.hover_back,
                     cp.pressed_back,
+                    cp.hover_close,
+                    cp.pressed_close,
                     cp.page_title.clone(),
                 ))
             })
-            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None, None, false, false, String::new()));
+            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None, None, false, false, false, false, String::new()));
 
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
@@ -545,6 +552,25 @@ mod imp {
         // title — the strip is a real title bar, not an empty black bar.
         // Tabbed strips already have tabs; they keep their layout.
         if tabbed.is_none() {
+            // v0.13.0: close (X) button in the third slot, mirroring the
+            // tabbed strip's X: red on hover/press, like the native button.
+            if let Some(btn) = button_rect_at(hwnd, scale, 2) {
+                if hover_close || pressed_close {
+                    let bbg = CreateSolidBrush(if pressed_close {
+                        rgb(196, 43, 28)
+                    } else {
+                        rgb(232, 17, 35)
+                    });
+                    FillRect(hdc, &btn, bbg);
+                    let _ = DeleteObject(hbrush_to_obj(bbg));
+                }
+                let text_color = if hover_close || pressed_close {
+                    rgb(255, 255, 255)
+                } else {
+                    rgb(204, 204, 204)
+                };
+                draw_text_centered(hdc, btn, "×", scale, text_color);
+            }
             if let Some(btn) = back_button_rect(hwnd, scale) {
                 if hover_back || pressed_back {
                     let bbg = CreateSolidBrush(if pressed_back {
@@ -846,6 +872,9 @@ mod imp {
             // keep their tab layout).
             let over_back = cp.tabbed.is_none()
                 && back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
+            // v0.13.0: close (X) button for plain page strips, third slot.
+            let over_close = cp.tabbed.is_none()
+                && button_rect_at(hwnd, cp.scale, 2).is_some_and(|b| pt_in_rect(x, y, &b));
             if over_max {
                 cp.pressed_max = true;
                 SetCapture(hwnd);
@@ -855,9 +884,12 @@ mod imp {
             } else if over_back {
                 cp.pressed_back = true;
                 SetCapture(hwnd);
+            } else if over_close {
+                cp.pressed_close = true;
+                SetCapture(hwnd);
             }
             let _ = InvalidateRect(Some(hwnd), None, false);
-            if over_max || over_min || over_back {
+            if over_max || over_min || over_back || over_close {
                 Some(Down::None)
             } else if IsZoomed(cp.owner).as_bool() {
                 Some(Down::Restore(cp.owner))
@@ -993,6 +1025,41 @@ mod imp {
                         if let Some(w) = app.get_webview_window(&label) {
                             let _ = w.eval("history.back()");
                         }
+                    })
+                    .ok();
+            }
+        }
+        // v0.13.0: close (X) button press-and-release for plain page
+        // strips. Recompute the hit at release; only a matching
+        // press+release closes. User intent: pinned windows get the
+        // standard confirm via close_tracked_window.
+        let close_click = with_chrome(|ch| {
+            let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
+            let cp = ch.captions.get_mut(&label)?;
+            if !cp.pressed_close {
+                return None;
+            }
+            cp.pressed_close = false;
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let over =
+                button_rect_at(hwnd, cp.scale, 2).is_some_and(|b| pt_in_rect(x, y, &b));
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            over.then(|| label.clone())
+        });
+        // Dispatch with no borrow held: closing must not run in the
+        // window proc (v0.9.7 re-entrancy rules).
+        if let Some(label) = close_click {
+            if let Some(app) = with_chrome(|ch| Some(ch.app.clone())) {
+                std::thread::Builder::new()
+                    .name("appmaka-strip-close".to_string())
+                    .spawn(move || {
+                        crate::windows::close_tracked_window(
+                            &app,
+                            &label,
+                            crate::pin::CloseIntent::User,
+                        );
                     })
                     .ok();
             }
@@ -1249,13 +1316,18 @@ mod imp {
             // v0.12.0: back-button hover for plain page strips.
             let hover_back = cp.tabbed.is_none()
                 && back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
+            // v0.13.0: close (X) hover for plain page strips.
+            let hover_close = cp.tabbed.is_none()
+                && button_rect_at(hwnd, cp.scale, 2).is_some_and(|b| pt_in_rect(x, y, &b));
             if hover_min != cp.hover_min
                 || hover_max != cp.hover_max
                 || hover_back != cp.hover_back
+                || hover_close != cp.hover_close
             {
                 cp.hover_min = hover_min;
                 cp.hover_max = hover_max;
                 cp.hover_back = hover_back;
+                cp.hover_close = hover_close;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             // v0.10.0: tab hover for tabbed strips (pure query under the
@@ -1293,6 +1365,7 @@ mod imp {
             cp.hover_min = false;
             cp.hover_max = false;
             cp.hover_back = false;
+            cp.hover_close = false;
             cp.hover_tab = None;
             let _ = InvalidateRect(Some(hwnd), None, false);
             Some(())
@@ -1792,6 +1865,16 @@ mod imp {
                 return;
             }
         };
+        // v0.13.0: round the strip's corners (Windows 11 style) so they
+        // blend with the page window below. No borrow held here (Phase 2);
+        // failure just leaves square corners, never a crash.
+        let round = DWMWCP_ROUND.0;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &round as *const i32 as *const std::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
         create_tooltip(hwnd);
         // Phase 3: register under a short borrow.
         with_chrome(|ch| {
@@ -1808,6 +1891,8 @@ mod imp {
                     pressed_max: false,
                     hover_back: false,
                     pressed_back: false,
+                    hover_close: false,
+                    pressed_close: false,
                     mouse_in: false,
                     page_title,
                     tabbed,

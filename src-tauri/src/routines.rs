@@ -67,6 +67,9 @@ pub enum RoutineLayout {
     /// Account windows tile as equal side-by-side columns ("pillars")
     /// across the cursor's monitor, left to right in routine order.
     SideBySide,
+    /// v0.13.0: account items open as tabs in a single tabbed window,
+    /// in routine order. Program items still launch natively.
+    Tabbed,
 }
 
 /// A named, hotkey-able set of things to open together.
@@ -334,6 +337,7 @@ pub async fn run_routine(
     adblock: State<'_, AdblockState>,
     winstate: State<'_, WindowState>,
     launcher: State<'_, LauncherState>,
+    tabstate: State<'_, crate::tabs::TabState>,
     routine_id: String,
 ) -> Result<String, String> {
     let routine = load(&app)
@@ -342,6 +346,58 @@ pub async fn run_routine(
         .ok_or_else(|| "That routine is gone.".to_string())?;
     if routine.items.is_empty() {
         return Err("This routine has no items to open.".to_string());
+    }
+
+    // v0.13.0 tabbed layout: all account items open as tabs in ONE new
+    // tabbed window, in routine order. Program items still launch
+    // natively. Invalid/unknown apps are dropped by open_tabbed_window's
+    // store validation, same as the + picker.
+    if routine.layout == RoutineLayout::Tabbed {
+        let mut tabs: Vec<crate::tabs::TabEntry> = Vec::new();
+        let mut results: Vec<(String, Result<(), String>)> =
+            Vec::with_capacity(routine.items.len());
+        for (i, item) in routine.items.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let name = item_display_name(&store, &launcher, item);
+            let outcome = match item.kind.as_str() {
+                "account" => {
+                    tabs.push(crate::tabs::TabEntry {
+                        app_id: item.app_id.clone(),
+                        account_id: item.account_id.clone().unwrap_or_default(),
+                        last_url: None,
+                    });
+                    Ok(())
+                }
+                "program" => {
+                    let program_id = item.program_id.as_deref().unwrap_or("");
+                    launcher.launch(program_id)
+                }
+                other => Err(format!("Unknown routine item kind \"{other}\".")),
+            };
+            results.push((name, outcome));
+        }
+        if !tabs.is_empty() {
+            let info = crate::tabs::open_tabbed_window(
+                &app,
+                &store,
+                &adblock,
+                &tabstate,
+                crate::tabs::OpenTabbedParams {
+                    initial: tabs,
+                    active: 0,
+                    placement: None,
+                    restore_id: None,
+                },
+            )
+            .map_err(|e| format!("couldn't open the tabbed window: {e}"))?;
+            results.push((
+                format!("{} tabs", info.tabs.len()),
+                Ok(()),
+            ));
+        }
+        return Ok(summarize(&results));
     }
 
     // v0.9.0 side-by-side layout: tile the routine's ACCOUNT windows as
@@ -558,5 +614,18 @@ mod tests {
         .unwrap();
         let decoded: Routine = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.layout, RoutineLayout::SideBySide);
+    }
+
+    #[test]
+    fn layout_tabbed_round_trip() {
+        // v0.13.0: the tabbed layout survives a JSON round trip.
+        let json = serde_json::to_string(&Routine {
+            layout: RoutineLayout::Tabbed,
+            ..sample_routine()
+        })
+        .unwrap();
+        assert!(json.contains("\"layout\":\"tabbed\""));
+        let decoded: Routine = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.layout, RoutineLayout::Tabbed);
     }
 }

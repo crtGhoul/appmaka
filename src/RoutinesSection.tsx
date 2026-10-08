@@ -38,14 +38,14 @@ export interface Routine {
   name: string;
   /** Global hotkey like "Ctrl+Alt+M", or null for none. */
   hotkey: string | null;
-  /** Window layout: "cascade" (overlap) or "side_by_side" (tile as columns).
-   * Missing on old records means cascade. */
+  /** Window layout: "cascade" (overlap), "side_by_side" (tile as columns),
+   * or "tabbed" (one tabbed window). Missing on old records means cascade. */
   layout: RoutineLayout;
   items: RoutineItem[];
 }
 
-/** Routine window layout (v0.9.0). Serialized snake_case in routines.json. */
-export type RoutineLayout = "cascade" | "side_by_side";
+/** Routine window layout. Serialized snake_case in routines.json. */
+export type RoutineLayout = "cascade" | "side_by_side" | "tabbed";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -257,11 +257,13 @@ function RoutineForm({
           <option value="side_by_side">
             Side by side — tile as columns
           </option>
+          <option value="tabbed">Tabbed — one window, apps as tabs</option>
         </select>
       </label>
       <p className="muted small" style={{ margin: "0 0 4px" }}>
         Side by side tiles this routine's windows as equal columns across
-        your current monitor, left to right in the order below.
+        your current monitor, left to right in the order below. Tabbed opens
+        them all as tabs in a single window instead.
       </p>
       <div style={{ marginTop: 8 }}>
         <span className="field-label" style={{ fontSize: 14 }}>
@@ -468,6 +470,7 @@ export function RoutinesSection({
                   {routine.items.length === 1 ? "item" : "items"}
                   {routine.hotkey ? ` · ${routine.hotkey}` : ""}
                   {routine.layout === "side_by_side" ? " · side by side" : ""}
+                  {routine.layout === "tabbed" ? " · tabbed" : ""}
                 </div>
               </div>
               <button

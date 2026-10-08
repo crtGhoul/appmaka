@@ -2636,6 +2636,23 @@ function AppShell() {
     actions: {
       onOpen: (r) => void activateResult(r),
       onOpenAccount: (app, acct) => void handleOpenAccount(app, acct),
+      // v0.13.0: open an app/account as the first tab of a new tabbed
+      // window. Spotlight behavior: dismiss the overlay on success.
+      onOpenAsTabbed: (app, acct) => {
+        void (async () => {
+          setError(null);
+          try {
+            await invoke("open_app_in_tabbed_window", {
+              appId: app.id,
+              accountId: acct.id,
+            });
+            setQuery("");
+            await invoke("hide_library");
+          } catch (err) {
+            setError(errMsg(err));
+          }
+        })();
+      },
       onTogglePin: (itemId) => void handleTogglePin(itemId),
       onToggleWindowPin: (label) => void handleToggleWindowPin(label),
       onCloseWindow: (label) => void handleCloseWindow(label),

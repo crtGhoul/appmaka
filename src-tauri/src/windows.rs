@@ -1051,7 +1051,7 @@ fn try_suspend_webview(window: &WebviewWindow) -> bool {
 /// Close-intent lives in pin.rs next to the plan it drives.
 use crate::pin::{CloseIntent, ClosePlan};
 
-fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIntent) {
+pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIntent) {
     // Pinned windows (v0.9.9): the plan is pure and unit-tested —
     // background reclaims skip silently, user closes ask first, and
     // shutdown always proceeds.
