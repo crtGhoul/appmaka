@@ -243,15 +243,16 @@ pub fn tab_hit_test(
     if y < 0.0 || y >= STRIP_H || x < 0.0 || x >= strip_w {
         return TabHit::Drag;
     }
-    // Right-side window buttons: X, max, min (rightmost).
+    // Right-side window buttons, Windows order: X rightmost, then max,
+    // then min.
     if x >= strip_w - BTN_W {
-        return TabHit::Min;
+        return TabHit::CloseWindow;
     }
     if x >= strip_w - 2.0 * BTN_W {
         return TabHit::Max;
     }
     if x >= strip_w - 3.0 * BTN_W {
-        return TabHit::CloseWindow;
+        return TabHit::Min;
     }
     let (ranges, add_x) = tab_ranges(strip_w, n_tabs);
     if x >= add_x && x < add_x + ADD_W {
@@ -1688,10 +1689,10 @@ mod tests {
             tab_hit_test(600.0, 10.0, strip_w, 2, close_w),
             TabHit::Drag
         );
-        // Window buttons, rightmost first: min, max, close.
+        // Window buttons, rightmost first: close, max, min.
         assert_eq!(
             tab_hit_test(1190.0, 10.0, strip_w, 2, close_w),
-            TabHit::Min
+            TabHit::CloseWindow
         );
         assert_eq!(
             tab_hit_test(1140.0, 10.0, strip_w, 2, close_w),
@@ -1699,7 +1700,7 @@ mod tests {
         );
         assert_eq!(
             tab_hit_test(1090.0, 10.0, strip_w, 2, close_w),
-            TabHit::CloseWindow
+            TabHit::Min
         );
         // Above/below the strip: not a tab hit (drag passthrough).
         assert_eq!(

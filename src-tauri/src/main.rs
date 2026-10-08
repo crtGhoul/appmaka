@@ -1246,6 +1246,7 @@ fn main() {
             // v0.7.0: launcher search-engine setting
             launcher_settings::set_search_engine,
             launcher_settings::set_custom_cursor,
+            launcher_settings::set_open_as_tabbed,
             // v0.8.0: hidden-programs collapse state (polish)
             launcher_settings::set_hidden_section_collapsed,
             // v0.8.0: centralized hotkey registry + per-command hotkeys

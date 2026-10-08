@@ -353,13 +353,13 @@ mod imp {
         CHROME.with(|c| c.borrow_mut().as_mut().and_then(f))
     }
 
-    /// Minimize button: rightmost slot. The maximize/restore button
-    /// (v0.9.9) takes the slot to its left; both are BTN_W_LOGICAL wide.
+    /// Minimize button: third slot from the right (Windows order:
+    /// close, max, min from the right edge). Both are BTN_W_LOGICAL wide.
     fn button_rect(hwnd: HWND, scale: f64) -> Option<RECT> {
-        button_rect_at(hwnd, scale, 0)
+        button_rect_at(hwnd, scale, 2)
     }
 
-    /// Maximize/restore button: one slot left of minimize.
+    /// Maximize/restore button: one slot left of close.
     fn max_button_rect(hwnd: HWND, scale: f64) -> Option<RECT> {
         button_rect_at(hwnd, scale, 1)
     }
@@ -543,8 +543,8 @@ mod imp {
             let _ = DeleteObject(hbrush_to_obj(glyph));
         }
         // v0.10.0: tabbed strips get a window close (X) button in the
-        // third slot — an empty group has no tab to close, so the window
-        // needs its own X. Plain page strips keep min/max only.
+        // rightmost slot (Windows order) — an empty group has no tab to
+        // close, so the window needs its own X.
         if tabbed.is_some() {
             paint_x_button(hdc, hwnd, scale, tint, hover_tab, pressed_tab);
         }
@@ -552,9 +552,10 @@ mod imp {
         // title — the strip is a real title bar, not an empty black bar.
         // Tabbed strips already have tabs; they keep their layout.
         if tabbed.is_none() {
-            // v0.13.0: close (X) button in the third slot, mirroring the
-            // tabbed strip's X: red on hover/press, like the native button.
-            if let Some(btn) = button_rect_at(hwnd, scale, 2) {
+            // v0.13.0: close (X) button in the rightmost slot (Windows
+            // order), mirroring the tabbed strip's X: red on hover/press,
+            // like the native button.
+            if let Some(btn) = button_rect_at(hwnd, scale, 0) {
                 if hover_close || pressed_close {
                     let bbg = CreateSolidBrush(if pressed_close {
                         rgb(196, 43, 28)
@@ -622,7 +623,8 @@ mod imp {
         let _ = EndPaint(hwnd, &ps);
     }
 
-    /// Window close (X) button for tabbed strips: third slot from the
+    /// Window close (X) button for tabbed strips: rightmost slot,
+    /// Windows order (close, max, min from the right edge).
     /// right, drawn as text so no diagonal-bar geometry is needed.
     unsafe fn paint_x_button(
         hdc: HDC,
@@ -633,7 +635,7 @@ mod imp {
         pressed_tab: Option<crate::tabs::TabHit>,
     ) {
         use crate::tabs::TabHit;
-        let Some(btn) = button_rect_at(hwnd, scale, 2) else {
+        let Some(btn) = button_rect_at(hwnd, scale, 0) else {
             return;
         };
         let hovered = hover_tab == Some(TabHit::CloseWindow);
@@ -872,9 +874,10 @@ mod imp {
             // keep their tab layout).
             let over_back = cp.tabbed.is_none()
                 && back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
-            // v0.13.0: close (X) button for plain page strips, third slot.
+            // v0.13.0: close (X) button for plain page strips, rightmost
+            // slot (Windows order).
             let over_close = cp.tabbed.is_none()
-                && button_rect_at(hwnd, cp.scale, 2).is_some_and(|b| pt_in_rect(x, y, &b));
+                && button_rect_at(hwnd, cp.scale, 0).is_some_and(|b| pt_in_rect(x, y, &b));
             if over_max {
                 cp.pressed_max = true;
                 SetCapture(hwnd);
@@ -1044,7 +1047,7 @@ mod imp {
                 let _ = ReleaseCapture();
             }
             let over =
-                button_rect_at(hwnd, cp.scale, 2).is_some_and(|b| pt_in_rect(x, y, &b));
+                button_rect_at(hwnd, cp.scale, 0).is_some_and(|b| pt_in_rect(x, y, &b));
             let _ = InvalidateRect(Some(hwnd), None, false);
             over.then(|| label.clone())
         });
@@ -1318,7 +1321,7 @@ mod imp {
                 && back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
             // v0.13.0: close (X) hover for plain page strips.
             let hover_close = cp.tabbed.is_none()
-                && button_rect_at(hwnd, cp.scale, 2).is_some_and(|b| pt_in_rect(x, y, &b));
+                && button_rect_at(hwnd, cp.scale, 0).is_some_and(|b| pt_in_rect(x, y, &b));
             if hover_min != cp.hover_min
                 || hover_max != cp.hover_max
                 || hover_back != cp.hover_back

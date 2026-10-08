@@ -2412,10 +2412,25 @@ function AppShell() {
     }
   }
 
-  async function handleOpenAccount(app: WebApp, account: Account): Promise<boolean> {
+  async function handleOpenAccount(
+    app: WebApp,
+    account: Account,
+    forcePlain = false
+  ): Promise<boolean> {
     setError(null);
+    // v0.13.0: the "open as tabbed" setting makes launcher opens create
+    // tabbed windows; the tile menu's explicit Open passes forcePlain.
+    const asTabbed =
+      !forcePlain && (launcherSettings?.open_as_tabbed ?? false);
     try {
-      await invoke("open_account", { appId: app.id, accountId: account.id });
+      if (asTabbed) {
+        await invoke("open_app_in_tabbed_window", {
+          appId: app.id,
+          accountId: account.id,
+        });
+      } else {
+        await invoke("open_account", { appId: app.id, accountId: account.id });
+      }
       // Refresh last_opened display.
       const now = Math.floor(Date.now() / 1000);
       setApps((prev) =>
@@ -2634,7 +2649,7 @@ function AppShell() {
         ? { open: true, pinned: pinnedLabels.has(label) }
         : null,
     actions: {
-      onOpen: (r) => void activateResult(r),
+      onOpen: (r) => void activateResult(r, true),
       onOpenAccount: (app, acct) => void handleOpenAccount(app, acct),
       // v0.13.0: open an app/account as the first tab of a new tabbed
       // window. Spotlight behavior: dismiss the overlay on success.
@@ -2716,7 +2731,7 @@ function AppShell() {
     return [...app.accounts].sort((a, b) => b.last_opened - a.last_opened)[0];
   }
 
-  async function activateResult(r: SearchResult) {
+  async function activateResult(r: SearchResult, forcePlain = false) {
     setError(null);
     try {
       if (r.kind === "routine") {
@@ -2728,7 +2743,7 @@ function AppShell() {
       } else if (r.kind === "program") {
         await invoke("launch_program", { id: r.program.id });
       } else if (r.kind === "account") {
-        const ok = await handleOpenAccount(r.app, r.account);
+        const ok = await handleOpenAccount(r.app, r.account, forcePlain);
         if (!ok) return;
       } else if (r.kind === "search") {
         // v0.9.3: pinned web search — re-run the query in the shared
@@ -2753,7 +2768,7 @@ function AppShell() {
         // Web app row: open the most recently used account.
         const acct = mostRecentAccount(r.app) ?? r.app.accounts[0];
         if (!acct) return;
-        const ok = await handleOpenAccount(r.app, acct);
+        const ok = await handleOpenAccount(r.app, acct, forcePlain);
         if (!ok) return;
       }
       // Usage ranking: the tile's tagged id (app:/account:/program:/

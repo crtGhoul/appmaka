@@ -138,6 +138,10 @@ pub struct LauncherSettings {
     /// one. Old files migrate to "off".
     #[serde(default = "default_custom_cursor")]
     pub custom_cursor: String,
+    /// Open apps/accounts as tabbed windows instead of plain page windows
+    /// (v0.13.0). Old files migrate to false (plain windows).
+    #[serde(default)]
+    pub open_as_tabbed: bool,
 }
 
 fn default_custom_cursor() -> String {
@@ -164,6 +168,7 @@ impl Default for LauncherSettings {
             hidden_section_collapsed: None,
             startup_mode: StartupMode::default(),
             custom_cursor: default_custom_cursor(),
+            open_as_tabbed: false,
         }
     }
 }
@@ -359,6 +364,23 @@ pub fn set_custom_cursor(
         .lock()
         .map_err(|e| format!("settings state poisoned: {e}"))?;
     settings.custom_cursor = style;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Set whether opening an app/account creates a tabbed window instead of
+/// a plain page window (v0.13.0).
+/// JS: `invoke("set_open_as_tabbed", { enabled })`.
+#[tauri::command]
+pub fn set_open_as_tabbed(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.open_as_tabbed = enabled;
     save(&app, &settings)?;
     Ok(settings.clone())
 }

@@ -621,6 +621,10 @@ export function LauncherSettingsPanel({
   const [customCursor, setCustomCursor] = useState<
     "off" | "dot" | "ring" | "trail"
   >(settings.custom_cursor ?? "off");
+  // v0.13.0: open apps/accounts as tabbed windows.
+  const [openAsTabbed, setOpenAsTabbed] = useState(
+    settings.open_as_tabbed ?? false
+  );
   const [startupMode, setStartupMode] = useState<"restore" | "ask" | "fresh">(
     settings.startup_mode ?? "restore"
   );
@@ -747,6 +751,23 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setCustomCursor(settings.custom_cursor ?? "off");
+    }
+  }
+
+  // v0.13.0: open apps/accounts as tabbed windows instead of plain pages.
+  async function handleOpenAsTabbed(enabled: boolean) {
+    setOpenAsTabbed(enabled);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("set_open_as_tabbed", {
+        enabled,
+      });
+      onSaved(updated);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setOpenAsTabbed(settings.open_as_tabbed ?? false);
     }
   }
 
@@ -925,6 +946,21 @@ export function LauncherSettingsPanel({
           Draws a lightweight pointer inside app windows. Useful if the
           system cursor ever goes invisible there. Applies to windows opened
           after the change.
+        </span>
+      </label>
+
+      <label className="inline-form">
+        <span>Open apps as tabbed windows</span>
+        <input
+          type="checkbox"
+          checked={openAsTabbed}
+          onChange={(e) => void handleOpenAsTabbed(e.target.checked)}
+          aria-label="Open apps as tabbed windows"
+        />
+        <span className="help">
+          Apps and accounts open in a tabbed window instead of a plain page
+          window. You can still open a plain window from the tile's
+          right-click menu.
         </span>
       </label>
 

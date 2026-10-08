@@ -122,6 +122,11 @@ export interface LauncherSettings {
    */
   custom_cursor: "off" | "dot" | "ring" | "trail";
   /**
+   * Open apps/accounts as tabbed windows instead of plain page windows
+   * (v0.13.0). Backend always sends it (serde default).
+   */
+  open_as_tabbed: boolean;
+  /**
    * Whether the library's "Hidden programs" list is collapsed. Null when the
    * user never toggled it: the UI then defaults to collapsed whenever the
    * list is non-empty.
