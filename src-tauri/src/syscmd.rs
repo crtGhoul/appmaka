@@ -65,13 +65,8 @@ fn reboot() -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn lock_workstation() -> Result<(), String> {
     // Best effort: headless or non-systemd sessions may have nothing to lock.
-    let _ = std::process::Command::new("loginctl")
-        .arg("lock-session")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    Ok(())
+    // Detached like every sibling: never hold the IPC thread on a child.
+    spawn_detached("loginctl", &["lock-session"])
 }
 
 #[cfg(target_os = "linux")]

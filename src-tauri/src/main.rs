@@ -390,10 +390,20 @@ fn list_programs(state: State<'_, LauncherState>) -> Vec<NativeProgram> {
     state.list()
 }
 
-/// Full rescan now; blocks a worker thread, not the UI. Returns the count.
+/// Full rescan now; returns the count.
+/// ASYNC ON PURPOSE: scan_all walks Start Menu/Desktop, resolves .lnk
+/// files through COM, and extracts icons — it can take seconds, and a
+/// sync command would block the WebView2 IPC thread in the meantime
+/// (same reason fetch_favicon and fetch_page_title are async).
 #[tauri::command]
-fn rescan_programs(state: State<'_, LauncherState>) -> usize {
-    state.rescan()
+async fn rescan_programs(app: AppHandle) -> usize {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.try_state::<LauncherState>()
+            .map(|s| s.rescan())
+            .unwrap_or(0)
+    })
+    .await
+    .unwrap_or(0)
 }
 
 /// Launch a program by id. The lookup is server-side, so the frontend can
