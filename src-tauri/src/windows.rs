@@ -515,6 +515,32 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
 
 static OAUTH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Throttle for blocked-popup notices: a popup-spamming page must not
+/// flood the main window's banner. One notice per 60 seconds, globally.
+static LAST_BLOCK_NOTICE_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Tell the user a popup was blocked and how to allow it. Silent denial
+/// leaves them clicking "Sign in with Google" wondering why nothing
+/// happens; the notice names the host and points at the allowlist.
+fn notify_popup_blocked(app: &AppHandle, app_name: &str, host: &str) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_BLOCK_NOTICE_SECS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 60 {
+        return;
+    }
+    LAST_BLOCK_NOTICE_SECS.store(now, Ordering::Relaxed);
+    let host = if host.is_empty() { "this site" } else { host };
+    crate::popup_add::emit_notice(
+        app,
+        &format!(
+            "Blocked a popup from {host} ({app_name}). To allow sign-in popups, add {host} to the popup allowlist in {app_name}'s app settings."
+        ),
+    );
+}
+
 /// Initialization script injected into every account window so plain
 /// left-clicks on `target="_blank"` links reach the popup policy handler.
 ///
@@ -617,6 +643,10 @@ pub(crate) fn make_popup_handler(
                     &home_origin,
                     &ctx.session_dir,
                 );
+            } else {
+                // Not silent: the user clicked something expecting a
+                // window, so say what happened and how to allow it.
+                notify_popup_blocked(&ctx.app, &ctx.app_name, &host);
             }
         }
         tauri::webview::NewWindowResponse::Deny
