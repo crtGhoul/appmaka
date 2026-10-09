@@ -40,17 +40,29 @@ export function RamDashboard({
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // v0.13.1: the memory snapshot can stall on some PCs (slow per-process
+    // queries). Don't spin forever — time out and let the user retry.
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("timed out")), 20000)
+    );
     try {
-      const [wins, groups, snap] = await Promise.all([
-        invoke<OpenAccountWindow[]>("list_open_account_windows"),
-        invoke<TabbedWindowInfo[]>("list_tabbed_windows"),
-        invoke<MemorySnapshot>("memory_snapshot"),
+      const [wins, groups, snap] = await Promise.race([
+        Promise.all([
+          invoke<OpenAccountWindow[]>("list_open_account_windows"),
+          invoke<TabbedWindowInfo[]>("list_tabbed_windows"),
+          invoke<MemorySnapshot>("memory_snapshot"),
+        ]),
+        timeout,
       ]);
       setWindows(wins);
       setTabbed(groups);
       setSnapshot(snap);
     } catch (err) {
-      setError(errMsg(err));
+      setError(
+        errMsg(err) === "timed out"
+          ? "Couldn't read the memory numbers (timed out). Try again."
+          : errMsg(err)
+      );
     } finally {
       setLoading(false);
     }
@@ -204,7 +216,15 @@ export function RamDashboard({
 
         {error && (
           <p className="modal-error" role="alert">
-            {error}
+            {error}{" "}
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => void refresh()}
+              disabled={loading}
+            >
+              Try again
+            </button>
           </p>
         )}
 

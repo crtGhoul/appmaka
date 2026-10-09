@@ -1573,9 +1573,21 @@ pub fn memory_snapshot() -> Result<MemorySnapshot, String> {
     // same RSS once per thread and the total explodes past physical RAM
     // (seen: 23 GB on an 8 GB box). `without_tasks()` keeps one entry per
     // real process.
+    //
+    // v0.13.1: refresh MEMORY ONLY. `ProcessRefreshKind::everything()` also
+    // pulls disk I/O counters, user/SID lookups, and PEB reads (environ,
+    // cmd, cwd, exe) for every process on the system — the SID lookups can
+    // stall for minutes on domain-joined machines and the PEB reads can
+    // block on protected processes, hanging this command (and the whole
+    // "Reading memory numbers…" dashboard) for minutes. The process name
+    // and parent PID come from the toolhelp snapshot itself, so memory is
+    // all we need.
     let sys = System::new_with_specifics(
-        RefreshKind::nothing()
-            .with_processes(ProcessRefreshKind::everything().without_tasks()),
+        RefreshKind::nothing().with_processes(
+            ProcessRefreshKind::nothing()
+                .with_memory()
+                .without_tasks(),
+        ),
     );
     let self_pid = Pid::from_u32(std::process::id());
     let Some(self_proc) = sys.process(self_pid) else {
