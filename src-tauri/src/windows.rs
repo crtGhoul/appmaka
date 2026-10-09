@@ -111,6 +111,10 @@ struct TrackedWindow {
     #[cfg(windows)]
     base_title: String,
     suspended: bool,
+    /// Session-restore lazy load: the real URL, not yet navigated to. The
+    /// window is built on about:blank and navigates here on first focus,
+    /// so a 10-window restore doesn't spawn 10 renderers at once.
+    pending_url: Option<String>,
 }
 
 /// Live per-window bookkeeping, managed as Tauri state.
@@ -176,7 +180,7 @@ pub fn open_account(
     app_id: &str,
     account_id: &str,
 ) -> Result<(), String> {
-    open_account_placed(app, store, adblock, winstate, app_id, account_id, None)
+    open_account_placed(app, store, adblock, winstate, app_id, account_id, None, false)
 }
 
 /// `open_account` with an optional tiled placement (v0.9.0): routines using
@@ -192,6 +196,7 @@ pub fn open_account_placed(
     app_id: &str,
     account_id: &str,
     placement: Option<WindowPlacement>,
+    defer_navigation: bool,
 ) -> Result<(), String> {
     let web_app = store.get(app_id)?;
     let account = web_app
@@ -235,7 +240,19 @@ pub fn open_account_placed(
         .popup_policy
         .clone()
         .unwrap_or_else(|| web_app.settings.popup_policy.clone());
-    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(page_url.clone()))
+    // Lazy restore (v0.13.2): build on about:blank and navigate on first
+    // focus, so a 10-window session restore doesn't spawn 10 renderers at
+    // once. The title still shows the app name; the page loads when the
+    // user first looks at it.
+    let (initial_url, pending_url) = if defer_navigation {
+        (
+            url::Url::parse("about:blank").expect("about:blank parses"),
+            Some(page_url.to_string()),
+        )
+    } else {
+        (page_url.clone(), None)
+    };
+    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(initial_url))
         .data_directory(session_dir.clone())
         .title(&title);
     // v0.9.6 (Windows): frameless — the native title bar and its X go away,
@@ -356,6 +373,7 @@ pub fn open_account_placed(
                 #[cfg(windows)]
                 base_title: title,
                 suspended: false,
+                pending_url,
             },
         );
     }
@@ -368,6 +386,10 @@ pub fn open_account_placed(
         match event {
             WindowEvent::Focused(focused) => {
                 touch_window(&track_app, &track_label, *focused);
+                // Lazy restore: first focus navigates the deferred URL.
+                if *focused {
+                    navigate_pending_url(&track_app, &track_label);
+                }
             }
             WindowEvent::Destroyed => {
                 // Closed via the X button (not through close_tracked_window):
@@ -813,6 +835,33 @@ fn spawn_contained_window(
 // ---------------------------------------------------------------------------
 // Focus tracking / suspend
 // ---------------------------------------------------------------------------
+
+/// Navigate a lazily-restored window to its deferred URL on first focus.
+/// Takes the pending URL out of the tracked entry (one-shot); a missing
+/// window or entry is a silent no-op.
+fn navigate_pending_url(app: &AppHandle, label: &str) {
+    let url = {
+        let winstate = match app.try_state::<WindowState>() {
+            Some(s) => s,
+            None => return,
+        };
+        let mut tracked = match winstate.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        match tracked.get_mut(label) {
+            Some(t) => t.pending_url.take(),
+            None => None,
+        }
+    };
+    if let Some(url) = url {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.navigate(url.parse().unwrap_or_else(|_| {
+                url::Url::parse("about:blank").expect("about:blank parses")
+            }));
+        }
+    }
+}
 
 fn touch_window(app: &AppHandle, label: &str, focused: bool) {
     if let Some(winstate) = app.try_state::<WindowState>() {

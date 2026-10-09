@@ -448,7 +448,7 @@ pub async fn run_routine(
                 let placement = placements.get(account_idx).copied();
                 account_idx += 1;
                 crate::windows::open_account_placed(
-                    &app, &store, &adblock, &winstate, &item.app_id, account_id, placement,
+                    &app, &store, &adblock, &winstate, &item.app_id, account_id, placement, false,
                 )
             }
             "program" => {

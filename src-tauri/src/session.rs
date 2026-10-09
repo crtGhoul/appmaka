@@ -709,7 +709,7 @@ fn restore_filtered(app: &AppHandle, keep: &dyn Fn(&SessionWindow) -> bool) -> u
             } => {
                 let placement = placement_for_rect(rect.as_ref(), &monitors);
                 windows::open_account_placed(
-                    app, &store, &adblock, &winstate, app_id, account_id, placement,
+                    app, &store, &adblock, &winstate, app_id, account_id, placement, true,
                 )
             }
             SessionWindow::Search { query, rect, .. } => {
