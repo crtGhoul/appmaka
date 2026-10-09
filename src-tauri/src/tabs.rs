@@ -1505,13 +1505,26 @@ fn ensure_strip_window(app: &AppHandle, group: &TabGroup, page: &WebviewWindow) 
     };
     // The strip is not independently closable: Alt+F4 (or the X) on the
     // strip closes the whole tabbed window instead.
+    // v0.13.1: close on a worker thread, NOT inline. This handler runs on
+    // the main thread during wry event dispatch; close_tabbed_window can
+    // block on the pin-confirm dialog, whose blocking_show() posts to the
+    // main-thread event loop and waits — calling it inline here deadlocks
+    // the main thread permanently ("Not Responding", 0% CPU) for pinned
+    // groups. Same worker-thread pattern as request_close_group_by_label.
     let s_app = app.clone();
     let s_group = group.id.clone();
     strip.on_window_event(move |event| {
         if matches!(event, WindowEvent::CloseRequested { .. }) {
-            if let Some(ts) = s_app.try_state::<TabState>() {
-                let _ = close_tabbed_window(&s_app, &ts, &s_group);
-            }
+            let app = s_app.clone();
+            let group_id = s_group.clone();
+            std::thread::Builder::new()
+                .name("appmaka-strip-close".to_string())
+                .spawn(move || {
+                    if let Some(ts) = app.try_state::<TabState>() {
+                        let _ = close_tabbed_window(&app, &ts, &group_id);
+                    }
+                })
+                .ok();
         }
     });
 }
