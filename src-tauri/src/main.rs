@@ -421,10 +421,14 @@ fn show_library(app: AppHandle) -> Result<(), String> {
 }
 
 /// Best-effort page title for the quick-add flow. The frontend falls back to
-/// a prettified domain name when this errors.
+/// a prettified domain name when this errors. ASYNC ON PURPOSE: the HTTP
+/// fetch can take up to 10s, and a sync command would block the WebView2 IPC
+/// thread in the meantime (same reason `fetch_favicon` is async).
 #[tauri::command]
-fn fetch_page_title(url: String) -> Result<String, String> {
-    page_title::fetch_page_title(&url)
+async fn fetch_page_title(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || page_title::fetch_page_title(&url))
+        .await
+        .map_err(|e| format!("title fetch failed: {e}"))?
 }
 
 /// Fetch the app's site icon, cache it locally, and store the path on the
