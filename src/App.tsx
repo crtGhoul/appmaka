@@ -451,6 +451,7 @@ function AccountRow({
   account,
   app,
   onOpen,
+  onOpenPrivate,
   onSuspend,
   onRemove,
   onRename,
@@ -460,6 +461,7 @@ function AccountRow({
   account: Account;
   app: WebApp;
   onOpen: () => void;
+  onOpenPrivate: () => void;
   onSuspend: () => void;
   onRemove: () => void;
   onRename: (label: string) => void;
@@ -488,6 +490,13 @@ function AccountRow({
       </div>
       <div className="app-actions">
         <button onClick={onOpen}>Open</button>
+        <button
+          className="text-button"
+          onClick={onOpenPrivate}
+          title="Open in a private window — nothing is saved after you close it."
+        >
+          Private
+        </button>
         <button onClick={onSuspend}>Suspend</button>
         <button className="text-button" onClick={onEdit}>
           Edit
@@ -2415,13 +2424,15 @@ function AppShell() {
   async function handleOpenAccount(
     app: WebApp,
     account: Account,
-    forcePlain = false
+    forcePlain = false,
+    isPrivate = false
   ): Promise<boolean> {
     setError(null);
     // v0.13.0: the "open as tabbed" setting makes launcher opens create
     // tabbed windows; the tile menu's explicit Open passes forcePlain.
+    // Private windows always open plain (never tabbed).
     const asTabbed =
-      !forcePlain && (launcherSettings?.open_as_tabbed ?? false);
+      !forcePlain && !isPrivate && (launcherSettings?.open_as_tabbed ?? false);
     try {
       if (asTabbed) {
         await invoke("open_app_in_tabbed_window", {
@@ -2429,7 +2440,11 @@ function AppShell() {
           accountId: account.id,
         });
       } else {
-        await invoke("open_account", { appId: app.id, accountId: account.id });
+        await invoke("open_account", {
+          appId: app.id,
+          accountId: account.id,
+          isPrivate,
+        });
       }
       // Refresh last_opened display.
       const now = Math.floor(Date.now() / 1000);
@@ -3238,6 +3253,9 @@ function AppShell() {
                               account={account}
                               app={app}
                               onOpen={() => void handleOpenAccount(app, account)}
+                              onOpenPrivate={() =>
+                                void handleOpenAccount(app, account, true, true)
+                              }
                               onSuspend={() => void handleSuspendAccount(app, account)}
                               onRemove={() => void handleRemoveAccount(app, account)}
                               onRename={(label) => void handleRenameAccount(app, account, label)}

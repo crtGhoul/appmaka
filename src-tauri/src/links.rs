@@ -254,7 +254,7 @@ fn dispatch_to_account(app: &AppHandle, url: &str, app_id: &str, account_id: &st
             let adblock = app.state::<crate::adblock::AdblockState>();
             let winstate = app.state::<crate::windows::WindowState>();
             if let Err(e) =
-                crate::windows::open_account(&app, &store, &adblock, &winstate, &app_id, &account_id)
+                crate::windows::open_account(&app, &store, &adblock, &winstate, &app_id, &account_id, false)
             {
                 eprintln!("[appmaka] link dispatch: could not open {app_id}/{account_id}: {e}");
                 return;

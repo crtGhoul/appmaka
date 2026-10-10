@@ -115,6 +115,12 @@ struct TrackedWindow {
     /// window is built on about:blank and navigates here on first focus,
     /// so a 10-window restore doesn't spawn 10 renderers at once.
     pending_url: Option<String>,
+    /// Private/incognito window: uses an ephemeral session dir that is
+    /// deleted on close; never written to session.json, never restored.
+    is_private: bool,
+    /// The ephemeral session dir for private windows (None for normal).
+    /// Deleted when the window closes; orphans cleaned at startup.
+    private_dir: Option<PathBuf>,
 }
 
 /// Live per-window bookkeeping, managed as Tauri state.
@@ -179,8 +185,9 @@ pub fn open_account(
     winstate: &WindowState,
     app_id: &str,
     account_id: &str,
+    private: bool,
 ) -> Result<(), String> {
-    open_account_placed(app, store, adblock, winstate, app_id, account_id, None, false)
+    open_account_placed(app, store, adblock, winstate, app_id, account_id, None, false, private)
 }
 
 /// `open_account` with an optional tiled placement (v0.9.0): routines using
@@ -197,6 +204,7 @@ pub fn open_account_placed(
     account_id: &str,
     placement: Option<WindowPlacement>,
     defer_navigation: bool,
+    private: bool,
 ) -> Result<(), String> {
     let web_app = store.get(app_id)?;
     let account = web_app
@@ -232,8 +240,15 @@ pub fn open_account_placed(
         .parse()
         .map_err(|_| format!("App URL is not valid: {}", web_app.url))?;
     let title = format!("{} — {}", web_app.name, account.label);
-    // The stored absolute path is the source of truth for the data directory.
-    let session_dir = store.session_dir_for(app_id, account_id)?;
+    // Private windows get an ephemeral session dir (deleted on close) and
+    // an unmistakable title suffix; normal windows use the stored path.
+    let (session_dir, private_dir, title) = if private {
+        let dir = new_private_session_dir(app)?;
+        (dir.clone(), Some(dir), format!("{title} · Private"))
+    } else {
+        // The stored absolute path is the source of truth for the data directory.
+        (store.session_dir_for(app_id, account_id)?, None, title)
+    };
 
     // Per-account override wins; None means "inherit the app setting".
     let popup_policy = account
@@ -374,6 +389,8 @@ pub fn open_account_placed(
                 base_title: title,
                 suspended: false,
                 pending_url,
+                is_private: private,
+                private_dir,
             },
         );
     }
@@ -395,10 +412,15 @@ pub fn open_account_placed(
                 // Closed via the X button (not through close_tracked_window):
                 // drop the tracked entry so it can't go stale — the watchers
                 // tolerate staleness, but the session must not resurrect a
-                // window the user closed — and persist the session.
+                // window the user closed — and persist the session. Private
+                // windows get their ephemeral dir deleted here too.
                 if let Some(winstate) = track_app.try_state::<WindowState>() {
                     if let Ok(mut tracked) = winstate.inner.lock() {
-                        tracked.remove(&track_label);
+                        if let Some(t) = tracked.remove(&track_label) {
+                            if let Some(dir) = t.private_dir {
+                                delete_private_session_dir(&dir);
+                            }
+                        }
                     }
                 }
                 crate::session::write_session(&track_app);
@@ -536,6 +558,63 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
 // ---------------------------------------------------------------------------
 
 static OAUTH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Counter for unique private session dir names.
+static PRIVATE_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Create an ephemeral session dir for a private window:
+/// `<app_data>/private_sessions/.private-<millis>-<counter>/`.
+/// The leading dot hides it on Unix; the whole tree is deleted when the
+/// window closes, with startup orphan cleanup as the backstop.
+fn new_private_session_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve app data dir: {e}"))?
+        .join("private_sessions");
+    let n = PRIVATE_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = base.join(format!(".private-{}-{n}", unix_millis()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create private session dir: {e}"))?;
+    Ok(dir)
+}
+
+/// Best-effort delete of a private session dir. Called on window close;
+/// failures are logged, never surfaced (the startup orphan sweep retries).
+fn delete_private_session_dir(dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        eprintln!("[appmaka] private session cleanup failed for {}: {e}", dir.display());
+    }
+}
+
+/// Delete orphaned private session dirs left by crashes. Called once at
+/// startup, mirroring cleanup_stale_previews.
+pub(crate) fn cleanup_orphan_private_sessions(app: &AppHandle) {
+    let Ok(base) = app.path().app_data_dir() else {
+        return;
+    };
+    let dir = base.join("private_sessions");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(".private-") {
+            delete_private_session_dir(&entry.path());
+        }
+    }
+}
+
+/// The ephemeral session dir for a private window label, if it is one.
+pub(crate) fn private_dir_for(app: &AppHandle, label: &str) -> Option<PathBuf> {
+    app.try_state::<WindowState>().and_then(|s| {
+        s.inner.lock().ok().and_then(|g| {
+            g.get(label)
+                .filter(|t| t.is_private)
+                .and_then(|t| t.private_dir.clone())
+        })
+    })
+}
 
 /// Throttle for blocked-popup notices: a popup-spamming page must not
 /// flood the main window's banner. One notice per 60 seconds, globally.
@@ -1152,7 +1231,13 @@ pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIn
     }
     if let Some(winstate) = app.try_state::<WindowState>() {
         if let Ok(mut tracked) = winstate.inner.lock() {
-            tracked.remove(label);
+            // Take the entry so a private window's ephemeral dir can be
+            // deleted below; normal windows have nothing to clean.
+            if let Some(t) = tracked.remove(label) {
+                if let Some(dir) = t.private_dir {
+                    delete_private_session_dir(&dir);
+                }
+            }
         }
     }
     // The open set changed: persist the session. (The window's own
@@ -1188,6 +1273,8 @@ pub(crate) fn live_tracked_accounts(app: &AppHandle) -> Vec<(String, String, Str
         .iter()
         .filter(|(label, _)| label.starts_with("acct-"))
         .filter(|(label, _)| app.get_webview_window(label).is_some())
+        // Private windows never persist: no session.json entry, no restore.
+        .filter(|(_, t)| !t.is_private)
         .map(|(label, t)| {
             (
                 label.clone(),

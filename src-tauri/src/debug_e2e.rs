@@ -512,7 +512,7 @@ fn run_tint_flow(app: &AppHandle, base: &str) {
     ] {
         let url = format!("{base}/{page}");
         if let Err(e) =
-            crate::windows::open_account(app, &store, &adblock, &winstate, app_id, acc_id)
+            crate::windows::open_account(app, &store, &adblock, &winstate, app_id, acc_id, false)
         {
             eprintln!("[e2e] tint: open {page} failed: {e}");
             continue;

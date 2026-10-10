@@ -503,6 +503,24 @@ pub fn make_download_handler(
 ) -> impl Fn(Webview<tauri::Wry>, DownloadEvent<'_>) -> bool + Send + Sync + 'static {
     move |webview, event| match event {
         DownloadEvent::Requested { url, destination } => {
+            // Private windows: the file lands in the ephemeral session dir
+            // (deleted with the window) and is never recorded in history.
+            // No save dialog — the file is transient by design.
+            if let Some(pdir) = crate::windows::private_dir_for(&app, webview.label()) {
+                let suggested = sanitize_filename(
+                    &destination
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "download".to_string()),
+                );
+                let dest = pdir.join("downloads").join(&suggested);
+                if let Err(e) = fs::create_dir_all(dest.parent().unwrap_or(&pdir)) {
+                    eprintln!("[appmaka] private download dir failed: {e}");
+                    return false;
+                }
+                *destination = dest;
+                return true;
+            }
             let Some(state) = app.try_state::<DownloadState>() else {
                 // DownloadState not managed yet; block rather than leak the
                 // file to the webview's default location.

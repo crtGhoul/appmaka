@@ -118,7 +118,7 @@ pub(crate) fn run_add(
             .first()
             .map(|a| a.id.clone())
             .ok_or_else(|| "That app has no accounts to open.".to_string())?;
-        crate::windows::open_account(app, store, adblock, winstate, &app_id, &account_id)?;
+        crate::windows::open_account(app, store, adblock, winstate, &app_id, &account_id, false)?;
         return Ok(PopupAddOutcome {
             already_added: true,
             added: false,
@@ -150,7 +150,7 @@ pub(crate) fn run_add(
     // Open as a proper page window (frameless + caption strip), then close
     // the popup: it has been promoted, and keeping both open would show
     // two windows on the same site.
-    crate::windows::open_account(app, store, adblock, winstate, &app_id, &account_id)?;
+    crate::windows::open_account(app, store, adblock, winstate, &app_id, &account_id, false)?;
     let _ = window.close();
 
     Ok(PopupAddOutcome {

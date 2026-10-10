@@ -228,8 +228,17 @@ async fn open_account(
     winstate: State<'_, WindowState>,
     app_id: String,
     account_id: String,
+    is_private: Option<bool>,
 ) -> Result<(), String> {
-    windows::open_account(&app, &store, &adblock, &winstate, &app_id, &account_id)
+    windows::open_account(
+        &app,
+        &store,
+        &adblock,
+        &winstate,
+        &app_id,
+        &account_id,
+        is_private.unwrap_or(false),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -971,6 +980,8 @@ fn main() {
             // Sweep preview temp dirs left behind by a crash or a window
             // closed by hand before "Add as app" / "Discard" ran.
             preview::cleanup_stale_previews(app.handle());
+            // Same for private session dirs orphaned by a crash.
+            windows::cleanup_orphan_private_sessions(app.handle());
 
             // Filter lists download + engine compile happen on a background
             // thread so startup never waits on the network.
