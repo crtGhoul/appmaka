@@ -452,6 +452,8 @@ function AccountRow({
   app,
   onOpen,
   onOpenPrivate,
+  onFillLogin,
+  onSaveLogin,
   onSuspend,
   onRemove,
   onRename,
@@ -462,6 +464,8 @@ function AccountRow({
   app: WebApp;
   onOpen: () => void;
   onOpenPrivate: () => void;
+  onFillLogin: () => void;
+  onSaveLogin: () => void;
   onSuspend: () => void;
   onRemove: () => void;
   onRename: (label: string) => void;
@@ -496,6 +500,20 @@ function AccountRow({
           title="Open in a private window — nothing is saved after you close it."
         >
           Private
+        </button>
+        <button
+          className="text-button"
+          onClick={onFillLogin}
+          title="Fill the saved login into this account's open window. Only works on the site it was saved for."
+        >
+          Fill login
+        </button>
+        <button
+          className="text-button"
+          onClick={onSaveLogin}
+          title="Save this account's username and password in your system vault."
+        >
+          Save login
         </button>
         <button onClick={onSuspend}>Suspend</button>
         <button className="text-button" onClick={onEdit}>
@@ -812,6 +830,142 @@ function EditAccountDialog({
             </button>
             <button type="submit" disabled={saving}>
               {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function SaveLoginDialog({
+  app,
+  account,
+  onClose,
+  onSaved,
+}: {
+  app: WebApp;
+  account: Account;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [existing, setExisting] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // Load existing (non-secret) metadata so the dialog can show what's saved.
+  useEffect(() => {
+    let cancelled = false;
+    invoke<{ domain: string; username: string } | null>("credential_info", {
+      appId: app.id,
+      accountId: account.id,
+    })
+      .then((info) => {
+        if (!cancelled && info) {
+          setExisting(`${info.username} @ ${info.domain}`);
+          setUsername(info.username);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [app.id, account.id]);
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    setFormError(null);
+    setSaving(true);
+    try {
+      await invoke("save_credential", {
+        appId: app.id,
+        accountId: account.id,
+        username,
+        password,
+      });
+      onSaved();
+    } catch (err) {
+      setFormError(errMsg(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    setFormError(null);
+    try {
+      await invoke("delete_credential", {
+        appId: app.id,
+        accountId: account.id,
+      });
+      onSaved();
+    } catch (err) {
+      setFormError(errMsg(err));
+    }
+  }
+
+  return (
+    <div
+      className="dialog-overlay"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Save login for ${account.label}`}
+    >
+      <div className="dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>Save login</h3>
+        <p className="muted small">
+          Stored in your system vault (Windows Credential Manager), never in
+          AppMaka's files. Fills only when you click Fill login, and only on
+          this site.
+        </p>
+        {existing && (
+          <p className="small">
+            Saved login: <strong>{existing}</strong>
+          </p>
+        )}
+        <form onSubmit={(e) => void handleSave(e)}>
+          <label>
+            <span>Username or email</span>
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              maxLength={512}
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            <span>Password</span>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              maxLength={4096}
+              autoComplete="new-password"
+            />
+          </label>
+          {formError && (
+            <p className="form-error" role="alert">
+              {formError}
+            </p>
+          )}
+          <div className="dialog-actions">
+            {existing && (
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void handleDelete()}
+              >
+                Delete saved login
+              </button>
+            )}
+            <button type="button" onClick={onClose}>
+              Cancel
+            </button>
+            <button type="submit" disabled={saving}>
+              {saving ? "Saving…" : "Save to vault"}
             </button>
           </div>
         </form>
@@ -1855,6 +2009,11 @@ function AppShell() {
     app: WebApp;
     account: Account;
   } | null>(null);
+  // Password vault: "Save login" dialog target.
+  const [saveLoginTarget, setSaveLoginTarget] = useState<{
+    app: WebApp;
+    account: Account;
+  } | null>(null);
   // v0.7.0: link-dispatcher picker target (URL with no matching rule).
   const [linkPickerUrl, setLinkPickerUrl] = useState<string | null>(null);
   // v0.7.0: RAM dashboard visibility.
@@ -2416,6 +2575,19 @@ function AppShell() {
         next.delete(app.id);
         return next;
       });
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  }
+
+  async function handleFillLogin(app: WebApp, account: Account) {
+    setError(null);
+    try {
+      const msg = await invoke<string>("fill_login", {
+        appId: app.id,
+        accountId: account.id,
+      });
+      setNotice(msg);
     } catch (err) {
       setError(errMsg(err));
     }
@@ -3256,6 +3428,10 @@ function AppShell() {
                               onOpenPrivate={() =>
                                 void handleOpenAccount(app, account, true, true)
                               }
+                              onFillLogin={() => void handleFillLogin(app, account)}
+                              onSaveLogin={() =>
+                                setSaveLoginTarget({ app, account })
+                              }
                               onSuspend={() => void handleSuspendAccount(app, account)}
                               onRemove={() => void handleRemoveAccount(app, account)}
                               onRename={(label) => void handleRenameAccount(app, account, label)}
@@ -3459,6 +3635,15 @@ function AppShell() {
             replaceApp(updated);
             setEditingAccount(null);
           }}
+        />
+      )}
+
+      {saveLoginTarget && (
+        <SaveLoginDialog
+          app={saveLoginTarget.app}
+          account={saveLoginTarget.account}
+          onClose={() => setSaveLoginTarget(null)}
+          onSaved={() => setSaveLoginTarget(null)}
         />
       )}
 

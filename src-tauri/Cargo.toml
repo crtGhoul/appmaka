@@ -46,6 +46,7 @@ image = { version = "0.25", default-features = false, features = ["png", "bmp"] 
 minisign-verify = "0.2"
 # v0.8.2: base64 decode of the updater pubkey + .sig assets (msi_update.rs).
 base64 = "0.21"
+keyring = "3"
 
 # Pinned to the exact webview2-com that wry 0.57.0 uses (verified via cargo
 # tree) so the COM bindings are a single crate instance — a mismatch would be

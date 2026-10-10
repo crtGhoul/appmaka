@@ -20,6 +20,7 @@ mod routines;
 mod session;
 mod store;
 mod syscmd;
+mod vault;
 mod websearch;
 mod windows;
 /// Bare-Windows-key tap summon for the clipboard popup (v0.9.2).
@@ -239,6 +240,73 @@ async fn open_account(
         &account_id,
         is_private.unwrap_or(false),
     )
+}
+
+/// Save a login for an account into the OS vault. Explicit user action
+/// only — nothing is ever captured automatically. The credential is bound
+/// to the app's configured site domain and will never fill elsewhere.
+/// The password goes straight to the system vault; it never appears in
+/// our files, logs, or error messages.
+#[tauri::command]
+async fn save_credential(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    app_id: String,
+    account_id: String,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    let web_app = store.get(&app_id)?;
+    // The account must exist; the domain comes from OUR stored app URL,
+    // never from frontend input, so a caller can't bind a credential to
+    // an attacker's domain.
+    web_app
+        .accounts
+        .iter()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| "account not found".to_string())?;
+    vault::save_credential(&app, &app_id, &account_id, &web_app.url, &username, &password)
+}
+
+/// Fill the saved login into the account's open window. Refuses unless
+/// the window is open and its current page is exactly the saved domain.
+#[tauri::command]
+async fn fill_login(
+    app: AppHandle,
+    app_id: String,
+    account_id: String,
+) -> Result<String, String> {
+    vault::fill_login(&app, &app_id, &account_id)
+}
+
+/// Delete the saved login for an account from the OS vault.
+#[tauri::command]
+async fn delete_credential(
+    app: AppHandle,
+    app_id: String,
+    account_id: String,
+) -> Result<(), String> {
+    vault::delete_credential(&app, &app_id, &account_id)
+}
+
+/// Non-secret metadata for the launcher: whether a login is saved and
+/// for which username. Never returns a password.
+#[tauri::command]
+async fn credential_info(
+    app: AppHandle,
+    app_id: String,
+    account_id: String,
+) -> Result<Option<CredentialInfo>, String> {
+    Ok(vault::credential_meta(&app, &app_id, &account_id).map(|(domain, username)| CredentialInfo {
+        domain,
+        username,
+    }))
+}
+
+#[derive(serde::Serialize)]
+struct CredentialInfo {
+    domain: String,
+    username: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,6 +1250,10 @@ fn main() {
             update_account,
             remove_account,
             open_account,
+            save_credential,
+            fill_login,
+            delete_credential,
+            credential_info,
             suspend_account,
             platform_info,
             list_programs,
