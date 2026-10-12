@@ -158,9 +158,12 @@ export function RamDashboard({
   }
 
   // v0.9.11: "Add to applications" for a popup row. The backend reads
-  // the popup's live address, dedups, and opens the new app as a proper
-  // page window. alreadyAdded is informational, not an error.
-  async function addPopup(w: OpenAccountWindow) {
+  // the window's live address, dedups, and opens the new app as a proper
+  // page window. v0.13.2: also works on account rows — captures the live
+  // page URL (the user may have navigated elsewhere) and only adds it to
+  // the launcher, leaving the window alone. alreadyAdded is informational,
+  // not an error.
+  async function addWindow(w: OpenAccountWindow) {
     if (adding) return;
     setAdding(w.label);
     setError(null);
@@ -271,22 +274,34 @@ export function RamDashboard({
                     title="Add this site to your applications"
                     aria-label="Add to applications"
                     disabled={adding === w.label}
-                    onClick={() => void addPopup(w)}
+                    onClick={() => void addWindow(w)}
                   >
                     {adding === w.label ? "Adding…" : "Add to applications"}
                   </button>
                 ) : (
-                  <label
-                    className="ram-pin-toggle"
-                    title="Asks before this window can be closed."
-                  >
-                    <input
-                      type="checkbox"
-                      checked={w.pinned}
-                      onChange={() => void togglePin(w)}
-                    />
-                    <span>Don't close this window</span>
-                  </label>
+                  <>
+                    <button
+                      type="button"
+                      className="ram-row-add"
+                      title="Add this page's address as a new application"
+                      aria-label="Add page as application"
+                      disabled={adding === w.label}
+                      onClick={() => void addWindow(w)}
+                    >
+                      {adding === w.label ? "Adding…" : "Add page as app"}
+                    </button>
+                    <label
+                      className="ram-pin-toggle"
+                      title="Asks before this window can be closed."
+                    >
+                      <input
+                        type="checkbox"
+                        checked={w.pinned}
+                        onChange={() => void togglePin(w)}
+                      />
+                      <span>Don't close this window</span>
+                    </label>
+                  </>
                 )}
                 <button
                   type="button"

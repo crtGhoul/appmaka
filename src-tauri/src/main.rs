@@ -947,8 +947,8 @@ fn main() {
                     if event.state
                         == tauri_plugin_global_shortcut::ShortcutState::Pressed
                     {
-                        // v0.9.11: fixed "add popup to applications"
-                        // shortcut. Fires only when a popup window is
+                        // v0.9.11: fixed "add to applications" shortcut.
+                        // Fires only when a popup or account window is
                         // focused; ignored silently anywhere else. The
                         // active flag guarantees this can never steal a
                         // user's own binding or the summon hotkey: those

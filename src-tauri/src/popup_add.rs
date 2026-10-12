@@ -1,9 +1,16 @@
-//! "Add to applications" for popup windows (v0.9.11).
+//! "Add to applications" for popup and account windows (v0.9.11, extended).
 //!
-//! A popup is a raw site window with no AppMaka chrome, so the affordances
+//! Popups are raw site windows with no AppMaka chrome, so their affordances
 //! live outside the page: a Windows system-menu item (popup_chrome.rs),
 //! the Ctrl+Shift+A global shortcut (registered below), and an "Add"
-//! button on the dashboard's popup rows. All three funnel into `run_add`.
+//! button on the dashboard's popup rows. Account windows get the same
+//! shortcut and dashboard button — they capture the window's *live* URL,
+//! so a page navigated to inside an account can be promoted to its own app.
+//! All paths funnel into `run_add`.
+//!
+//! A promoted popup opens as a fresh app window (fresh session dir) and the
+//! popup closes. A promoted account page is only added to the launcher —
+//! the user is mid-browsing, so nothing opens and nothing closes.
 //!
 //! The new app is created with a FRESH session dir (`store.add_app`): the
 //! popup shares its parent account's *live* session dir, which WebView2
@@ -37,6 +44,7 @@ pub fn add_shortcut_active() -> bool {
 /// Copy deck (spec, verbatim).
 pub const MSG_ALREADY_ADDED: &str = "This site is already in your applications.";
 pub const MSG_ADD_FAILED: &str = "Couldn't add this site — try the launcher's add box instead.";
+pub const MSG_ADDED_PREFIX: &str = "Added to your applications: ";
 
 /// Outcome returned to the dashboard (camelCase for the frontend).
 #[derive(Debug, Clone, Serialize)]
@@ -47,11 +55,12 @@ pub struct PopupAddOutcome {
     pub app_name: String,
 }
 
-/// Only `popup-*` labels may be promoted. OAuth modals are transient
-/// sign-in windows (meaningless to add), `main` is the launcher, and
-/// `acct-*` windows are already applications.
+/// Only `popup-*` and `acct-*` labels may be promoted. OAuth modals are
+/// transient sign-in windows (meaningless to add) and `main` is the
+/// launcher. `acct-*` windows capture their *live* URL — the user may have
+/// navigated somewhere else and wants that page as a new app.
 pub(crate) fn add_label_allowed(label: &str) -> bool {
-    label.starts_with("popup-")
+    label.starts_with("popup-") || label.starts_with("acct-")
 }
 
 /// Validate the popup's live URL: must be a real http(s) address.
@@ -149,9 +158,13 @@ pub(crate) fn run_add(
 
     // Open as a proper page window (frameless + caption strip), then close
     // the popup: it has been promoted, and keeping both open would show
-    // two windows on the same site.
-    crate::windows::open_account(app, store, adblock, winstate, &app_id, &account_id, false)?;
-    let _ = window.close();
+    // two windows on the same site. From an account window the user is
+    // mid-browsing — just add it to the launcher and leave everything
+    // alone; no new window, no close.
+    if !label.starts_with("acct-") {
+        crate::windows::open_account(app, store, adblock, winstate, &app_id, &account_id, false)?;
+        let _ = window.close();
+    }
 
     Ok(PopupAddOutcome {
         already_added: false,
@@ -198,9 +211,13 @@ pub fn ensure_add_shortcut_registered(app: &AppHandle) {
 /// Global-shortcut dispatch: run the flow only when a popup window is
 /// focused; anywhere else the keypress is ignored silently.
 pub fn fire_from_hotkey(app: &AppHandle) {
+    // Fires on the focused window when it's one we can promote — a popup
+    // or an account window. The label gate in run_add is the authority;
+    // this just finds the focused candidate.
     let label = app.webview_windows().values().find_map(|w| {
         let l = w.label().to_string();
-        (l.starts_with("popup-") && w.is_focused().unwrap_or(false)).then_some(l)
+        ((l.starts_with("popup-") || l.starts_with("acct-")) && w.is_focused().unwrap_or(false))
+            .then_some(l)
     });
     let Some(label) = label else { return };
     let app = app.clone();
@@ -212,6 +229,10 @@ pub fn fire_from_hotkey(app: &AppHandle) {
             Ok(o) => {
                 if o.already_added {
                     emit_notice(&app, MSG_ALREADY_ADDED);
+                } else if label.starts_with("acct-") {
+                    // Popups show the new window as feedback; account
+                    // windows stay put, so say what happened.
+                    emit_notice(&app, &format!("{MSG_ADDED_PREFIX}{}", o.app_name));
                 }
             }
             Err(_) => emit_notice(&app, MSG_ADD_FAILED),
@@ -224,12 +245,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn add_label_allows_only_popups() {
+    fn add_label_allows_popups_and_accounts() {
         assert!(add_label_allowed("popup-3"));
         assert!(add_label_allowed("popup-0"));
+        assert!(add_label_allowed("acct-app1-acct1"));
         assert!(!add_label_allowed("oauth-3"));
         assert!(!add_label_allowed("main"));
-        assert!(!add_label_allowed("acct-app1-acct1"));
         assert!(!add_label_allowed(""));
         assert!(!add_label_allowed("popup"));
         assert!(!add_label_allowed("xpopup-3"));
