@@ -40,17 +40,21 @@
     "createUpdaterArtifacts": true,
     "windows": {
       "wix": {
-        "fragmentPaths": ["wix/close-app.wxs"]
+        "fragmentPaths": [
+          "wix/close-app.wxs"
+        ]
       }
     }
   },
   "identifier": "com.appforge.app",
   "productName": "AppMaka",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["https"]
+        "schemes": [
+          "https"
+        ]
       }
     },
     "updater": {
