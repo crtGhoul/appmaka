@@ -970,14 +970,20 @@ fn resume_window(app: &AppHandle, label: &str) {
     let Some(window) = app.get_webview_window(label) else {
         return;
     };
-    if let Some(winstate) = app.try_state::<WindowState>() {
+    let title_opt = if let Some(winstate) = app.try_state::<WindowState>() {
         if let Ok(tracked) = winstate.inner.lock() {
-            if let Some(t) = tracked.get(label) {
-                let _ = window.set_title(&t.base_title);
-            }
+            tracked.get(label).map(|t| t.base_title.clone())
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    if let Some(title) = title_opt {
+        let _ = window.set_title(&title);
     }
     let _ = window.with_webview(|platform| unsafe {
+        let _ = platform.controller().SetIsVisible(true);
         if let Ok(core) = platform.controller().CoreWebView2() {
             if let Ok(core3) = core.cast::<ICoreWebView2_3>() {
                 let _ = core3.Resume();
@@ -1137,20 +1143,33 @@ pub fn suspend_account_window(
 
 #[cfg(windows)]
 fn suspend_one(app: &AppHandle, label: &str, window: &WebviewWindow) {
-    // WebView2 refuses TrySuspend while the controller is visible
-    // (ERROR_INVALID_STATE), so only suspend hidden windows.
-    if !webview_hidden(window) {
+    // WebView2 requires the controller to be hidden (IsVisible == false)
+    // before TrySuspend succeeds (otherwise returns ERROR_INVALID_STATE).
+    // Minimized, hidden, or already-hidden webviews are eligible.
+    let can_suspend = window.is_minimized().unwrap_or(false)
+        || !window.is_visible().unwrap_or(true)
+        || webview_hidden(window);
+    if !can_suspend {
         return;
     }
     if try_suspend_webview(window) {
-        if let Some(winstate) = app.try_state::<WindowState>() {
+        let title_opt = if let Some(winstate) = app.try_state::<WindowState>() {
             if let Ok(mut tracked) = winstate.inner.lock() {
                 if let Some(t) = tracked.get_mut(label) {
                     t.suspended = true;
                     // Visible cue that this window is asleep.
-                    let _ = window.set_title(&format!("💤 {}", t.base_title));
+                    Some(format!("💤 {}", t.base_title))
+                } else {
+                    None
                 }
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(title) = title_opt {
+            let _ = window.set_title(&title);
         }
     }
 }
@@ -1179,23 +1198,33 @@ fn webview_hidden(window: &WebviewWindow) -> bool {
 /// Best-effort TrySuspend. Returns whether WebView2 accepted the suspend.
 #[cfg(windows)]
 fn try_suspend_webview(window: &WebviewWindow) -> bool {
+    use std::sync::mpsc;
+    use std::time::Duration;
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
     use windows_core::Interface;
-    let done = Arc::new(AtomicBool::new(false));
-    let out = done.clone();
-    let _ = window.with_webview(move |platform| unsafe {
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let queued = window.with_webview(move |platform| unsafe {
+        let _ = platform.controller().SetIsVisible(false);
         if let Ok(core) = platform.controller().CoreWebView2() {
             // ICoreWebView2 -> ICoreWebView2_3 via QueryInterface.
             if let Ok(core3) = core.cast::<ICoreWebView2_3>() {
                 // No completion handler: suspension is fire-and-forget, and
                 // the title cue is applied by the caller on success.
                 if core3.TrySuspend(None).is_ok() {
-                    out.store(true, Ordering::Relaxed);
+                    let _ = tx.send(true);
+                    return;
+                } else {
+                    let _ = platform.controller().SetIsVisible(true);
                 }
             }
         }
+        let _ = tx.send(false);
     });
-    done.load(Ordering::Relaxed)
+    if queued.is_err() {
+        return false;
+    }
+    rx.recv_timeout(Duration::from_millis(1000)).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
