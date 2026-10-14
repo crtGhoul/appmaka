@@ -493,10 +493,24 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
     format!(
         r#"(function () {{
   try {{
-    var s = document.createElement("style");
-    s.setAttribute("data-appmaka", "cursor");
-    s.textContent = "html,body,*,*::before,*::after{{cursor:none!important}}";
-    (document.head || document.documentElement).appendChild(s);
+    // Inject cursor:none as early as possible. initialization_script runs
+    // before <head> exists, so target <html> first and re-inject into
+    // <head> once available so page stylesheets can't override us.
+    function injectStyle() {{
+      if (document.querySelector("[data-appmaka=cursor]")) return;
+      var s = document.createElement("style");
+      s.setAttribute("data-appmaka", "cursor");
+      s.textContent =
+        "*,*::before,*::after,html,body,:root{{cursor:none!important}}";
+      (document.head || document.documentElement).appendChild(s);
+    }}
+    injectStyle();
+    if (!document.head) {{
+      var obs = new MutationObserver(function() {{
+        if (document.head) {{ injectStyle(); obs.disconnect(); }}
+      }});
+      obs.observe(document.documentElement, {{ childList: true }});
+    }}
 
     var N = {dots};
     var nodes = [];
@@ -505,12 +519,10 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
       d.setAttribute("data-appmaka", "cursor-dot");
       d.style.cssText =
         "position:fixed;left:0;top:0;z-index:2147483647;" +
-        "pointer-events:none;opacity:0;" +
+        "pointer-events:none;will-change:transform;opacity:0;" +
         {shape_css_json};
       if (N > 1) {{
-        // Trail followers shrink and fade with distance from the head.
         var f = 1 - i / N;
-        d.style.opacity = "";
         d.style.width = Math.max(3, Math.round(8 * f)) + "px";
         d.style.height = d.style.width;
         var m = -Math.max(3, Math.round(8 * f)) / 2;
@@ -521,20 +533,37 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
     }}
 
     var tx = -100, ty = -100, inside = false;
-    document.addEventListener("mousemove", function (e) {{
-      tx = e.clientX; ty = e.clientY;
+
+    function showAt(cx, cy) {{
+      tx = cx; ty = cy;
       if (!inside) {{
         inside = true;
-        for (var i = 0; i < nodes.length; i++) nodes[i].el.style.opacity = nodes[i].o;
+        for (var i = 0; i < nodes.length; i++) {{
+          nodes[i].x = cx; nodes[i].y = cy;
+          nodes[i].el.style.opacity = nodes[i].o;
+        }}
       }}
+    }}
+
+    // mousemove is the primary tracker.
+    document.addEventListener("mousemove", function(e) {{
+      showAt(e.clientX, e.clientY);
     }}, {{ passive: true }});
-    document.addEventListener("mouseleave", function () {{
+
+    // mouseenter on window fires when the pointer enters the webview from
+    // outside (titlebar, edge) before any mousemove fires — this is the
+    // fix for "cursor never appears until I wiggle it".
+    window.addEventListener("mouseenter", function(e) {{
+      showAt(e.clientX, e.clientY);
+    }}, {{ passive: true }});
+
+    document.addEventListener("mouseleave", function() {{
       inside = false;
       for (var i = 0; i < nodes.length; i++) nodes[i].el.style.opacity = 0;
     }});
 
-    // One rAF loop; the head snaps, followers lerp for the trail effect.
-    // transform-only: no layout, no paint beyond the dots themselves.
+    // One rAF loop: head snaps, followers lerp (trail effect).
+    // transform-only — no layout, no paint beyond the dot elements.
     (function frame() {{
       var px = tx, py = ty;
       for (var i = 0; i < nodes.length; i++) {{
@@ -546,7 +575,7 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
       }}
       requestAnimationFrame(frame);
     }})();
-  }} catch (e) {{}}
+  }} catch(e) {{}}
 }})();"#,
         dots = dots,
         shape_css_json = serde_json::to_string(shape_css).unwrap_or_default(),
