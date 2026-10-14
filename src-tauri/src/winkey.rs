@@ -359,7 +359,12 @@ mod imp {
         let handles = [wake];
         loop {
             let waited = unsafe {
-                MsgWaitForMultipleObjectsEx(Some(&handles), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+                MsgWaitForMultipleObjectsEx(
+                    Some(&handles),
+                    INFINITE,
+                    QS_ALLINPUT,
+                    MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(0),
+                )
             };
             if waited == WAIT_FAILED {
                 eprintln!("winkey: message wait failed; stopping the Windows-key watcher");

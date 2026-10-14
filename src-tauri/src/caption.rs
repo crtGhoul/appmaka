@@ -2256,7 +2256,7 @@ mod imp {
                     Some(&handles),
                     INFINITE,
                     QS_ALLINPUT,
-                    MWMO_INPUTAVAILABLE,
+                    MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(0),
                 )
             };
             if waited == WAIT_FAILED {
