@@ -322,6 +322,9 @@ mod imp {
         /// Moved/Resized events): WM_WINDOWPOSCHANGED must not echo the move
         /// back onto the owner.
         syncing: bool,
+        /// True strictly while the user is actively dragging the caption strip via HTCAPTION.
+        /// Prevents on_pos_changed from echoing owner movements.
+        dragging: bool,
         last_x: i32,
         last_y: i32,
     }
@@ -904,12 +907,28 @@ mod imp {
         match down {
             Down::Drag => {
                 let _ = ReleaseCapture();
+                with_chrome(|ch| {
+                    if let Some(label) = ch.by_hwnd.get(&(hwnd.0 as isize)) {
+                        if let Some(cp) = ch.captions.get_mut(label) {
+                            cp.dragging = true;
+                        }
+                    }
+                    Some(())
+                });
                 let _ = SendMessageW(
                     hwnd,
                     WM_NCLBUTTONDOWN,
                     Some(WPARAM(HTCAPTION as usize)),
                     Some(LPARAM(0)),
                 );
+                with_chrome(|ch| {
+                    if let Some(label) = ch.by_hwnd.get(&(hwnd.0 as isize)) {
+                        if let Some(cp) = ch.captions.get_mut(label) {
+                            cp.dragging = false;
+                        }
+                    }
+                    Some(())
+                });
             }
             // Async like the minimize path: no synchronous re-entrancy,
             // so the two-phase rule is satisfied trivially.
@@ -1386,9 +1405,9 @@ mod imp {
     unsafe fn on_pos_changed(hwnd: HWND) {
         enum Act {
             Skip,
-            /// Nudge the strip itself to y=0, then shift the owner by the
-            /// residual delta (matches the old single-pass behavior).
-            Nudge { x: i32 },
+            /// Nudge the strip itself to work_area.top, then shift the owner
+            /// by the residual delta (matches the old single-pass behavior).
+            Nudge { x: i32, min_top: i32 },
             /// Shift the owner by the drag delta.
             Shift { dx: i32, dy: i32 },
         }
@@ -1400,8 +1419,8 @@ mod imp {
         }
         let plan = with_chrome(|ch| {
             let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
-            let cp = ch.captions.get(&label)?;
-            if cp.syncing {
+            let cp = ch.captions.get_mut(&label)?;
+            if cp.syncing || !IsWindow(Some(cp.owner)).as_bool() || IsIconic(cp.owner).as_bool() {
                 return Some(Plan {
                     label,
                     act: Act::Skip,
@@ -1410,8 +1429,34 @@ mod imp {
             }
             let mut rc = RECT::default();
             GetWindowRect(hwnd, &mut rc).ok()?;
-            let act = if rc.top < 0 {
-                Act::Nudge { x: rc.left }
+
+            // The strip only moves the owner during an active user drag.
+            // If the user isn't dragging, the strip moved because the owner
+            // or the OS moved it: just update last_x/last_y so future drags
+            // have the correct baseline.
+            if !cp.dragging {
+                cp.last_x = rc.left;
+                cp.last_y = rc.top;
+                return Some(Plan {
+                    label,
+                    act: Act::Skip,
+                    last: (rc.left, rc.top),
+                });
+            }
+
+            let hmon = MonitorFromWindow(cp.owner, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let min_top = if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                mi.rcWork.top
+            } else {
+                0
+            };
+
+            let act = if rc.top < min_top {
+                Act::Nudge { x: rc.left, min_top }
             } else {
                 let (dx, dy) = (rc.left - cp.last_x, rc.top - cp.last_y);
                 if dx != 0 || dy != 0 {
@@ -1432,7 +1477,7 @@ mod imp {
         };
         match plan.act {
             Act::Skip => {}
-            Act::Nudge { x } => {
+            Act::Nudge { x, min_top } => {
                 // Flag syncing across the synchronous echo from our own
                 // SetWindowPos so the re-entrant call ignores it.
                 with_chrome(|ch| {
@@ -1445,7 +1490,7 @@ mod imp {
                     hwnd,
                     None,
                     x,
-                    0,
+                    min_top,
                     0,
                     0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
@@ -1672,13 +1717,25 @@ mod imp {
             lParam: LPARAM(0),
             lpReserved: std::ptr::null_mut(),
         };
-        SendMessageW(
+        let mut res = 0;
+        let _ = SendMessageTimeoutW(
             tip,
             TTM_ADDTOOLW,
-            Some(WPARAM(0)),
-            Some(LPARAM(&mut ti as *mut TTTOOLINFOW as isize)),
+            WPARAM(0),
+            LPARAM(&mut ti as *mut TTTOOLINFOW as isize),
+            SMTO_ABORTIFHUNG | SMTO_NORMAL,
+            50,
+            Some(&mut res),
         );
-        SendMessageW(tip, TTM_SETMAXTIPWIDTH, Some(WPARAM(0)), Some(LPARAM(320)));
+        let _ = SendMessageTimeoutW(
+            tip,
+            TTM_SETMAXTIPWIDTH,
+            WPARAM(0),
+            LPARAM(320),
+            SMTO_ABORTIFHUNG | SMTO_NORMAL,
+            50,
+            Some(&mut res),
+        );
     }
 
     /// Place the strip directly above its owner. A maximized owner keeps
@@ -1693,17 +1750,16 @@ mod imp {
     /// pure queries — they deliver no messages); phase 2 acts with the
     /// borrow released; phase 3 records the result under a short borrow.
     unsafe fn reposition_caption(label: &str) {
-        struct Snap {
-            hwnd: HWND,
-            owner: HWND,
-        }
         enum Plan {
             Skip,
             // v0.11.2: owner window is dead — the strip is an orphaned
             // ghost. Destroy it rather than leaving it stranded visible.
             Drop,
+            // Owner is minimized: hide the strip. It restores automatically
+            // when the owner is un-minimized and reposition is called.
+            Hide(HWND),
             Place {
-                snap: Snap,
+                hwnd: HWND,
                 tx: i32,
                 ty: i32,
                 w: i32,
@@ -1715,24 +1771,25 @@ mod imp {
             if !IsWindow(Some(cp.owner)).as_bool() {
                 return Some(Plan::Drop);
             }
+            if IsIconic(cp.owner).as_bool() {
+                return Some(Plan::Hide(cp.hwnd));
+            }
             let h = (BAR_H_LOGICAL * cp.scale).round() as i32;
+            let hmon = MonitorFromWindow(cp.owner, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let has_mi = GetMonitorInfoW(hmon, &mut mi).as_bool();
             if IsZoomed(cp.owner).as_bool() {
                 // Maximized: GetWindowRect bleeds past the monitor by the
                 // (hidden) border size, so anchor to the work area instead.
-                let hmon = MonitorFromWindow(cp.owner, MONITOR_DEFAULTTONEAREST);
-                let mut mi = MONITORINFO {
-                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                    ..Default::default()
-                };
-                if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                if !has_mi {
                     return Some(Plan::Skip);
                 }
                 let w = mi.rcWork.right - mi.rcWork.left;
                 return Some(Plan::Place {
-                    snap: Snap {
-                        hwnd: cp.hwnd,
-                        owner: cp.owner,
-                    },
+                    hwnd: cp.hwnd,
                     tx: mi.rcWork.left,
                     ty: mi.rcWork.top,
                     w,
@@ -1744,13 +1801,14 @@ mod imp {
                 return Some(Plan::Skip);
             }
             let w = orc.right - orc.left;
+            let min_top = if has_mi { mi.rcWork.top } else { 0 };
+            // Never strand the strip off the top of the monitor: clamp to min_top.
+            // The slave strip never moves its master owner window here.
+            let ty = (orc.top - h).max(min_top);
             Some(Plan::Place {
-                snap: Snap {
-                    hwnd: cp.hwnd,
-                    owner: cp.owner,
-                },
+                hwnd: cp.hwnd,
                 tx: orc.left,
-                ty: orc.top - h,
+                ty,
                 w,
                 h,
             })
@@ -1764,30 +1822,13 @@ mod imp {
             Plan::Drop => {
                 remove_caption(label);
             }
-            Plan::Place { snap, tx, ty, w, h } => {
-                let _ = ShowWindow(snap.hwnd, SW_SHOWNOACTIVATE);
-                // Never strand the strip off the top of the screen: nudge
-                // the owner down so the strip fits, then re-read.
-                let (tx, ty) = if ty < 0 {
-                    let _ = SetWindowPos(
-                        snap.owner,
-                        None,
-                        tx,
-                        h,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
-                    let mut orc2 = RECT::default();
-                    if GetWindowRect(snap.owner, &mut orc2).is_err() {
-                        return;
-                    }
-                    (orc2.left, orc2.top - h)
-                } else {
-                    (tx, ty)
-                };
+            Plan::Hide(hwnd) => {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+            Plan::Place { hwnd, tx, ty, w, h } => {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 let mut crc = RECT::default();
-                let same = GetWindowRect(snap.hwnd, &mut crc).is_ok()
+                let same = GetWindowRect(hwnd, &mut crc).is_ok()
                     && crc.left == tx
                     && crc.top == ty
                     && crc.right - crc.left == w
@@ -1802,7 +1843,7 @@ mod imp {
                         Some(())
                     });
                     let _ = SetWindowPos(
-                        snap.hwnd,
+                        hwnd,
                         None,
                         tx,
                         ty,
@@ -1903,6 +1944,7 @@ mod imp {
                     hover_tab: None,
                     pressed_tab: None,
                     syncing: false,
+                    dragging: false,
                     last_x: 0,
                     last_y: 0,
                 },
