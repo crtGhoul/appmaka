@@ -909,6 +909,23 @@ export function LauncherSettingsPanel({
         </span>
       )}
 
+      <details style={{ marginTop: 10, marginBottom: 12 }}>
+        <summary style={{ cursor: "pointer", color: "#a5b4fc", fontSize: 13, userSelect: "none" }}>
+          Keyboard shortcuts (or press F1 in any window)
+        </summary>
+        <div style={{ marginTop: 8, padding: "8px 12px", background: "rgba(255, 255, 255, 0.04)", borderRadius: 6, fontSize: 12, lineHeight: 1.6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: "4px 8px" }}>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>F1</span><span>Show / hide floating cheatsheet</span>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Alt + ← / →</span><span>Back / forward</span>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>F5</span><span>Reload page</span>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Ctrl + + / - / 0</span><span>Zoom in / out / reset</span>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Ctrl + F</span><span>Find in page</span>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Hold LMB + Esc</span><span>Close window</span>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Alt + F4</span><span>Close window</span>
+          </div>
+        </div>
+      </details>
+
       <label className="inline-form">
         <span>Web search for launcher commands</span>
         <select

@@ -328,6 +328,8 @@ pub fn open_account_placed(
     // Back/forward keyboard nav (v0.7.0): bare webviews have no chrome, so
     // Alt+Left / Alt+Right get them here.
     builder = builder.initialization_script(NAV_KEYS_JS);
+    // v0.13.5: F1 shortcut cheatsheet overlay.
+    builder = builder.initialization_script(SHORTCUTS_OVERLAY_JS);
     // v0.12.0: custom page cursor. Empty string when "off" — skipped.
     let cursor_style = app
         .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
@@ -709,6 +711,105 @@ pub(crate) const NAV_KEYS_JS: &str = r#"(function () {
     if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); history.back(); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); history.forward(); }
   }, true);
+})();
+"#;
+
+/// F1 shortcut cheatsheet overlay (v0.13.5).
+///
+/// Press F1 inside any app window to show a floating card listing all
+/// built-in AppMaka keyboard shortcuts. Press F1 again or Escape to dismiss.
+/// Pure page JS — no IPC, no Tauri globals, no DOM pollution on other pages.
+pub(crate) const SHORTCUTS_OVERLAY_JS: &str = r#"(function () {
+  try {
+    var OVERLAY_ID = "__appmaka_shortcuts__";
+    var SHORTCUTS = [
+      ["Alt + ←",        "Go back"],
+      ["Alt + →",        "Go forward"],
+      ["F1",             "Show / hide this shortcuts list"],
+      ["F5",             "Reload page"],
+      ["Ctrl + +",       "Zoom in"],
+      ["Ctrl + -",       "Zoom out"],
+      ["Ctrl + 0",       "Reset zoom"],
+      ["Ctrl + F",       "Find in page (browser default)"],
+      ["Hold LMB + Esc", "Close this window"],
+      ["Alt + F4",       "Close this window"],
+    ];
+
+    function buildOverlay() {
+      var el = document.createElement("div");
+      el.id = OVERLAY_ID;
+      el.setAttribute("data-appmaka", "shortcuts-overlay");
+      el.style.cssText = [
+        "position:fixed",
+        "top:48px",
+        "right:16px",
+        "z-index:2147483646",
+        "background:rgba(20,20,28,0.97)",
+        "color:#e2e2e8",
+        "border:1px solid rgba(255,255,255,0.12)",
+        "border-radius:10px",
+        "padding:14px 18px 12px",
+        "font:13px/1.6 system-ui,sans-serif",
+        "box-shadow:0 8px 32px rgba(0,0,0,0.5)",
+        "min-width:280px",
+        "pointer-events:none",
+        "user-select:none",
+        "animation:__am_fadein 0.12s ease",
+      ].join(";");
+
+      var style = document.createElement("style");
+      style.textContent =
+        "@keyframes __am_fadein{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}";
+      el.appendChild(style);
+
+      var title = document.createElement("div");
+      title.textContent = "AppMaka Shortcuts";
+      title.style.cssText = "font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#8b8b9b;margin-bottom:8px;";
+      el.appendChild(title);
+
+      var table = document.createElement("table");
+      table.style.cssText = "border-collapse:collapse;width:100%;";
+      SHORTCUTS.forEach(function(row) {
+        var tr = document.createElement("tr");
+        var kd = document.createElement("td");
+        kd.textContent = row[0];
+        kd.style.cssText = "padding:2px 12px 2px 0;white-space:nowrap;color:#a5b4fc;font-family:ui-monospace,monospace;font-size:12px;";
+        var vd = document.createElement("td");
+        vd.textContent = row[1];
+        vd.style.cssText = "padding:2px 0;color:#c9c9d4;";
+        tr.appendChild(kd);
+        tr.appendChild(vd);
+        table.appendChild(tr);
+      });
+      el.appendChild(table);
+
+      var hint = document.createElement("div");
+      hint.textContent = "Press F1 or Esc to close";
+      hint.style.cssText = "margin-top:8px;font-size:11px;color:#5a5a70;";
+      el.appendChild(hint);
+
+      return el;
+    }
+
+    function toggle() {
+      var existing = document.getElementById(OVERLAY_ID);
+      if (existing) { existing.remove(); return; }
+      (document.body || document.documentElement).appendChild(buildOverlay());
+    }
+
+    document.addEventListener("keydown", function(e) {
+      if (e.key === "F1") {
+        e.preventDefault();
+        e.stopPropagation();
+        toggle();
+        return;
+      }
+      if (e.key === "Escape" && document.getElementById(OVERLAY_ID)) {
+        e.preventDefault();
+        document.getElementById(OVERLAY_ID).remove();
+      }
+    }, true);
+  } catch(e) {}
 })();"#;
 
 /// Everything the popup handler needs, captured by value (the handler is

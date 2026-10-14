@@ -21,7 +21,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::adblock::AdblockState;
 use crate::launcher_settings::LauncherSettings;
-use crate::windows::{apply_placement, cosmetic_init_script, NAV_KEYS_JS, TARGET_BLANK_SHIM_JS, WindowPlacement};
+use crate::windows::{apply_placement, cosmetic_init_script, NAV_KEYS_JS, SHORTCUTS_OVERLAY_JS, TARGET_BLANK_SHIM_JS, WindowPlacement};
 
 /// Fixed label: one search window at a time; a second search reuses it.
 pub const SEARCH_WINDOW_LABEL: &str = "websearch";
@@ -308,6 +308,7 @@ fn build_search_window(
     // Alt+Right history nav: bare webviews have no chrome.
     builder = builder.initialization_script(TARGET_BLANK_SHIM_JS);
     builder = builder.initialization_script(NAV_KEYS_JS);
+    builder = builder.initialization_script(SHORTCUTS_OVERLAY_JS);
     // v0.12.0: AppMaka search chrome — return button + search field with
     // an example placeholder, replacing the engine's dated header. The
     // engine is baked in: the bar navigates with the same URL shape as

@@ -499,9 +499,19 @@ fn build_tabbed_window(
     builder = builder
         .on_download(crate::downloads::make_download_handler(window_app.clone()))
         .initialization_script(crate::windows::TARGET_BLANK_SHIM_JS)
-        .initialization_script(crate::windows::NAV_KEYS_JS);
+        .initialization_script(crate::windows::NAV_KEYS_JS)
+        .initialization_script(crate::windows::SHORTCUTS_OVERLAY_JS);
     if !page.adblock_css.is_empty() {
         builder = builder.initialization_script(crate::windows::cosmetic_init_script(&page.adblock_css));
+    }
+    // v0.12.0: custom page cursor in tabbed windows.
+    let cursor_style = window_app
+        .try_state::<std::sync::Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
+        .unwrap_or_default();
+    let cursor_js = crate::windows::cursor_chrome_js(&cursor_style);
+    if !cursor_js.is_empty() {
+        builder = builder.initialization_script(cursor_js);
     }
     // v0.10.0: re-tint the strip when the active tab navigates
     // (theme-color can change per page). Same pattern as the v0.9.11
