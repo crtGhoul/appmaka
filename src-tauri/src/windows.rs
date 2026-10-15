@@ -488,14 +488,20 @@ pub(crate) fn cosmetic_init_script(css: &str) -> String {
 /// in place instead of waiting for a window reopen.
 pub(crate) fn cursor_chrome_js(style: &str) -> String {
     let dots: usize = match style {
-        "dot" | "ring" => 1,
-        "trail" => 6,
+        "dot" | "ring" | "halo" | "pulse" => 1,
+        "orbit" => 2,
+        "trail" | "comet" => 6,
         _ => return String::new(),
     };
     let shape_css = match style {
-        "ring" => {
+        "ring" | "pulse" => {
             "width:26px;height:26px;margin:-13px 0 0 -13px;\
              border:2px solid #8b5cf6;border-radius:50%;background:transparent;"
+        }
+        "halo" => {
+            "width:12px;height:12px;margin:-6px 0 0 -6px;\
+             border-radius:50%;background:#8b5cf6;\
+             box-shadow:0 0 14px 5px rgba(139,92,246,0.55);"
         }
         // "dot" and the trail head share the dot look; trail followers
         // are smaller and fade via the per-dot opacity below.
@@ -548,8 +554,13 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
         var m = -Math.max(3, Math.round(8 * f)) / 2;
         d.style.margin = m + "px 0 0 " + m + "px";
       }}
+      if (STYLE === "comet" && i === 0) {{
+        d.style.boxShadow = "0 0 10px 3px rgba(139,92,246,0.6)";
+      }}
       document.documentElement.appendChild(d);
-      nodes.push({{ el: d, x: -100, y: -100, o: N > 1 ? 0.9 * (1 - i / N) + 0.1 : 1 }});
+      var op = N > 1 ? 0.9 * (1 - i / N) + 0.1 : 1;
+      if (STYLE === "orbit") op = i === 0 ? 1 : 0.85;
+      nodes.push({{ el: d, x: -100, y: -100, o: op }});
     }}
 
     var tx = -100, ty = -100, inside = false, dead = false, rafId = 0;
@@ -583,12 +594,22 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
     // transform-only — no layout, no paint beyond the dot elements.
     (function frame() {{
       if (dead) return;
+      var now = performance.now();
       var px = tx, py = ty;
       for (var i = 0; i < nodes.length; i++) {{
         var n = nodes[i];
         if (i === 0) {{ n.x = px; n.y = py; }}
+        else if (STYLE === "orbit") {{
+          var a = now / 350;
+          n.x = px + Math.cos(a) * 16;
+          n.y = py + Math.sin(a) * 16;
+        }}
         else {{ n.x += (px - n.x) * 0.4; n.y += (py - n.y) * 0.4; }}
-        n.el.style.transform = "translate(" + n.x + "px," + n.y + "px)";
+        var tr = "translate(" + n.x + "px," + n.y + "px)";
+        if (i === 0 && STYLE === "pulse") {{
+          tr += " scale(" + (1 + 0.16 * Math.sin(now / 260)).toFixed(3) + ")";
+        }}
+        n.el.style.transform = tr;
         px = n.x; py = n.y;
       }}
       rafId = requestAnimationFrame(frame);
@@ -623,7 +644,9 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
 /// callers skip injection, but a live page needs the old cursor gone.
 pub(crate) fn cursor_live_apply_js(style: &str) -> String {
     match style {
-        "dot" | "ring" | "trail" => cursor_chrome_js(style),
+        "dot" | "ring" | "trail" | "halo" | "pulse" | "orbit" | "comet" => {
+            cursor_chrome_js(style)
+        }
         _ => "(function(){try{if(window.__appmakaCursor&&window.__appmakaCursor.destroy)window.__appmakaCursor.destroy();}catch(e){}})();"
             .to_string(),
     }
@@ -656,11 +679,10 @@ pub(crate) fn apply_cursor_live(app: &AppHandle, style: &str) {
 /// this converges it to the saved style. Two passes, because an eval
 /// that lands before the new document commits is discarded with the
 /// old one — the same-style guard in the script makes a redundant
-/// pass a no-op. Called from the navigation hooks, which must never
-/// block: everything here runs on a detached thread. Windows-only
-/// because the navigation hooks themselves are Windows-only (the
-/// retint pipeline); elsewhere the settings broadcast still applies.
-#[cfg(windows)]
+/// pass a no-op. Called from the navigation hooks (Windows-only —
+/// they ride the retint pipeline) and from the search window's reuse
+/// path (all platforms). Never blocks the caller: everything here
+/// runs on a detached thread.
 pub(crate) fn schedule_cursor_reapply(app: AppHandle, label: String) {
     let _ = std::thread::Builder::new()
         .name("appmaka-cursor-reapply".to_string())
@@ -2118,7 +2140,7 @@ mod tests {
 
     #[test]
     fn cursor_chrome_styles() {
-        for style in ["dot", "ring", "trail"] {
+        for style in ["dot", "ring", "trail", "halo", "pulse", "orbit", "comet"] {
             let js = cursor_chrome_js(style);
             assert!(!js.is_empty(), "{style}");
             // Native cursor hidden; dots never intercept clicks.
@@ -2131,6 +2153,14 @@ mod tests {
         // Trail has followers; dot/ring are a single node.
         assert!(cursor_chrome_js("trail").contains("var N = 6"));
         assert!(cursor_chrome_js("dot").contains("var N = 1"));
+        // v0.13.10 styles: halo glows, orbit has a satellite, comet is
+        // a glowing trail.
+        assert!(cursor_chrome_js("halo").contains("box-shadow"));
+        assert!(cursor_chrome_js("halo").contains("var N = 1"));
+        assert!(cursor_chrome_js("orbit").contains("var N = 2"));
+        assert!(cursor_chrome_js("comet").contains("var N = 6"));
+        assert!(cursor_chrome_js("comet").contains("boxShadow"));
+        assert!(cursor_chrome_js("pulse").contains("scale("));
     }
 
     #[test]
@@ -2138,7 +2168,7 @@ mod tests {
         // Live-apply contract: every install script registers
         // window.__appmakaCursor with its style + destroy(), and
         // re-running with a different style destroys the old one.
-        for style in ["dot", "ring", "trail"] {
+        for style in ["dot", "ring", "trail", "halo", "pulse", "orbit", "comet"] {
             let js = cursor_chrome_js(style);
             assert!(js.contains("__appmakaCursor"), "{style}");
             assert!(js.contains("destroy"), "{style}");
@@ -2181,4 +2211,5 @@ mod tests {
         assert!(!cursor_window_label("oauth-1"));
     }
 }
+
 

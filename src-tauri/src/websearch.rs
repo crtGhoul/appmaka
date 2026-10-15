@@ -96,6 +96,14 @@ pub fn open_search_window_placed(
             .eval(&js)
             .map_err(|e| format!("Couldn't open the search: {e}"))?;
         let _ = window.set_title(query);
+        // The reused window keeps the init scripts from when it was
+        // built; if the cursor setting changed since, converge it
+        // (v0.13.10). The navigate above lands async, so this uses
+        // the same delayed two-pass helper as the navigation hooks.
+        crate::windows::schedule_cursor_reapply(
+            app.clone(),
+            SEARCH_WINDOW_LABEL.to_string(),
+        );
         // Re-navigation keeps the original open order; only the query text
         // changes in the session.
         crate::session::note_search_opened(app, query);

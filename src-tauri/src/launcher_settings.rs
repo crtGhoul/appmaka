@@ -365,7 +365,9 @@ pub fn set_custom_cursor(
     style: String,
 ) -> Result<LauncherSettings, String> {
     let style = style.trim().to_lowercase();
-    if !["off", "dot", "ring", "trail"].contains(&style.as_str()) {
+    if !["off", "dot", "ring", "trail", "halo", "pulse", "orbit", "comet"]
+        .contains(&style.as_str())
+    {
         return Err("Unknown cursor style.".to_string());
     }
     let saved = {

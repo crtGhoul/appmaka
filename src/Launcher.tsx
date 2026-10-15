@@ -619,7 +619,14 @@ export function LauncherSettingsPanel({
     settings.search_engine ?? "duckduckgo"
   );
   const [customCursor, setCustomCursor] = useState<
-    "off" | "dot" | "ring" | "trail"
+    | "off"
+    | "dot"
+    | "ring"
+    | "trail"
+    | "halo"
+    | "pulse"
+    | "orbit"
+    | "comet"
   >(settings.custom_cursor ?? "off");
   // v0.13.0: open apps/accounts as tabbed windows.
   const [openAsTabbed, setOpenAsTabbed] = useState(
@@ -980,6 +987,10 @@ export function LauncherSettingsPanel({
           <option value="dot">Dot</option>
           <option value="ring">Ring</option>
           <option value="trail">Trail</option>
+          <option value="halo">Halo (glow dot)</option>
+          <option value="pulse">Pulse (breathing ring)</option>
+          <option value="orbit">Orbit (satellite dot)</option>
+          <option value="comet">Comet (glow trail)</option>
         </select>
         <span className="help">
           Draws a lightweight pointer inside app windows. Useful if the

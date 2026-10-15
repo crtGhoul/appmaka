@@ -120,7 +120,15 @@ export interface LauncherSettings {
    * Custom page cursor for app windows (v0.12.0). Backend always sends it
    * (serde default): "off" | "dot" | "ring" | "trail".
    */
-  custom_cursor: "off" | "dot" | "ring" | "trail";
+  custom_cursor:
+    | "off"
+    | "dot"
+    | "ring"
+    | "trail"
+    | "halo"
+    | "pulse"
+    | "orbit"
+    | "comet";
   /**
    * Open apps/accounts as tabbed windows instead of plain page windows
    * (v0.13.0). Backend always sends it (serde default).
