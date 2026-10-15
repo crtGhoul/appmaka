@@ -447,11 +447,53 @@ pub fn open_account_placed(
 
     #[cfg(windows)]
     crate::adblock::attach_network_blocking(&window, adblock, adblock_flag);
+    #[cfg(windows)]
+    attach_fullscreen_sync(&window);
 
     store.touch_account(app_id, account_id);
     // A window opened (or re-focused above): persist the session.
     crate::session::write_session(app);
     Ok(())
+}
+
+/// Page-requested fullscreen (v0.13.12, Windows): when a page calls
+/// `requestFullscreen()` — a video player's fullscreen button — WebView2
+/// flips its ContainsFullScreenElement state, but nothing resizes the
+/// host window unless the host listens, and wry 0.57 never registers
+/// for it, so the button silently did nothing. Mirror the controller's
+/// state onto the window here. The caption strip hides itself while
+/// fullscreen (caption.rs reposition plan) and returns on exit, exactly
+/// like any other fullscreen transition. Fail-open: any COM error just
+/// leaves the window without page-fullscreen sync.
+#[cfg(windows)]
+pub(crate) fn attach_fullscreen_sync(window: &tauri::WebviewWindow) {
+    let app = window.app_handle().clone();
+    let label = window.label().to_string();
+    let _ = window.with_webview(move |platform| {
+        use webview2_com::ContainsFullScreenElementChangedEventHandler;
+        use webview2_com::Microsoft::Web::WebView2::Win32::*;
+        let core = match unsafe { platform.controller().CoreWebView2() } {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let handler = ContainsFullScreenElementChangedEventHandler::create(Box::new(
+            move |sender: Option<ICoreWebView2>, _args: Option<windows_core::IUnknown>| {
+                if let Some(core) = sender.as_ref() {
+                    let mut fs = windows_core::BOOL::default();
+                    if unsafe { core.ContainsFullScreenElement(&mut fs) }.is_ok() {
+                        if let Some(w) = app.get_webview_window(&label) {
+                            let _ = w.set_fullscreen(fs.as_bool());
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut token: i64 = 0;
+        let _ = unsafe {
+            core.add_ContainsFullScreenElementChanged(&handler, &mut token)
+        };
+    });
 }
 
 /// Wrap engine-generated hide CSS in a JSON-escaped <style> injection that
@@ -844,6 +886,7 @@ pub(crate) const SHORTCUTS_OVERLAY_JS: &str = r#"(function () {
       ["Alt + →",        "Go forward"],
       ["F1",             "Show / hide this shortcuts list"],
       ["F5",             "Reload page"],
+      ["F11",            "Full screen on / off"],
       ["Ctrl + +",       "Zoom in"],
       ["Ctrl + -",       "Zoom out"],
       ["Ctrl + 0",       "Reset zoom"],

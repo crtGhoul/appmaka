@@ -344,6 +344,8 @@ fn build_search_window(
         Ok(window) => {
             #[cfg(windows)]
             crate::adblock::attach_network_blocking(&window, adblock, adblock_flag);
+            #[cfg(windows)]
+            crate::windows::attach_fullscreen_sync(&window);
             // v0.9.6: DWM shadow on the frameless window + caption strip
             // (no-ops off Windows).
             #[cfg(windows)]

@@ -43,6 +43,23 @@ pub fn esc_gesture_closes(g: EscGesture) -> bool {
     g.esc_down && g.lmb_held && g.foreground_is_page
 }
 
+/// Fullscreen test for a page window (v0.13.12): does `rect`
+/// (left, top, right, bottom) fully cover `monitor` (same shape), with
+/// 2px of slack? A borderless fullscreen window covers its whole
+/// monitor; a plain window never does. A MAXIMIZED window's rect also
+/// bleeds to the edges, so callers must additionally require
+/// !IsZoomed — maximized is not fullscreen, it stops at the work area
+/// on the taskbar side in the common layouts but its rect alone can
+/// still cover on multi-monitor edges. Pure geometry, unit-tested.
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
+pub fn rect_covers_monitor(rect: (i32, i32, i32, i32), monitor: (i32, i32, i32, i32)) -> bool {
+    const SLACK: i32 = 2;
+    rect.0 <= monitor.0 + SLACK
+        && rect.1 <= monitor.1 + SLACK
+        && rect.2 >= monitor.2 - SLACK
+        && rect.3 >= monitor.3 - SLACK
+}
+
 // ---------------------------------------------------------------------------
 // Maximize/restore + snap: pure, cross-platform, unit-tested on every
 // platform (only the Win32 machinery is cfg(windows)).
@@ -251,6 +268,13 @@ mod imp {
             label: String,
         },
         ClosePage {
+            label: String,
+        },
+        /// v0.13.12: F11 (or Esc while fullscreen) on a page window:
+        /// toggle the window's fullscreen state. The handler decides the
+        /// direction from live Win32 state, so the same command enters
+        /// and exits.
+        ToggleFullscreen {
             label: String,
         },
         // v0.10.0: tabbed windows. The strip paints tabs from a snapshot;
@@ -1796,6 +1820,13 @@ mod imp {
                 ..Default::default()
             };
             let has_mi = GetMonitorInfoW(hmon, &mut mi).as_bool();
+            // v0.13.12: a fullscreen owner (F11, or the page's own
+            // fullscreen request mirrored onto the window) hides its
+            // strip, exactly like a minimized one; the reposition that
+            // follows the exit places it again.
+            if has_mi && owner_is_fullscreen(cp.owner) {
+                return Some(Plan::Hide(cp.hwnd));
+            }
             if IsZoomed(cp.owner).as_bool() {
                 // Maximized: GetWindowRect bleeds past the monitor by the
                 // (hidden) border size, so anchor to the work area instead.
@@ -2032,6 +2063,44 @@ mod imp {
     /// resolves to its page, a page window to itself. Uses try_borrow:
     /// the hook proc runs on the chrome thread and must never panic on a
     /// contended borrow — on contention the gesture just passes through.
+    /// Is this page window fullscreen right now? Pure queries only
+    /// (safe under the chrome borrow and inside the hook proc): the
+    /// window covers its whole monitor and is not merely maximized.
+    /// v0.13.12.
+    unsafe fn owner_is_fullscreen(owner: HWND) -> bool {
+        if IsZoomed(owner).as_bool() {
+            return false;
+        }
+        let hmon = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return false;
+        }
+        let mut orc = RECT::default();
+        if GetWindowRect(owner, &mut orc).is_err() {
+            return false;
+        }
+        super::rect_covers_monitor(
+            (orc.left, orc.top, orc.right, orc.bottom),
+            (mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right, mi.rcMonitor.bottom),
+        )
+    }
+
+    /// Fire-and-forget a command to the chrome thread from a hook proc:
+    /// try_borrow (never block, never panic), non-blocking send.
+    unsafe fn send_to_chrome(cmd: ChromeCmd) {
+        CHROME.with(|c| {
+            let guard = c.try_borrow().ok();
+            if let Some(ch) = guard.as_ref().and_then(|g| g.as_ref()) {
+                let _ = ch.tx.send(cmd);
+                let _ = SetEvent(ch.wake);
+            }
+        });
+    }
+
     fn resolve_page_label(fg: HWND) -> Option<String> {
         CHROME.with(|c| {
             let ch = c.try_borrow().ok()?;
@@ -2066,6 +2135,36 @@ mod imp {
             let w = wparam.0 as u32;
             if w == WM_KEYDOWN || w == WM_SYSKEYDOWN {
                 let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                // v0.13.12: F11 toggles window fullscreen when one of our
+                // page windows is in the foreground (browser convention);
+                // anywhere else it passes through untouched.
+                const VK_F11_U32: u32 = 0x7B;
+                if kb.vkCode == VK_F11_U32 {
+                    if let Some(label) = resolve_page_label(GetForegroundWindow()) {
+                        send_to_chrome(ChromeCmd::ToggleFullscreen { label });
+                        return LRESULT(1);
+                    }
+                }
+                // v0.13.12: plain Esc leaves window fullscreen before any
+                // other Esc meaning is considered. Only fires while a
+                // page window actually covers the whole monitor.
+                if kb.vkCode == VK_ESCAPE_U32 {
+                    if let Some(label) = resolve_page_label(GetForegroundWindow()) {
+                        let is_fs = CHROME.with(|c| {
+                            let guard = c.try_borrow().ok();
+                            guard
+                                .as_ref()
+                                .and_then(|g| g.as_ref())
+                                .and_then(|ch| ch.captions.get(&label))
+                                .map(|cp| owner_is_fullscreen(cp.owner))
+                                .unwrap_or(false)
+                        });
+                        if is_fs {
+                            send_to_chrome(ChromeCmd::ToggleFullscreen { label });
+                            return LRESULT(1);
+                        }
+                    }
+                }
                 if kb.vkCode == VK_ESCAPE_U32 {
                     let lmb_held = (GetAsyncKeyState(VK_LBUTTON_I32) as u16 & 0x8000) != 0;
                     let label = resolve_page_label(GetForegroundWindow());
@@ -2193,6 +2292,22 @@ mod imp {
                         } else {
                             let _ = w.close();
                         }
+                    }
+                }
+            }
+            ChromeCmd::ToggleFullscreen { label } => {
+                // Direction decided from live Win32 state under a short
+                // borrow; the Tauri call runs after it (same pattern as
+                // ClosePage's close above).
+                let ctx = CHROME.with(|c| {
+                    c.borrow().as_ref().and_then(|ch| {
+                        let cp = ch.captions.get(&label)?;
+                        Some((ch.app.clone(), owner_is_fullscreen(cp.owner)))
+                    })
+                });
+                if let Some((app, is_fs)) = ctx {
+                    if let Some(w) = app.get_webview_window(&label) {
+                        let _ = w.set_fullscreen(!is_fs);
                     }
                 }
             }
@@ -2631,6 +2746,22 @@ mod tests {
         // Fullscreen keeps the page in the foreground, so the gesture
         // applies there too — documented, not special-cased.
         assert!(esc_gesture_closes(gesture(true, true, true)));
+    }
+
+    #[test]
+    fn rect_covers_monitor_cases() {
+        let mon = (0, 0, 1920, 1080);
+        // Exact cover (true fullscreen) and a 1px bleed both count.
+        assert!(rect_covers_monitor(mon, mon));
+        assert!(rect_covers_monitor((-8, -8, 1928, 1088), mon));
+        // A work-area window stops at the taskbar: not fullscreen.
+        assert!(!rect_covers_monitor((0, 0, 1920, 1032), mon));
+        // An ordinary floating window does not cover.
+        assert!(!rect_covers_monitor((100, 80, 1300, 900), mon));
+        // Second monitor to the left (negative origin).
+        let mon2 = (-1920, 0, 0, 1080);
+        assert!(rect_covers_monitor(mon2, mon2));
+        assert!(!rect_covers_monitor(mon, mon2));
     }
 
     #[test]

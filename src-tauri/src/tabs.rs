@@ -541,6 +541,8 @@ fn build_tabbed_window(
         .map_err(|e| format!("could not open tabbed window: {e}"))?;
     #[cfg(windows)]
     let _ = window.set_shadow(true);
+    #[cfg(windows)]
+    crate::windows::attach_fullscreen_sync(&window);
 
     // Window events: strip sync (both platforms) + destroy cleanup.
     // The closure only locks TabState briefly and issues no re-entrant
