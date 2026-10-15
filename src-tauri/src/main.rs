@@ -490,6 +490,12 @@ fn launch_program(id: String, state: State<'_, LauncherState>) -> Result<(), Str
     state.launch(&id)
 }
 
+/// Launch a program as administrator (Windows "runas" verb → UAC prompt).
+#[tauri::command]
+fn launch_program_admin(id: String, state: State<'_, LauncherState>) -> Result<(), String> {
+    state.launch_admin(&id)
+}
+
 /// Hide the main window without quitting (Escape with an empty search box).
 #[tauri::command]
 fn hide_library(app: AppHandle) -> Result<(), String> {
@@ -1259,6 +1265,7 @@ fn main() {
             list_programs,
             rescan_programs,
             launch_program,
+            launch_program_admin,
             hide_library,
             show_library,
             fetch_page_title,

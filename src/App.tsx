@@ -2879,6 +2879,15 @@ function AppShell() {
           setError(errMsg(err));
         }
       },
+      onLaunchProgramAdmin: platform?.os === "windows"
+        ? async (program) => {
+            try {
+              await invoke("launch_program_admin", { id: program.id });
+            } catch (err) {
+              setError(errMsg(err));
+            }
+          }
+        : undefined,
       onRevealProgramLocation: async (program) => {
         try {
           await revealItemInDir(program.exe_path);

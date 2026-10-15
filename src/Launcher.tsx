@@ -947,6 +947,8 @@ export function LauncherSettingsPanel({
             <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>F1</span><span>Show / hide floating cheatsheet</span>
             <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Alt + ← / →</span><span>Back / forward</span>
             <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>F5</span><span>Reload page</span>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>F11</span><span>Full screen on / off</span>
+            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Ctrl + Shift + A</span><span>Add the current page to your apps</span>
             <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Ctrl + + / - / 0</span><span>Zoom in / out / reset</span>
             <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Ctrl + F</span><span>Find in page</span>
             <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Hold LMB + Esc</span><span>Close window</span>
@@ -1291,6 +1293,11 @@ export interface TileMenuActions {
   onRemoveApp: (app: WebApp) => void;
   onForgetLogin: (app: WebApp, account: Account) => void;
   onHideProgram: (programId: string) => void | Promise<void>;
+  /**
+   * v0.13.16: "Run as administrator" for program tiles. Optional and
+   * only provided on Windows (ShellExecute "runas" verb → UAC prompt).
+   */
+  onLaunchProgramAdmin?: (program: NativeProgram) => void | Promise<void>;
   onRevealProgramLocation: (program: NativeProgram) => void | Promise<void>;
   onRemoveCustomProgram: (programId: string) => void | Promise<void>;
 }
@@ -1453,6 +1460,13 @@ export function buildTileMenuEntries(
       onSelect: () => a.onRevealProgramLocation(prog),
     },
   ];
+  if (a.onLaunchProgramAdmin) {
+    entries.splice(1, 0, {
+      key: "launch-admin",
+      label: "Run as administrator",
+      onSelect: () => a.onLaunchProgramAdmin!(prog),
+    });
+  }
   if (isCustomProgram(prog)) {
     entries.push({
       key: "remove",

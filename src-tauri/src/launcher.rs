@@ -154,7 +154,7 @@ impl LauncherState {
             .ok_or_else(|| "Program not found.".to_string())?;
         #[cfg(windows)]
         {
-            launch_native(&prog.exe_path)
+            launch_native(&prog.exe_path, "open")
         }
         #[cfg(not(windows))]
         {
@@ -168,6 +168,26 @@ impl LauncherState {
             } else {
                 launch_native(&prog.exe_path)
             }
+        }
+    }
+
+    /// Launch a program elevated (v0.13.16): same server-side lookup,
+    /// then ShellExecuteW with the "runas" verb so Windows shows its
+    /// UAC prompt. Windows-only — other platforms just launch normally
+    /// (the launcher menu doesn't offer the option there).
+    pub fn launch_admin(&self, id: &str) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let prog = self
+                .all_for_launch()
+                .into_iter()
+                .find(|p| p.id == id)
+                .ok_or_else(|| "Program not found.".to_string())?;
+            launch_native(&prog.exe_path, "runas")
+        }
+        #[cfg(not(windows))]
+        {
+            self.launch(id)
         }
     }
 }
@@ -618,17 +638,19 @@ pub(crate) fn extract_icon_png(exe: &Path, icons_dir: &Path) -> Option<String> {
     }
 }
 
-/// Launch via ShellExecuteW ("open" verb): Windows picks the exe's working
-/// directory from its location and shows the normal UAC prompt itself for
-/// programs whose manifest requires elevation.
+/// Launch via ShellExecuteW: Windows picks the exe's working directory
+/// from its location. The verb is "open" for a normal launch (Windows
+/// shows the UAC prompt itself for programs whose manifest requires
+/// elevation) or "runas" for an explicitly elevated one.
 #[cfg(windows)]
-fn launch_native(exe_path: &str) -> Result<(), String> {
+fn launch_native(exe_path: &str, verb: &str) -> Result<(), String> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::{HSTRING, PCWSTR};
 
     unsafe {
         let file = HSTRING::from(exe_path);
+        let verb_h = HSTRING::from(verb);
         let dir = Path::new(exe_path)
             .parent()
             .map(|p| HSTRING::from(p.to_string_lossy().as_ref()));
@@ -638,7 +660,7 @@ fn launch_native(exe_path: &str) -> Result<(), String> {
             .unwrap_or(PCWSTR::null());
         let ret = ShellExecuteW(
             None,
-            PCWSTR::null(),
+            PCWSTR(verb_h.as_ptr()),
             PCWSTR(file.as_ptr()),
             PCWSTR::null(),
             dir_ptr,

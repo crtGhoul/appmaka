@@ -60,7 +60,9 @@ pub struct PopupAddOutcome {
 /// launcher. `acct-*` windows capture their *live* URL — the user may have
 /// navigated somewhere else and wants that page as a new app.
 pub(crate) fn add_label_allowed(label: &str) -> bool {
-    label.starts_with("popup-") || label.starts_with("acct-")
+    // v0.13.16: tabbed windows join popups and account windows — the
+    // page showing in a tab group is addable exactly like a plain page.
+    label.starts_with("popup-") || label.starts_with("acct-") || label.starts_with("tabbed-")
 }
 
 /// Validate the popup's live URL: must be a real http(s) address.
@@ -161,7 +163,7 @@ pub(crate) fn run_add(
     // two windows on the same site. From an account window the user is
     // mid-browsing — just add it to the launcher and leave everything
     // alone; no new window, no close.
-    if !label.starts_with("acct-") {
+    if label.starts_with("popup-") {
         crate::windows::open_account(app, store, adblock, winstate, &app_id, &account_id, false)?;
         let _ = window.close();
     }
@@ -216,8 +218,9 @@ pub fn fire_from_hotkey(app: &AppHandle) {
     // this just finds the focused candidate.
     let label = app.webview_windows().values().find_map(|w| {
         let l = w.label().to_string();
-        ((l.starts_with("popup-") || l.starts_with("acct-")) && w.is_focused().unwrap_or(false))
-            .then_some(l)
+        ((l.starts_with("popup-") || l.starts_with("acct-") || l.starts_with("tabbed-"))
+            && w.is_focused().unwrap_or(false))
+        .then_some(l)
     });
     let Some(label) = label else { return };
     let app = app.clone();
@@ -229,9 +232,9 @@ pub fn fire_from_hotkey(app: &AppHandle) {
             Ok(o) => {
                 if o.already_added {
                     emit_notice(&app, MSG_ALREADY_ADDED);
-                } else if label.starts_with("acct-") {
-                    // Popups show the new window as feedback; account
-                    // windows stay put, so say what happened.
+                } else if !label.starts_with("popup-") {
+                    // Popups show the new window as feedback; account and
+                    // tabbed windows stay put, so say what happened.
                     emit_notice(&app, &format!("{MSG_ADDED_PREFIX}{}", o.app_name));
                 }
             }
@@ -249,6 +252,7 @@ mod tests {
         assert!(add_label_allowed("popup-3"));
         assert!(add_label_allowed("popup-0"));
         assert!(add_label_allowed("acct-app1-acct1"));
+        assert!(add_label_allowed("tabbed-group1-g0"));
         assert!(!add_label_allowed("oauth-3"));
         assert!(!add_label_allowed("main"));
         assert!(!add_label_allowed(""));
