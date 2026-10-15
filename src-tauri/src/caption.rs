@@ -1274,6 +1274,8 @@ mod imp {
         struct SnapPlan {
             owner: HWND,
             work: RECT,
+            label: String,
+            is_fullscreen: bool,
         }
         let plan = with_chrome(|ch| {
             let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
@@ -1294,6 +1296,8 @@ mod imp {
             Some(SnapPlan {
                 owner: cp.owner,
                 work: mi.rcWork,
+                is_fullscreen: owner_is_fullscreen(cp.owner),
+                label,
             })
         });
         let Some(plan) = plan else {
@@ -1303,6 +1307,24 @@ mod imp {
         let menu = CreatePopupMenu().unwrap_or_default();
         if menu.is_invalid() {
             return;
+        }
+        // v0.13.19: "Full screen" rides at the top of this menu — the
+        // user's ask. It matters beyond convenience: it needs no
+        // keyboard hook, so fullscreen stays one right-click away even
+        // in Dictation compatibility mode (hooks off, Handy working).
+        const FULLSCREEN_ID: usize = 100;
+        {
+            let text = if plan.is_fullscreen {
+                "Exit full screen"
+            } else {
+                "Full screen"
+            };
+            let mut wide: Vec<u16> = OsStr::new(text)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let _ = AppendMenuW(menu, MF_STRING, FULLSCREEN_ID, PWSTR(wide.as_mut_ptr()));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PWSTR(std::ptr::null_mut()));
         }
         for (i, zone) in SnapZone::menu_order().into_iter().enumerate() {
             let mut wide: Vec<u16> = OsStr::new(zone.menu_label())
@@ -1325,6 +1347,12 @@ mod imp {
         // With TPM_RETURNCMD the BOOL carries the chosen item id; 0/false
         // means dismissed.
         if !cmd.as_bool() {
+            return;
+        }
+        if cmd.0 as usize == FULLSCREEN_ID {
+            // Same command the F11 hook sends; the handler decides the
+            // direction from live Win32 state.
+            send_to_chrome(ChromeCmd::ToggleFullscreen { label: plan.label });
             return;
         }
         let Some(zone) = SnapZone::menu_order()
