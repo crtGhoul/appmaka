@@ -1084,9 +1084,11 @@ pub fn close_group(app: &AppHandle, tabstate: &TabState, group_id: &str) {
     crate::session::write_session(app);
 }
 
-/// User-intent close of a whole tabbed window (dashboard row, strip X,
-/// Esc+LMB gesture): pinned groups get the one native confirm, exactly
-/// like pinned account windows.
+/// User-intent close of a whole tabbed window (dashboard row, OS window
+/// close, last-tab closes from the strip X / Esc+LMB gesture): pinned
+/// groups get the one native confirm, exactly like pinned account
+/// windows. Since v0.13.11 the strip X closes the active tab first and
+/// only reaches this when one tab remains.
 pub fn close_tabbed_window(app: &AppHandle, tabstate: &TabState, group_id: &str) -> Result<(), String> {
     if !crate::pin::guard_close(app, &pin_key(group_id)) {
         return Ok(());
@@ -1124,27 +1126,6 @@ pub fn group_id_for_label(app: &AppHandle, label: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Fire-and-forget close of a whole tabbed window by live label (strip X
-/// button, dashboard-adjacent paths): resolves the group and runs the
-/// pin-aware user-intent close on a worker thread. Safe to call from the
-/// chrome thread or the strip proc — the pin confirm blocks the worker,
-/// never the caller.
-#[cfg(windows)]
-pub fn request_close_group_by_label(app: &AppHandle, label: &str) {
-    let Some(group_id) = group_id_for_label(app, label) else {
-        return;
-    };
-    let app = app.clone();
-    std::thread::Builder::new()
-        .name("appmaka-tab-close".to_string())
-        .spawn(move || {
-            if let Some(ts) = app.try_state::<TabState>() {
-                let _ = close_tabbed_window(&app, &ts, &group_id);
-            }
-        })
-        .ok();
 }
 
 /// Esc+LMB gesture inside a tabbed window (v0.10.0): closes the ACTIVE
@@ -1525,7 +1506,7 @@ fn ensure_strip_window(app: &AppHandle, group: &TabGroup, page: &WebviewWindow) 
     // block on the pin-confirm dialog, whose blocking_show() posts to the
     // main-thread event loop and waits — calling it inline here deadlocks
     // the main thread permanently ("Not Responding", 0% CPU) for pinned
-    // groups. Same worker-thread pattern as request_close_group_by_label.
+    // groups. Same worker-thread pattern as the other strip close paths.
     let s_app = app.clone();
     let s_group = group.id.clone();
     strip.on_window_event(move |event| {

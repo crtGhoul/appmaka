@@ -172,8 +172,17 @@ function App() {
       </div>
       <button
         className="winx"
-        aria-label="Close tabbed window"
-        onClick={() => void run(() => invoke("close_tabbed_window", { groupId }))}
+        aria-label="Close active tab"
+        onClick={() =>
+          void run(() =>
+            // v0.13.11 parity with the Windows strip: the X closes the
+            // active tab, not the whole group; the last tab closes the
+            // window (pin-aware via close_tabbed_window).
+            group.tabs.length > 1
+              ? invoke("close_tab", { groupId, index: group.active })
+              : invoke("close_tabbed_window", { groupId }),
+          )
+        }
       >
         ×
       </button>

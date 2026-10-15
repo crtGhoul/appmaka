@@ -1134,7 +1134,22 @@ mod imp {
                     .ok();
             }
             TabHit::Add => show_add_tab_menu(&app, &label),
-            TabHit::CloseWindow => crate::tabs::request_close_group_by_label(&app, &label),
+            TabHit::CloseWindow => {
+                // v0.13.11 (user's ask): the strip X closes the ACTIVE
+                // TAB, not the whole group — each tab is a different app
+                // to the user, and the X taking both down was the top
+                // tabbed-window complaint ("close just the one I
+                // choose"). Same semantics as the Esc+LMB gesture:
+                // active tab closes; the last tab closes the window,
+                // pin-aware. Whole-group close still lives on the
+                // dashboard rows and the OS window close (Alt+F4).
+                std::thread::Builder::new()
+                    .name("appmaka-tab-close".to_string())
+                    .spawn(move || {
+                        crate::tabs::gesture_close_active_tab(&app, &label)
+                    })
+                    .ok();
+            }
             TabHit::Min | TabHit::Max | TabHit::Drag => {}
         }
         let _ = hwnd;
