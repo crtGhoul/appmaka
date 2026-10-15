@@ -10,7 +10,9 @@
 //! - Trigger: a global hotkey (hotkeys.rs registry, RegisterHotKey under
 //!   the hood — no keyboard hook, so it works over ANY window and keeps
 //!   working in Dictation compatibility mode). Toggle: press to start,
-//!   press again to stop. Esc cancels while recording (polled, no hook).
+//!   press again to stop. Esc also stops (polled, no hook) — v0.14.1:
+//!   the user asked for Esc as the "back out" key, and backing out
+//!   delivers the transcript like any other stop.
 //! - Capture: cpal opens the default microphone only while recording.
 //! - Transcription: the official whisper.cpp binary (pinned release
 //!   b5454) is downloaded once into the app-data dir and run as a child
@@ -38,7 +40,11 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use crate::hotkeys::{self, BindingStatus, HotkeyKind};
 
 pub const BINDING_ID: &str = "dictation:toggle";
-pub const DEFAULT_HOTKEY: &str = "Super+Alt+D";
+/// Do NOT use Super+Alt+D here: Win+Alt+D is Windows' own clock/calendar
+/// shortcut, so the shell can claim it before the app can register it.
+/// Ctrl+Alt+D is the safe default for dictation.
+pub const DEFAULT_HOTKEY: &str = "Ctrl+Alt+D";
+const OLD_DEFAULT_HOTKEY: &str = "Super+Alt+D";
 const MAX_TRANSCRIPTS: usize = 50;
 const MAX_RECORD_SECS: u64 = 120;
 const WHISPER_RELEASE: &str = "b5454";
@@ -150,11 +156,17 @@ fn binary_path(app: &AppHandle) -> Option<PathBuf> {
 }
 
 pub fn load(app: &AppHandle) -> DictationState {
-    let file: DictationFile = store_path(app)
+    let mut file: DictationFile = store_path(app)
         .ok()
         .and_then(|p| fs::read_to_string(p).ok())
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_default();
+    // v0.14.1: the first default (Super+Alt+D) collides with Windows'
+    // own clock shortcut — migrate installs still on it; a hotkey the
+    // user picked themselves is never touched.
+    if file.hotkey == OLD_DEFAULT_HOTKEY {
+        file.hotkey = DEFAULT_HOTKEY.to_string();
+    }
     DictationState {
         data: Mutex::new(file),
         session: Mutex::new(None),
@@ -538,7 +550,6 @@ fn toggle_inner(app: AppHandle) -> Result<(), String> {
         return Err(msg.to_string());
     }
     let stop = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut session = state.session.lock().unwrap();
         *session = Some(Session { stop: stop.clone() });
@@ -547,7 +558,7 @@ fn toggle_inner(app: AppHandle) -> Result<(), String> {
     let app2 = app.clone();
     if let Err(e) = std::thread::Builder::new()
         .name("appmaka-dictation".to_string())
-        .spawn(move || record_and_transcribe(app2, stop, cancel))
+        .spawn(move || record_and_transcribe(app2, stop))
     {
         if let Some(state) = app.try_state::<DictationState>() {
             *state.session.lock().unwrap() = None;
@@ -565,8 +576,8 @@ fn finish_session(app: &AppHandle) {
     emit_state(app);
 }
 
-fn record_and_transcribe(app: AppHandle, stop: Arc<AtomicBool>, cancel: Arc<AtomicBool>) {
-    let result = run_session(&app, &stop, &cancel);
+fn record_and_transcribe(app: AppHandle, stop: Arc<AtomicBool>) {
+    let result = run_session(&app, &stop);
     #[cfg(windows)]
     pill::hide();
     if let Err(e) = result {
@@ -575,7 +586,7 @@ fn record_and_transcribe(app: AppHandle, stop: Arc<AtomicBool>, cancel: Arc<Atom
     finish_session(&app);
 }
 
-fn run_session(app: &AppHandle, stop: &AtomicBool, cancel: &AtomicBool) -> Result<(), String> {
+fn run_session(app: &AppHandle, stop: &AtomicBool) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     let host = cpal::default_host();
@@ -629,13 +640,10 @@ fn run_session(app: &AppHandle, stop: &AtomicBool, cancel: &AtomicBool) -> Resul
     pill::show();
 
     let started = std::time::Instant::now();
-    let mut cancelled = false;
     loop {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        if cancel.load(Ordering::SeqCst) || esc_pressed() {
-            cancelled = true;
+        // The hotkey and Esc end the take the same way (v0.14.1: Esc is
+        // the user's "back out" — it delivers, it does not discard).
+        if stop.load(Ordering::SeqCst) || esc_pressed() {
             break;
         }
         if started.elapsed().as_secs() >= MAX_RECORD_SECS {
@@ -644,9 +652,15 @@ fn run_session(app: &AppHandle, stop: &AtomicBool, cancel: &AtomicBool) -> Resul
         std::thread::sleep(std::time::Duration::from_millis(40));
     }
     drop(stream);
-    if cancelled {
-        return Ok(());
-    }
+    // Pin the paste target NOW, at stop time. Transcription takes a
+    // few seconds; if the user's focus drifts in that window, delivery
+    // restores this window before pasting instead of spraying the text
+    // into whatever happens to be focused then ("sometimes it pastes,
+    // sometimes it doesn't").
+    #[cfg(windows)]
+    let target = foreground_hwnd();
+    #[cfg(not(windows))]
+    let target = 0isize;
 
     let raw = samples.lock().unwrap().clone();
     // Under ~0.3 s of audio is a mis-tap, not dictation.
@@ -687,7 +701,7 @@ fn run_session(app: &AppHandle, stop: &AtomicBool, cancel: &AtomicBool) -> Resul
         crate::errors::record(app, "dictation", "Didn't catch that — try again.", "", true);
         return Ok(());
     }
-    deliver(app, &text)
+    deliver(app, &text, target)
 }
 
 fn push_mono(sink: &Arc<Mutex<Vec<f32>>>, data: &[f32], channels: usize) {
@@ -706,9 +720,12 @@ fn push_mono(sink: &Arc<Mutex<Vec<f32>>>, data: &[f32], channels: usize) {
 }
 
 /// Save the transcript, put it on the clipboard, and paste it into the
-/// window the user was in (Windows). The transcript stays on the
-/// clipboard afterwards either way — that's part of the ask.
-fn deliver(app: &AppHandle, text: &str) -> Result<(), String> {
+/// window that was focused when the user stopped (Windows). The
+/// transcript stays on the clipboard afterwards either way — that's
+/// part of the ask, and it's the guaranteed fallback if the paste
+/// target is gone: Ctrl+V always has it.
+fn deliver(app: &AppHandle, text: &str, target: isize) -> Result<(), String> {
+    let _ = target; // paste-target pinning is Windows-only for now
     let transcript = Transcript {
         id: format!("d{}", now_ms()),
         ts: now_ms(),
@@ -724,9 +741,71 @@ fn deliver(app: &AppHandle, text: &str) -> Result<(), String> {
         .map_err(|e| format!("Couldn't write to the clipboard: {e}"))?;
     crate::clipboard::note_self_write(app, text);
     #[cfg(windows)]
-    send_ctrl_v();
+    paste_into(target);
     let _ = app.emit("dictation-transcribed", text.to_string());
     Ok(())
+}
+
+#[cfg(windows)]
+fn foreground_hwnd() -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { GetForegroundWindow().0 as isize }
+}
+
+/// Paste into `target` (the window focused when dictation stopped).
+/// Focus usually never moved — then this is a plain Ctrl+V. If it
+/// drifted during transcription, restore the target first (a dummy
+/// Ctrl tap is the standard foreground-lock unlock if the plain call
+/// is refused). A closed target just means clipboard-only delivery.
+#[cfg(windows)]
+fn paste_into(target: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+    if target == 0 {
+        send_ctrl_v();
+        return;
+    }
+    let hwnd = HWND(target as *mut _);
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return; // target closed meanwhile; the clipboard has it
+        }
+        if foreground_hwnd() != target {
+            let _ = SetForegroundWindow(hwnd);
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            if foreground_hwnd() != target {
+                send_dummy_ctrl_tap();
+                let _ = SetForegroundWindow(hwnd);
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+        }
+    }
+    send_ctrl_v();
+}
+
+/// A lone Ctrl press+release: unlocks the foreground lock so
+/// SetForegroundWindow is honored (the trick the Win-key module uses).
+#[cfg(windows)]
+fn send_dummy_ctrl_tap() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
+    };
+    let make = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VK_CONTROL,
+                wScan: 0,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [make(false), make(true)];
+    unsafe {
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,7 +966,7 @@ mod pill {
         let old_font = SelectObject(dc, HGDIOBJ(font.0));
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, windows::Win32::Foundation::COLORREF(0x00F2F2F5));
-        let mut text: Vec<u16> = "Listening — hotkey stops, Esc cancels"
+        let mut text: Vec<u16> = "Listening — hotkey or Esc to stop"
             .encode_utf16()
             .collect();
         let mut trect = RECT { left: 34, top: 0, right: PILL_W - 8, bottom: PILL_H };
