@@ -53,6 +53,26 @@ pub fn cursor_monitor(app: &AppHandle) -> Option<tauri::Monitor> {
         .or_else(|| app.primary_monitor().ok().flatten())
 }
 
+/// Logical top-left that centers a `w`x`h` window on the monitor under
+/// the cursor (v0.13.18). Fresh windows used to always `.center()` —
+/// the primary monitor — so opening an app while working on another
+/// screen made the window "switch monitors". The user's ask: a window
+/// stays where they are. None when no monitor can be determined;
+/// callers fall back to `.center()`.
+pub(crate) fn cursor_centered_position(app: &AppHandle, w: f64, h: f64) -> Option<(f64, f64)> {
+    let m = cursor_monitor(app)?;
+    let scale = m.scale_factor();
+    let (mx, my) = (
+        m.position().x as f64 / scale,
+        m.position().y as f64 / scale,
+    );
+    let (mw, mh) = (
+        m.size().width as f64 / scale,
+        m.size().height as f64 / scale,
+    );
+    Some((mx + (mw - w) / 2.0, my + (mh - h) / 2.0))
+}
+
 /// Placement for a tiled routine window (v0.9.0): logical-pixel top-left
 /// and logical-pixel size. The caller divides the physical monitor
 /// geometry by the monitor's scale factor, so HiDPI comes out right.
@@ -282,6 +302,9 @@ pub fn open_account_placed(
     // WebviewWindowBuilder::position takes logical pixels directly.
     if let Some(p) = placement {
         builder = builder.position(p.x, p.y).inner_size(p.width, p.height);
+    } else if let Some((x, y)) = cursor_centered_position(app, 1200.0, 800.0) {
+        // v0.13.18: open on the monitor the user is actually on.
+        builder = builder.position(x, y).inner_size(1200.0, 800.0);
     } else {
         builder = builder.inner_size(1200.0, 800.0).center();
     }
@@ -336,11 +359,7 @@ pub fn open_account_placed(
     // v0.13.5: F1 shortcut cheatsheet overlay.
     builder = builder.initialization_script(shortcuts_overlay_js(app));
     // v0.12.0: custom page cursor. Empty string when "off" — skipped.
-    let cursor_style = app
-        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
-        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
-        .unwrap_or_default();
-    let cursor_js = cursor_chrome_js(&cursor_style);
+    let cursor_js = saved_cursor_js(app);
     if !cursor_js.is_empty() {
         builder = builder.initialization_script(cursor_js);
     }
@@ -560,11 +579,23 @@ pub(crate) fn cosmetic_init_script(css: &str) -> String {
 /// destroys the old cursor first. That is what lets a settings change
 /// (or a navigation in a window built before the change) swap cursors
 /// in place instead of waiting for a window reopen.
+/// The cursor script for the user's saved style ("" when off). Reads
+/// the launcher-settings state every other builder already consults.
+pub(crate) fn saved_cursor_js(app: &AppHandle) -> String {
+    let style = app
+        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
+        .unwrap_or_default();
+    cursor_chrome_js(&style)
+}
+
 pub(crate) fn cursor_chrome_js(style: &str) -> String {
     let dots: usize = match style {
-        "dot" | "ring" | "halo" | "pulse" => 1,
-        "orbit" => 2,
+        "dot" | "ring" | "halo" | "pulse" | "crosshair" => 1,
+        "orbit" | "ripple" => 2,
         "trail" | "comet" => 6,
+        // v0.13.18: stardust — a longer, jittery particle trail.
+        "stardust" => 10,
         _ => return String::new(),
     };
     let shape_css = match style {
@@ -576,6 +607,12 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
             "width:12px;height:12px;margin:-6px 0 0 -6px;\
              border-radius:50%;background:#8b5cf6;\
              box-shadow:0 0 14px 5px rgba(139,92,246,0.55);"
+        }
+        // v0.13.18: crosshair — a thin reticle ring with a center dot.
+        "crosshair" => {
+            "width:24px;height:24px;margin:-12px 0 0 -12px;\
+             border:1.5px solid #8b5cf6;border-radius:50%;\
+             background:radial-gradient(circle,#8b5cf6 2px,transparent 3px);"
         }
         // "dot" and the trail head share the dot look; trail followers
         // are smaller and fade via the per-dot opacity below.
@@ -621,12 +658,21 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
         "position:fixed;left:0;top:0;z-index:2147483647;" +
         "pointer-events:none;will-change:transform;opacity:0;" +
         {shape_css_json};
-      if (N > 1) {{
+      if (N > 1 && STYLE !== "ripple") {{
         var f = 1 - i / N;
         d.style.width = Math.max(3, Math.round(8 * f)) + "px";
         d.style.height = d.style.width;
         var m = -Math.max(3, Math.round(8 * f)) / 2;
         d.style.margin = m + "px 0 0 " + m + "px";
+      }}
+      if (STYLE === "ripple" && i === 1) {{
+        // The ripple ring rides on the head and pulses outward in the
+        // frame loop; it starts as a plain ring the size of "ring".
+        d.style.cssText =
+          "position:fixed;left:0;top:0;z-index:2147483647;" +
+          "pointer-events:none;will-change:transform,opacity;opacity:0;" +
+          "width:26px;height:26px;margin:-13px 0 0 -13px;" +
+          "border:2px solid #8b5cf6;border-radius:50%;background:transparent;";
       }}
       if (STYLE === "comet" && i === 0) {{
         d.style.boxShadow = "0 0 10px 3px rgba(139,92,246,0.6)";
@@ -678,10 +724,20 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
           n.x = px + Math.cos(a) * 16;
           n.y = py + Math.sin(a) * 16;
         }}
+        else if (STYLE === "ripple") {{ n.x = px; n.y = py; }}
+        else if (STYLE === "stardust") {{
+          n.x += (px - n.x) * 0.35 + Math.sin(now / 90 + i * 1.7) * 0.7;
+          n.y += (py - n.y) * 0.35 + Math.cos(now / 110 + i * 2.3) * 0.7;
+        }}
         else {{ n.x += (px - n.x) * 0.4; n.y += (py - n.y) * 0.4; }}
         var tr = "translate(" + n.x + "px," + n.y + "px)";
         if (i === 0 && STYLE === "pulse") {{
           tr += " scale(" + (1 + 0.16 * Math.sin(now / 260)).toFixed(3) + ")";
+        }}
+        if (STYLE === "ripple" && i === 1) {{
+          var ph = (now % 900) / 900;
+          tr += " scale(" + (0.4 + ph * 1.6).toFixed(3) + ")";
+          n.el.style.opacity = inside ? ((1 - ph) * 0.75).toFixed(3) : 0;
         }}
         n.el.style.transform = tr;
         px = n.x; py = n.y;
@@ -718,7 +774,8 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
 /// callers skip injection, but a live page needs the old cursor gone.
 pub(crate) fn cursor_live_apply_js(style: &str) -> String {
     match style {
-        "dot" | "ring" | "trail" | "halo" | "pulse" | "orbit" | "comet" => {
+        "dot" | "ring" | "trail" | "halo" | "pulse" | "orbit" | "comet" | "crosshair"
+        | "ripple" | "stardust" => {
             cursor_chrome_js(style)
         }
         _ => "(function(){try{if(window.__appmakaCursor&&window.__appmakaCursor.destroy)window.__appmakaCursor.destroy();}catch(e){}})();"
@@ -1172,6 +1229,12 @@ fn build_contained_window(
     if kind == "oauth" {
         builder = builder.initialization_script(oauth_autoclose_script(&app_origin(&ctx.app_url)));
     }
+    // v0.13.18: popups get the drawn cursor too — same reasoning as
+    // previews (a sign-in popup with no visible mouse is a dead end).
+    let cursor_js = saved_cursor_js(&ctx.app);
+    if !cursor_js.is_empty() {
+        builder = builder.initialization_script(cursor_js);
+    }
     // Placement: where the page asked, else centered over the window
     // that opened it — the popup lands on the user's actual screen, not
     // blindly on the primary monitor.
@@ -1201,6 +1264,9 @@ fn build_contained_window(
             if kind == "popup" {
                 crate::popup_chrome::setup_popup_chrome(&ctx.app, &window, &label, url);
             }
+            // v0.13.18: page-requested fullscreen works in popups too.
+            #[cfg(windows)]
+            attach_fullscreen_sync(&window);
             Some(window)
         }
         Err(e) => {
@@ -1311,8 +1377,9 @@ fn spawn_oauth_modal(
 /// SECURITY POSTURE: these windows load external site URLs only, never our
 /// frontend bundle, and `withGlobalTauri` is false crate-wide, so no Tauri
 /// IPC (`window.__TAURI__`) is ever injected into them — they cannot invoke
-/// backend commands. The only script ever injected is the static,
-/// JSON-escaped OAuth auto-close snippet (or none). Nested popups inside a
+/// backend commands. The only scripts ever injected are our own static
+/// snippets: the JSON-escaped OAuth auto-close script and the custom
+/// cursor (the same one account windows get). Nested popups inside a
 /// contained window are denied outright, preventing popup loops.
 fn spawn_contained_window(
     app: &AppHandle,
@@ -1352,7 +1419,6 @@ fn spawn_contained_window(
             .data_directory(session_dir.clone())
             .title(&title)
             .inner_size(640.0, 720.0)
-            .center()
             // Nested popups inside the contained window are denied outright:
             // an OAuth flow that needs a second popup is rare, and this
             // prevents modal loops.
@@ -1361,8 +1427,17 @@ fn spawn_contained_window(
             // other window (v0.9.8): without this they silently bypassed
             // the download folder, the history, and Mark of the Web.
             .on_download(crate::downloads::make_download_handler(window_app.clone()));
+            // v0.13.18: open on the monitor the user is actually on.
+            if let Some((x, y)) = cursor_centered_position(&window_app, 640.0, 720.0) {
+                builder = builder.position(x, y);
+            }
             if let Some(script) = initialization_script {
                 builder = builder.initialization_script(script);
+            }
+            // v0.13.18: drawn cursor in popups (see build_contained_window).
+            let cursor_js = saved_cursor_js(&window_app);
+            if !cursor_js.is_empty() {
+                builder = builder.initialization_script(cursor_js);
             }
             // v0.9.11: re-tint the title bar when the popup navigates
             // (theme-color can change per page). The hook must never block
@@ -1385,6 +1460,9 @@ fn spawn_contained_window(
             }
             match builder.build() {
                 Ok(_window) => {
+                    // v0.13.18: page-requested fullscreen works in popups too.
+                    #[cfg(windows)]
+                    attach_fullscreen_sync(&_window);
                     // v0.9.11: "Add to applications…" system-menu item +
                     // title-bar tint. Windows-only; best-effort and silent.
                     #[cfg(windows)]
@@ -2109,6 +2187,37 @@ pub fn close_open_window(app: AppHandle, label: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Enter fullscreen the way the user expects: on Windows, the monitor
+/// under the cursor (v0.13.13); elsewhere, the window's own monitor.
+pub(crate) fn enter_fullscreen_smart(window: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    enter_fullscreen_on_cursor_monitor(window);
+    #[cfg(not(windows))]
+    {
+        let _ = window.set_fullscreen(true);
+    }
+}
+
+/// v0.13.18: the dashboard's "Full screen" button — the discoverable
+/// counterpart to F11 / a page's own fullscreen button. Targets the
+/// same windows the dashboard lists (account windows, popups, the
+/// search window) plus tabbed groups.
+#[tauri::command]
+pub fn toggle_window_fullscreen(app: AppHandle, label: String) -> Result<(), String> {
+    if !(close_label_allowed(&label) || label.starts_with("tabbed-")) {
+        return Err("That window can't be full-screened.".to_string());
+    }
+    let window = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "That window is not open.".to_string())?;
+    if window.is_fullscreen().unwrap_or(false) {
+        let _ = window.set_fullscreen(false);
+    } else {
+        enter_fullscreen_smart(&window);
+    }
+    Ok(())
+}
+
 /// List every open account window with its app/account names and focus
 /// state, for the RAM dashboard.
 #[tauri::command]
@@ -2376,7 +2485,7 @@ mod tests {
 
     #[test]
     fn cursor_chrome_styles() {
-        for style in ["dot", "ring", "trail", "halo", "pulse", "orbit", "comet"] {
+        for style in ["dot", "ring", "trail", "halo", "pulse", "orbit", "comet", "crosshair", "ripple", "stardust"] {
             let js = cursor_chrome_js(style);
             assert!(!js.is_empty(), "{style}");
             // Native cursor hidden; dots never intercept clicks.
@@ -2404,7 +2513,7 @@ mod tests {
         // Live-apply contract: every install script registers
         // window.__appmakaCursor with its style + destroy(), and
         // re-running with a different style destroys the old one.
-        for style in ["dot", "ring", "trail", "halo", "pulse", "orbit", "comet"] {
+        for style in ["dot", "ring", "trail", "halo", "pulse", "orbit", "comet", "crosshair", "ripple", "stardust"] {
             let js = cursor_chrome_js(style);
             assert!(js.contains("__appmakaCursor"), "{style}");
             assert!(js.contains("destroy"), "{style}");

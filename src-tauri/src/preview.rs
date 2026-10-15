@@ -174,7 +174,6 @@ pub fn start_preview(
         .data_directory(session_dir.clone())
         .title(format!("AppMaka Preview — {url}"))
         .inner_size(1200.0, 800.0)
-        .center()
         .on_new_window(windows::make_popup_handler(PopupContext {
             app: app.clone(),
             app_id: format!("preview-{id}"),
@@ -199,6 +198,23 @@ pub fn start_preview(
                 }
             }
         });
+        // v0.13.18: open on the monitor the user is actually on.
+        if let Some((x, y)) = windows::cursor_centered_position(app, 1200.0, 800.0) {
+            site_builder = site_builder.position(x, y);
+        }
+        // v0.13.18: previews get the same standard page kit as account
+        // windows. The cursor matters most: the drawn pointer is the
+        // only visible mouse for users whose native cursor doesn't
+        // render inside WebView2 — previews never had it, so the mouse
+        // "disappeared" on preview pages (the user's Reddit sign-in).
+        site_builder = site_builder
+            .initialization_script(windows::TARGET_BLANK_SHIM_JS)
+            .initialization_script(windows::NAV_KEYS_JS)
+            .initialization_script(windows::shortcuts_overlay_js(app));
+        let cursor_js = windows::saved_cursor_js(app);
+        if !cursor_js.is_empty() {
+            site_builder = site_builder.initialization_script(cursor_js);
+        }
         let css = adblock.cosmetic_css_for(&url);
         if !css.is_empty() {
             site_builder =
@@ -207,6 +223,8 @@ pub fn start_preview(
         let site = site_builder
             .build()
             .map_err(|e| format!("could not open preview window: {e}"))?;
+        #[cfg(windows)]
+        windows::attach_fullscreen_sync(&site);
 
         // Previews always get ad blocking; there are no per-app settings yet.
         #[cfg(windows)]

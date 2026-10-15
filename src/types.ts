@@ -128,7 +128,10 @@ export interface LauncherSettings {
     | "halo"
     | "pulse"
     | "orbit"
-    | "comet";
+    | "comet"
+    | "crosshair"
+    | "ripple"
+    | "stardust";
   /**
    * Open apps/accounts as tabbed windows instead of plain page windows
    * (v0.13.0). Backend always sends it (serde default).
@@ -146,6 +149,8 @@ export interface LauncherSettings {
   theme: "system" | "dark" | "light";
   /** Launcher tile size (v0.13.17). Backend always sends it. */
   tile_size: "cozy" | "compact";
+  /** Dictation compatibility: global keyboard hooks off (v0.13.18). Backend always sends it. */
+  dictation_compat: boolean;
   /**
    * Whether the library's "Hidden programs" list is collapsed. Null when the
    * user never toggled it: the UI then defaults to collapsed whenever the

@@ -164,7 +164,7 @@ mod imp {
     use std::time::{Duration, Instant};
     use tauri::{AppHandle, Manager};
     use windows::Win32::Foundation::{CloseHandle, HANDLE, LPARAM, LRESULT, WAIT_FAILED, WPARAM};
-    use windows::Win32::System::Threading::{CreateEventW, SetEvent, INFINITE};
+    use windows::Win32::System::Threading::{CreateEventW, GetCurrentThreadId, SetEvent, INFINITE};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
         VIRTUAL_KEY,
@@ -198,6 +198,14 @@ mod imp {
     unsafe impl Send for Installed {}
 
     static INSTALLED: Mutex<Option<Installed>> = Mutex::new(None);
+
+    /// The hook thread's Win32 thread id (0 until it starts), so
+    /// `set_enabled` can ask it to unhook (v0.13.18).
+    static HOOK_THREAD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// Thread message asking the hook thread to unhook (wParam 0) or
+    /// re-hook (wParam 1) — dictation compatibility (v0.13.18).
+    const WM_HOOK_CONTROL: u32 = 0x8000 + 0x42;
     /// Serializes install/uninstall (both are rare user actions; install
     /// blocks briefly waiting for the hook thread's verdict).
     static INSTALL_LOCK: Mutex<()> = Mutex::new(());
@@ -313,8 +321,12 @@ mod imp {
         wake: HANDLE,
         result_tx: mpsc::Sender<Result<(), String>>,
     ) {
+        HOOK_THREAD_ID.store(
+            unsafe { GetCurrentThreadId() },
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) };
-        let hook = match hook {
+        let mut hook = match hook {
             Ok(h) => h,
             Err(e) => {
                 let _ = result_tx.send(Err(format!(
@@ -326,6 +338,7 @@ mod imp {
                 return;
             }
         };
+        let mut hook_active = true;
         {
             let mut guard = match INSTALLED.lock() {
                 Ok(g) => g,
@@ -389,6 +402,22 @@ mod imp {
             unsafe {
                 let mut msg = MSG::default();
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    // v0.13.18: dictation-compatibility control — swap
+                    // the hook in/out on this thread (its owner).
+                    if msg.message == WM_HOOK_CONTROL {
+                        if msg.wParam.0 == 0 && hook_active {
+                            let _ = UnhookWindowsHookEx(hook);
+                            hook_active = false;
+                        } else if msg.wParam.0 == 1 && !hook_active {
+                            if let Ok(h) =
+                                SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)
+                            {
+                                hook = h;
+                                hook_active = true;
+                            }
+                        }
+                        continue;
+                    }
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -402,6 +431,10 @@ mod imp {
 
     /// Install the hook. Idempotent: already-installed is Ok.
     pub fn install(app: &AppHandle) -> Result<(), String> {
+        // v0.13.18: dictation compatibility keeps the hook uninstalled.
+        if crate::launcher_settings::dictation_compat_enabled(app) {
+            return Ok(());
+        }
         let _guard = INSTALL_LOCK
             .lock()
             .map_err(|_| "Couldn't watch the Windows key.".to_string())?;
@@ -439,6 +472,28 @@ mod imp {
     }
 
     /// Uninstall the hook. No-op when not installed.
+    /// v0.13.18: dictation compatibility — unhook the Windows-key
+    /// watcher (enabled = false) or bring it back (enabled = true, via
+    /// the normal install path, which itself honors the setting).
+    /// Unhooking goes by thread message: the hook thread owns the
+    /// HHOOK and swaps it in its pump loop.
+    pub fn set_enabled(app: &AppHandle, enabled: bool) {
+        let tid = HOOK_THREAD_ID.load(std::sync::atomic::Ordering::Relaxed);
+        if enabled {
+            if tid != 0 {
+                // Thread is alive: ask it to re-hook (install() would
+                // no-op — the watcher is already "installed").
+                let _ = unsafe { PostThreadMessageW(tid, WM_HOOK_CONTROL, WPARAM(1), LPARAM(0)) };
+            } else {
+                let _ = install(app);
+            }
+            return;
+        }
+        if tid != 0 {
+            let _ = unsafe { PostThreadMessageW(tid, WM_HOOK_CONTROL, WPARAM(0), LPARAM(0)) };
+        }
+    }
+
     pub fn uninstall() {
         let _guard = match INSTALL_LOCK.lock() {
             Ok(g) => g,
@@ -460,7 +515,10 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{install, uninstall};
+pub use imp::{install, set_enabled, uninstall};
+
+#[cfg(not(windows))]
+pub fn set_enabled(_app: &tauri::AppHandle, _enabled: bool) {}
 
 #[cfg(test)]
 mod tests {

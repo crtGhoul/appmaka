@@ -161,6 +161,12 @@ pub struct LauncherSettings {
     /// Launcher tile size (v0.13.17): "cozy" (default) or "compact".
     #[serde(default = "default_tile_size")]
     pub tile_size: String,
+    /// Dictation compatibility (v0.13.18): when true, AppMaka's global
+    /// keyboard hooks stay uninstalled — the caption Esc/F11/Ctrl+Tab
+    /// hook and the Windows-key clipboard watcher — so low-level-hook
+    /// tools (dictation like Handy) get an untouched hook chain.
+    #[serde(default)]
+    pub dictation_compat: bool,
 }
 
 fn default_accent() -> String {
@@ -219,6 +225,7 @@ impl Default for LauncherSettings {
             accent: default_accent(),
             theme: default_theme(),
             tile_size: default_tile_size(),
+            dictation_compat: false,
         }
     }
 }
@@ -447,6 +454,43 @@ pub fn set_tile_size(app: AppHandle, size: String) -> Result<LauncherSettings, S
     Ok(settings.clone())
 }
 
+/// Read the dictation-compatibility setting from live state (false
+/// when state is unavailable). The hook installers consult this so
+/// the mode also holds for hooks installed after a restart.
+pub fn dictation_compat_enabled(app: &AppHandle) -> bool {
+    app.try_state::<Mutex<LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.dictation_compat))
+        .unwrap_or(false)
+}
+
+/// Apply the dictation-compatibility mode to the global hooks: the
+/// caption keyboard hook refreshes against the setting, and the
+/// Windows-key watcher unhooks (or re-installs) to match.
+fn apply_dictation_compat(app: &AppHandle, enabled: bool) {
+    crate::caption::refresh_esc_hook(app);
+    crate::winkey::set_enabled(app, !enabled);
+}
+
+/// Set dictation compatibility (v0.13.18). JS:
+/// `invoke("set_dictation_compat", { enabled })`. Applies live: the
+/// global keyboard hooks come out (or go back) immediately.
+#[tauri::command]
+pub fn set_dictation_compat(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.dictation_compat = enabled;
+    save(&app, &settings)?;
+    let out = settings.clone();
+    drop(settings);
+    apply_dictation_compat(&app, enabled);
+    Ok(out)
+}
+
 /// Set the custom page cursor ("off", "dot", "ring", "trail").
 /// JS: `invoke("set_custom_cursor", { style })`. Applies live to
 /// already-open windows (v0.13.8); windows opened later read the saved
@@ -457,7 +501,7 @@ pub fn set_custom_cursor(
     style: String,
 ) -> Result<LauncherSettings, String> {
     let style = style.trim().to_lowercase();
-    if !["off", "dot", "ring", "trail", "halo", "pulse", "orbit", "comet"]
+    if !["off", "dot", "ring", "trail", "halo", "pulse", "orbit", "comet", "crosshair", "ripple", "stardust"]
         .contains(&style.as_str())
     {
         return Err("Unknown cursor style.".to_string());

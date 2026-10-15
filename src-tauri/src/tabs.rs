@@ -484,6 +484,9 @@ fn build_tabbed_window(
         }
     } else if let Some(p) = args.placement {
         builder = builder.position(p.x, p.y).inner_size(p.width, p.height);
+    } else if let Some((x, y)) = crate::windows::cursor_centered_position(app, 1200.0, 800.0) {
+        // v0.13.18: open on the monitor the user is actually on.
+        builder = builder.position(x, y).inner_size(1200.0, 800.0);
     } else {
         builder = builder.inner_size(1200.0, 800.0).center();
     }
@@ -509,11 +512,7 @@ fn build_tabbed_window(
         builder = builder.initialization_script(crate::windows::cosmetic_init_script(&page.adblock_css));
     }
     // v0.12.0: custom page cursor in tabbed windows.
-    let cursor_style = window_app
-        .try_state::<std::sync::Mutex<crate::launcher_settings::LauncherSettings>>()
-        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
-        .unwrap_or_default();
-    let cursor_js = crate::windows::cursor_chrome_js(&cursor_style);
+    let cursor_js = crate::windows::saved_cursor_js(&window_app);
     if !cursor_js.is_empty() {
         builder = builder.initialization_script(cursor_js);
     }

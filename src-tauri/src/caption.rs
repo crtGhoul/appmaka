@@ -277,6 +277,9 @@ mod imp {
         ToggleFullscreen {
             label: String,
         },
+        /// v0.13.18: dictation compatibility toggled — re-evaluate the
+        /// Esc hook against the current setting.
+        RefreshEscHook,
         // v0.10.0: tabbed windows. The strip paints tabs from a snapshot;
         // clicks/keys arrive as commands and are fanned out to tabs.rs on
         // worker threads (window building never happens in the proc).
@@ -2036,6 +2039,10 @@ mod imp {
             }
         });
         let Some(app) = app else { return };
+        // v0.13.18: dictation compatibility keeps the hook uninstalled.
+        if crate::launcher_settings::dictation_compat_enabled(&app) {
+            return;
+        }
         match SetWindowsHookExW(WH_KEYBOARD_LL, Some(esc_proc), None, 0) {
             Ok(hook) => {
                 with_chrome(|ch| {
@@ -2316,6 +2323,26 @@ mod imp {
                     }
                 }
             }
+            ChromeCmd::RefreshEscHook => {
+                // Setting read via the chrome state's app handle; the
+                // unhook/install helpers manage their own short borrows
+                // (no borrow is held while dispatching — same contract
+                // as the other arms).
+                let app = CHROME.with(|c| c.borrow().as_ref().map(|ch| ch.app.clone()));
+                if let Some(app) = app {
+                    if crate::launcher_settings::dictation_compat_enabled(&app) {
+                        with_chrome(|ch| {
+                            if !ch.hook.is_invalid() {
+                                let _ = UnhookWindowsHookEx(ch.hook);
+                                ch.hook = HHOOK::default();
+                            }
+                            Some(())
+                        });
+                    } else {
+                        ensure_esc_hook();
+                    }
+                }
+            }
             // v0.10.0: tabbed-window commands.
             ChromeCmd::AddTabbedCaption {
                 owner,
@@ -2490,6 +2517,19 @@ mod imp {
     /// A page window (account or search) was created: give it a caption
     /// strip. Idempotent per label. Safe to call from any thread.
     ///
+    /// v0.13.18: ask the chrome thread to re-evaluate the Esc hook
+    /// against the dictation-compatibility setting. No-op until the
+    /// chrome thread exists (the hook installs lazily with the first
+    /// caption, and `ensure_esc_hook` reads the setting itself).
+    pub fn refresh_esc_hook(_app: &AppHandle) {
+        let Some((tx, wake)) = CHROME_CTL.get().cloned() else {
+            return;
+        };
+        if tx.send(ChromeCmd::RefreshEscHook).is_ok() {
+            let _ = unsafe { SetEvent(wake.0) };
+        }
+    }
+
     /// Infallible by contract (v0.9.7): any failure — including a panic —
     /// leaves a plain frameless window (minimizable from the taskbar,
     /// closable via Alt+F4). A dead strip never kills the process.
@@ -2644,8 +2684,12 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{
     page_window_closed, page_window_moved, page_window_opened, page_window_set_tint,
-    tabbed_window_opened, tabbed_window_set_tint, tabbed_window_updated, tint_log, TabStripData,
+    refresh_esc_hook, tabbed_window_opened, tabbed_window_set_tint, tabbed_window_updated,
+    tint_log, TabStripData,
 };
+
+#[cfg(not(windows))]
+pub fn refresh_esc_hook(_app: &tauri::AppHandle) {}
 
 #[cfg(not(windows))]
 pub fn page_window_opened(

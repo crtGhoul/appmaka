@@ -303,6 +303,9 @@ fn build_search_window(
     // 1200x800.
     if let Some(p) = placement {
         builder = builder.position(p.x, p.y).inner_size(p.width, p.height);
+    } else if let Some((x, y)) = crate::windows::cursor_centered_position(&app, 1200.0, 800.0) {
+        // v0.13.18: open on the monitor the user is actually on.
+        builder = builder.position(x, y).inner_size(1200.0, 800.0);
     } else {
         builder = builder.inner_size(1200.0, 800.0).center();
     }

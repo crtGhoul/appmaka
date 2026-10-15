@@ -627,6 +627,9 @@ export function LauncherSettingsPanel({
     | "pulse"
     | "orbit"
     | "comet"
+    | "crosshair"
+    | "ripple"
+    | "stardust"
   >(settings.custom_cursor ?? "off");
   // v0.13.0: open apps/accounts as tabbed windows.
   const [openAsTabbed, setOpenAsTabbed] = useState(
@@ -635,6 +638,10 @@ export function LauncherSettingsPanel({
   // v0.13.9: global popup override for all apps.
   const [allowPopupsGlobally, setAllowPopupsGlobally] = useState(
     settings.allow_popups_globally ?? false
+  );
+  // v0.13.18: dictation compatibility (global keyboard hooks off).
+  const [dictationCompat, setDictationCompat] = useState(
+    settings.dictation_compat ?? false
   );
   const [startupMode, setStartupMode] = useState<"restore" | "ask" | "fresh">(
     settings.startup_mode ?? "restore"
@@ -783,6 +790,23 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setOpenAsTabbed(settings.open_as_tabbed ?? false);
+    }
+  }
+
+  // v0.13.18: dictation compatibility — hooks out/in live.
+  async function handleDictationCompat(enabled: boolean) {
+    setDictationCompat(enabled);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("set_dictation_compat", {
+        enabled,
+      });
+      onSaved(updated);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setDictationCompat(settings.dictation_compat ?? false);
     }
   }
 
@@ -1036,6 +1060,9 @@ export function LauncherSettingsPanel({
           <option value="pulse">Pulse (breathing ring)</option>
           <option value="orbit">Orbit (satellite dot)</option>
           <option value="comet">Comet (glow trail)</option>
+          <option value="crosshair">Crosshair (reticle)</option>
+          <option value="ripple">Ripple (pulsing rings)</option>
+          <option value="stardust">Stardust (sparkle trail)</option>
         </select>
         <span className="help">
           Draws a lightweight pointer inside app windows. Useful if the
@@ -1056,6 +1083,23 @@ export function LauncherSettingsPanel({
           Apps and accounts open in a tabbed window instead of a plain page
           window. You can still open a plain window from the tile's
           right-click menu.
+        </span>
+      </label>
+
+      <label className="inline-form">
+        <span>Dictation compatibility mode</span>
+        <input
+          type="checkbox"
+          checked={dictationCompat}
+          onChange={(e) => void handleDictationCompat(e.target.checked)}
+          aria-label="Dictation compatibility mode"
+        />
+        <span className="help">
+          Turns off AppMaka's global keyboard hooks (the Esc-close gesture,
+          F11 full screen, Ctrl+Tab tab switching, and the Windows-key
+          clipboard popup) so dictation tools like Handy get the keyboard
+          to themselves. Turn this on if dictation won't start or paste
+          while an app window is focused.
         </span>
       </label>
 

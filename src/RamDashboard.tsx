@@ -111,6 +111,16 @@ export function RamDashboard({
     }
   }
 
+  // v0.13.18: full-screen toggle for an open window (same as F11).
+  async function toggleFullscreen(label: string) {
+    setError(null);
+    try {
+      await invoke("toggle_window_fullscreen", { label });
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  }
+
   // v0.10.0: close a whole tabbed window. Pinned groups get the one
   // native confirm via the backend, like pinned account windows.
   async function closeTabbedGroup(g: TabbedWindowInfo) {
@@ -305,6 +315,15 @@ export function RamDashboard({
                 )}
                 <button
                   type="button"
+                  className="ram-row-add"
+                  title="Make this window full screen (or exit) — same as F11"
+                  aria-label={`Full screen ${w.appName} window`}
+                  onClick={() => void toggleFullscreen(w.label)}
+                >
+                  Full screen
+                </button>
+                <button
+                  type="button"
                   className="ram-row-close"
                   title="Close this window"
                   aria-label={`Close ${w.appName} window`}
@@ -361,6 +380,15 @@ export function RamDashboard({
                     />
                     <span>Don't close this window</span>
                   </label>
+                  <button
+                    type="button"
+                    className="ram-row-add"
+                    title="Make this window full screen (or exit) — same as F11"
+                    aria-label="Full screen tabbed window"
+                    onClick={() => void toggleFullscreen(g.label)}
+                  >
+                    Full screen
+                  </button>
                   <button
                     type="button"
                     className="ram-row-close"

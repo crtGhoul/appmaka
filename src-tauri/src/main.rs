@@ -1298,6 +1298,7 @@ fn main() {
             // v0.7.0: RAM dashboard + forget-login
             windows::close_all_account_windows,
             windows::close_open_window,
+            windows::toggle_window_fullscreen,
             windows::list_open_account_windows,
             // v0.9.11: "Add to applications" for popup windows.
             popup_add::popup_add_to_applications,
@@ -1354,6 +1355,7 @@ fn main() {
             launcher_settings::set_accent,
             launcher_settings::set_theme,
             launcher_settings::set_tile_size,
+            launcher_settings::set_dictation_compat,
             launcher_settings::set_open_as_tabbed,
             launcher_settings::set_allow_popups_globally,
             // v0.8.0: hidden-programs collapse state (polish)

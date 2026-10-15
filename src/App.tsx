@@ -2060,7 +2060,6 @@ function AppShell() {
       setNotice(`Download finished: ${lastCompleted.filename}`);
     }
   }, [lastCompleted, downloadSettings]);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState<Set<string>>(new Set());
   const [editingApp, setEditingApp] = useState<WebApp | null>(null);
   const [editingAccount, setEditingAccount] = useState<{
@@ -2491,11 +2490,6 @@ function AppShell() {
         created.accounts[created.accounts.length - 1];
       if (!event.payload.created) {
         setApps((prev) => prev.map((a) => (a.id === created.id ? created : a)));
-        setExpanded((prev) => {
-          const next = new Set(prev);
-          next.add(created.id);
-          return next;
-        });
         setError(null);
         setNotice(`Added as another account under "${created.name}".`);
         if (adopted) {
@@ -2506,13 +2500,6 @@ function AppShell() {
         return;
       }
       setApps((prev) => [...prev, created]);
-      // Expand the new card so the rename affordance and the new account
-      // are visible right away.
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        next.add(created.id);
-        return next;
-      });
       if (adopted) {
         setError(null);
         invoke("open_account", { appId: created.id, accountId: adopted.id }).catch(
@@ -2556,15 +2543,6 @@ function AppShell() {
     })();
   }, [view]);
 
-  function toggleExpanded(id: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
   function toggleSettings(id: string) {
     setSettingsOpen((prev) => {
       const next = new Set(prev);
@@ -2585,11 +2563,6 @@ function AppShell() {
   function revealApp(app: WebApp, message: string) {
     const full = { ...app, accounts: app.accounts ?? [], settings: app.settings ?? DEFAULT_SETTINGS };
     setApps((prev) => (prev.some((a) => a.id === full.id) ? prev : [...prev, full]));
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      next.add(full.id);
-      return next;
-    });
     setError(null);
     setNotice(message);
   }
@@ -2647,11 +2620,6 @@ function AppShell() {
     try {
       await invoke("remove_app", { id: app.id });
       setApps((prev) => prev.filter((a) => a.id !== app.id));
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        next.delete(app.id);
-        return next;
-      });
     } catch (err) {
       setError(errMsg(err));
     }
@@ -3454,10 +3422,9 @@ function AppShell() {
         ) : (
           <ul className="app-grid">
             {apps.map((app) => {
-              const isExpanded = expanded.has(app.id);
               const showSettings = settingsOpen.has(app.id);
               return (
-                <li key={app.id} className={`app-card${isExpanded ? " is-expanded" : ""}`}>
+                <li key={app.id} className="app-card">
                   <div className="card-head">
                     <AppIcon app={app} />
                     <div className="app-meta">
@@ -3480,15 +3447,6 @@ function AppShell() {
                     <div className="app-actions">
                       <button
                         className="text-button"
-                        onClick={() => toggleExpanded(app.id)}
-                        aria-expanded={isExpanded}
-                      >
-                        {isExpanded
-                          ? "Hide"
-                          : `Accounts (${app.accounts.length})`}
-                      </button>
-                      <button
-                        className="text-button"
                         onClick={() => setEditingApp(app)}
                       >
                         Edit
@@ -3499,8 +3457,9 @@ function AppShell() {
                     </div>
                   </div>
 
-                  {isExpanded && (
-                    <div className="card-body">
+                  {/* v0.13.18: accounts are always listed under their app —
+                      no expander click to reach the account you want. */}
+                  <div className="card-body">
                       {app.accounts.length === 0 ? (
                         <p className="muted small">No accounts yet.</p>
                       ) : (
@@ -3556,8 +3515,7 @@ function AppShell() {
                           onError={setError}
                         />
                       )}
-                    </div>
-                  )}
+                  </div>
                 </li>
               );
             })}
