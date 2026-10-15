@@ -97,7 +97,6 @@ authors = ["AppMaka"]
 version = "0.14.0"
 edition = "2021"
 name = "appmaka"
-version = "0.13.20"
 
 # v0.9.8: native save dialog inside the download `Requested` handler.
 # The download callback runs on the main thread on both platforms (WebView2's
