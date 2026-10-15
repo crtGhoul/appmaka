@@ -334,7 +334,7 @@ pub fn open_account_placed(
     // Alt+Left / Alt+Right get them here.
     builder = builder.initialization_script(NAV_KEYS_JS);
     // v0.13.5: F1 shortcut cheatsheet overlay.
-    builder = builder.initialization_script(SHORTCUTS_OVERLAY_JS);
+    builder = builder.initialization_script(shortcuts_overlay_js(app));
     // v0.12.0: custom page cursor. Empty string when "off" — skipped.
     let cursor_style = app
         .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
@@ -910,6 +910,14 @@ pub(crate) const NAV_KEYS_JS: &str = r#"(function () {
 /// Press F1 inside any app window to show a floating card listing all
 /// built-in AppMaka keyboard shortcuts. Press F1 again or Escape to dismiss.
 /// Pure page JS — no IPC, no Tauri globals, no DOM pollution on other pages.
+/// The F1 overlay script with its key names tinted in the user's accent
+/// color (v0.13.17). The base script is a const; the accent hex is
+/// swapped in per window build from the saved setting.
+pub(crate) fn shortcuts_overlay_js(app: &AppHandle) -> String {
+    let accent = crate::launcher_settings::load(app).accent;
+    SHORTCUTS_OVERLAY_JS.replace("#a5b4fc", crate::launcher_settings::accent_text_hex(&accent))
+}
+
 pub(crate) const SHORTCUTS_OVERLAY_JS: &str = r#"(function () {
   try {
     var OVERLAY_ID = "__appmaka_shortcuts__";

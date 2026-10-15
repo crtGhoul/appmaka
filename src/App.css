@@ -1,4 +1,17 @@
-/* One accent color: indigo. Everything else stays quiet gray. */
+/* One accent color (user-pickable since v0.13.17; indigo by default).
+   Everything else stays quiet gray. The palette variables are set from
+   the saved accent by applyAppearance in App.tsx; these defaults paint
+   the correct indigo before that runs. */
+:root {
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-mid: #6366f1;
+  --accent-bright: #818cf8;
+  --accent-text: #a5b4fc;
+  --accent-rgb: 79, 70, 229;
+  --accent-mid-rgb: 99, 102, 241;
+  --accent-bright-rgb: 129, 140, 248;
+}
 
 .shell {
   max-width: 880px;
@@ -111,9 +124,9 @@
 .settings-form input:focus,
 .settings-form select:focus,
 .settings-form textarea:focus {
-  outline: 2px solid #4f46e5;
+  outline: 2px solid var(--accent);
   outline-offset: -1px;
-  border-color: #4f46e5;
+  border-color: var(--accent);
 }
 
 button {
@@ -138,14 +151,14 @@ button:disabled {
 }
 
 .add-form button[type="submit"] {
-  background: #4f46e5;
-  border-color: #4f46e5;
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
   flex: 0 0 auto;
 }
 
 .add-form button[type="submit"]:hover:not(:disabled) {
-  background: #4338ca;
+  background: var(--accent-hover);
 }
 
 .form-error {
@@ -159,20 +172,20 @@ button:disabled {
 }
 
 .form-actions button[type="submit"] {
-  background: #4f46e5;
-  border-color: #4f46e5;
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
 }
 
 .form-actions button[type="submit"]:hover:not(:disabled) {
-  background: #4338ca;
+  background: var(--accent-hover);
 }
 
 .text-button {
   border: none;
   background: none;
   padding: 6px 8px;
-  color: #4f46e5;
+  color: var(--accent);
   font-weight: 600;
 }
 
@@ -244,7 +257,7 @@ input[type="color"] {
   align-items: center;
   justify-content: center;
   background: #e8eaf6;
-  color: #4f46e5;
+  color: var(--accent);
   font-weight: 700;
   font-size: 18px;
 }
@@ -384,18 +397,16 @@ input[type="color"] {
 
 .popup-badge {
   font-size: 11px;
-  color: #4f46e5;
-  background: rgba(79, 70, 229, 0.1);
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.1);
   border-radius: 4px;
   padding: 1px 6px;
   white-space: nowrap;
 }
 
-@media (prefers-color-scheme: dark) {
-  .popup-badge {
-    background: rgba(129, 140, 248, 0.18);
-    color: #a5b4fc;
-  }
+:root[data-theme="dark"] .popup-badge {
+  background: rgba(var(--accent-bright-rgb), 0.18);
+  color: var(--accent-text);
 }
 
 .inline-form {
@@ -472,7 +483,7 @@ input[type="color"] {
 .check-row input[type="checkbox"] {
   width: 16px;
   height: 16px;
-  accent-color: #4f46e5;
+  accent-color: var(--accent);
 }
 
 .footer {
@@ -547,9 +558,9 @@ input[type="color"] {
 }
 
 .folder-panel .search-input:focus {
-  outline: 2px solid #818cf8;
+  outline: 2px solid var(--accent-bright);
   outline-offset: -1px;
-  border-color: #818cf8;
+  border-color: var(--accent-bright);
 }
 
 .folder-panel .search-hint {
@@ -621,7 +632,7 @@ input[type="color"] {
 }
 
 .icon-tile.is-active {
-  background: rgba(99, 102, 241, 0.38);
+  background: rgba(var(--accent-mid-rgb), 0.38);
 }
 
 /* Inline rename affordance: the name itself is the edit control. */
@@ -637,7 +648,7 @@ input[type="color"] {
 }
 
 .inline-edit:focus-visible {
-  outline: 2px solid #4f46e5;
+  outline: 2px solid var(--accent);
   outline-offset: 0;
 }
 
@@ -645,7 +656,7 @@ input[type="color"] {
   font: inherit;
   font-weight: inherit;
   padding: 4px 8px;
-  border: 1px solid #4f46e5;
+  border: 1px solid var(--accent);
   border-radius: 6px;
   background: #fff;
   color: inherit;
@@ -683,7 +694,7 @@ input[type="color"] {
   height: 44px;
   border-radius: 11px;
   font-size: 20px;
-  background: rgba(129, 140, 248, 0.25);
+  background: rgba(var(--accent-bright-rgb), 0.25);
   color: #dfe2ff;
 }
 
@@ -701,7 +712,7 @@ input[type="color"] {
   height: 44px;
   border-radius: 11px;
   font-size: 20px;
-  background: rgba(129, 140, 248, 0.25);
+  background: rgba(var(--accent-bright-rgb), 0.25);
   color: #dfe2ff;
 }
 
@@ -787,20 +798,20 @@ input[type="color"] {
 }
 
 .quick-add-form input:focus {
-  outline: 2px solid #4f46e5;
+  outline: 2px solid var(--accent);
   outline-offset: -1px;
-  border-color: #4f46e5;
+  border-color: var(--accent);
 }
 
 .quick-add-form button[type="submit"] {
-  background: #4f46e5;
-  border-color: #4f46e5;
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
   flex: 0 0 auto;
 }
 
 .quick-add-form button[type="submit"]:hover:not(:disabled) {
-  background: #4338ca;
+  background: var(--accent-hover);
 }
 
 .quick-add-form .form-error {
@@ -822,7 +833,7 @@ input[type="color"] {
 
 .manual-add summary {
   cursor: pointer;
-  color: #4f46e5;
+  color: var(--accent);
   font-size: 14px;
   font-weight: 600;
   padding: 4px 0;
@@ -851,9 +862,9 @@ input[type="color"] {
 }
 
 .search-input:focus {
-  outline: 2px solid #4f46e5;
+  outline: 2px solid var(--accent);
   outline-offset: -1px;
-  border-color: #4f46e5;
+  border-color: var(--accent);
 }
 
 .search-hint {
@@ -1013,7 +1024,7 @@ input[type="color"] {
 
 .slider-row input[type="range"] {
   width: 100%;
-  accent-color: #4f46e5;
+  accent-color: var(--accent);
 }
 
 /* v0.6.0: launcher extras (monitor mode, auto-update check, hidden
@@ -1062,7 +1073,7 @@ input[type="color"] {
 .radio-row input[type="radio"] {
   width: 16px;
   height: 16px;
-  accent-color: #4f46e5;
+  accent-color: var(--accent);
 }
 
 .field-label {
@@ -1084,7 +1095,7 @@ input[type="color"] {
 }
 
 .collapse-chevron {
-  color: #4f46e5;
+  color: var(--accent);
   font-size: 14px;
   line-height: 1;
 }
@@ -1130,7 +1141,7 @@ input[type="color"] {
   border-radius: 50%;
   font-size: 16px;
   font-weight: 600;
-  color: #4f46e5;
+  color: var(--accent);
   flex: 0 0 auto;
 }
 
@@ -1169,7 +1180,7 @@ input[type="color"] {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: #4f46e5;
+  background: var(--accent);
   color: #fff;
   font-size: 12px;
   font-weight: 700;
@@ -1203,7 +1214,7 @@ input[type="color"] {
 
 .progress-fill {
   height: 100%;
-  background: #4f46e5;
+  background: var(--accent);
   border-radius: 4px;
   transition: width 0.2s;
 }
@@ -1267,9 +1278,9 @@ input[type="color"] {
   color: #8a8f98;
 }
 .hotkey-capture-field.capturing {
-  border-color: #4f46e5;
-  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.22);
-  color: #4f46e5;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.22);
+  color: var(--accent);
   font-weight: 600;
 }
 .hotkey-capture-field:disabled {
@@ -1299,4 +1310,185 @@ input[type="color"] {
   font-size: 12px;
   font-weight: 600;
   color: inherit;
+}
+
+/* --- v0.13.17: appearance ---------------------------------------------
+   data-theme / data-tile-size live on <html>, set by applyAppearance
+   (App.tsx) from the saved settings. "system" is resolved there first,
+   so these rules only ever see "dark" or "light". The base stylesheet
+   is light-first: dark is an override layer over the structural
+   surfaces, and the launcher panel (dark glass by design) gets a light
+   variant. */
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] .panel,
+:root[data-theme="dark"] .settings-form,
+:root[data-theme="dark"] .dialog,
+:root[data-theme="dark"] .intro-card {
+  background: #1e2025;
+  border-color: #34373e;
+}
+
+:root[data-theme="dark"] .app-card,
+:root[data-theme="dark"] .account-row,
+:root[data-theme="dark"] .hidden-row {
+  background: #232529;
+  border-color: #34373e;
+}
+
+:root[data-theme="dark"] .subtitle,
+:root[data-theme="dark"] .muted,
+:root[data-theme="dark"] .settings-form label,
+:root[data-theme="dark"] .inline-form label {
+  color: #9aa0a8;
+}
+
+:root[data-theme="dark"] button {
+  background: #26282e;
+  border-color: #3a3d44;
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] button:hover:not(:disabled) {
+  background: #2e3036;
+}
+
+/* Accent-filled buttons keep their fill in dark (higher specificity
+   than the generic dark button rule above). */
+:root[data-theme="dark"] .add-form button[type="submit"],
+:root[data-theme="dark"] .form-actions button[type="submit"],
+:root[data-theme="dark"] .quick-add-form button[type="submit"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+:root[data-theme="dark"] .add-form input,
+:root[data-theme="dark"] .quick-add-form input,
+:root[data-theme="dark"] .inline-form input,
+:root[data-theme="dark"] .settings-form input,
+:root[data-theme="dark"] .settings-form select,
+:root[data-theme="dark"] .settings-form textarea,
+:root[data-theme="dark"] .search-input,
+:root[data-theme="dark"] .inline-edit-input,
+:root[data-theme="dark"] .hotkey-capture-field {
+  background: #26282e;
+  border-color: #3a3d44;
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .banner-info {
+  background: rgba(var(--accent-rgb), 0.16);
+  border-color: rgba(var(--accent-rgb), 0.4);
+  color: var(--accent-text);
+}
+
+/* Light launcher panel (the panel is dark glass unless light is on). */
+:root[data-theme="light"] .folder-panel {
+  background: rgba(248, 249, 251, var(--folder-alpha, 0.55));
+  border-color: rgba(15, 17, 21, 0.1);
+  box-shadow:
+    0 32px 80px rgba(15, 17, 21, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  color: #1d1f24;
+}
+
+:root[data-theme="light"] .folder-panel .search-input {
+  background: rgba(15, 17, 21, 0.05);
+  border-color: rgba(15, 17, 21, 0.1);
+  color: #16171a;
+}
+
+:root[data-theme="light"] .folder-panel .search-input::placeholder {
+  color: rgba(0, 0, 0, 0.4);
+}
+
+:root[data-theme="light"] .folder-panel .search-hint,
+:root[data-theme="light"] .folder-panel .muted {
+  color: rgba(0, 0, 0, 0.55);
+}
+
+:root[data-theme="light"] .icon-tile {
+  color: #1d1f24;
+}
+
+:root[data-theme="light"] .icon-tile:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"] .folder-grid-wrap {
+  scrollbar-color: rgba(0, 0, 0, 0.25) transparent;
+}
+
+:root[data-theme="light"] .tile-icon .app-icon-fallback,
+:root[data-theme="light"] .tile-icon .account-thumb-fallback {
+  color: #26262b;
+}
+
+:root[data-theme="light"] .tile-sub {
+  color: rgba(0, 0, 0, 0.55);
+}
+
+/* Pale-lavender link colors tuned for the dark panel need the deeper
+   base accent on the light panel. */
+:root[data-theme="light"] .launcher-foot .text-button,
+:root[data-theme="light"] .restore-row .text-button {
+  color: var(--accent);
+}
+
+/* Compact launcher tiles. */
+:root[data-tile-size="compact"] .icon-tile {
+  padding: 6px 2px 5px;
+  gap: 4px;
+  border-radius: 10px;
+}
+
+:root[data-tile-size="compact"] .tile-icon,
+:root[data-tile-size="compact"] .tile-icon .app-icon,
+:root[data-tile-size="compact"] .tile-icon .account-thumb,
+:root[data-tile-size="compact"] .tile-icon .app-icon-fallback,
+:root[data-tile-size="compact"] .tile-icon .account-thumb-fallback {
+  width: 32px;
+  height: 32px;
+}
+
+:root[data-tile-size="compact"] .tile-icon .app-icon,
+:root[data-tile-size="compact"] .tile-icon .account-thumb,
+:root[data-tile-size="compact"] .tile-icon .app-icon-fallback,
+:root[data-tile-size="compact"] .tile-icon .account-thumb-fallback {
+  border-radius: 8px;
+  font-size: 15px;
+}
+
+:root[data-tile-size="compact"] .tile-label {
+  font-size: 11px;
+}
+
+/* Accent swatches in the launcher settings panel. */
+.accent-swatches {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.accent-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  padding: 0;
+  border: 2px solid rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.accent-swatch.is-active {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px var(--accent);
 }

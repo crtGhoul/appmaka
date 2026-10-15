@@ -140,6 +140,12 @@ export interface LauncherSettings {
    * (serde default).
    */
   allow_popups_globally: boolean;
+  /** Accent color for the launcher/manager UI (v0.13.17). Backend always sends it (serde default). */
+  accent: "indigo" | "violet" | "blue" | "teal" | "green" | "amber" | "rose";
+  /** UI theme (v0.13.17): follow the OS, or force dark/light. Backend always sends it. */
+  theme: "system" | "dark" | "light";
+  /** Launcher tile size (v0.13.17). Backend always sends it. */
+  tile_size: "cozy" | "compact";
   /**
    * Whether the library's "Hidden programs" list is collapsed. Null when the
    * user never toggled it: the UI then defaults to collapsed whenever the

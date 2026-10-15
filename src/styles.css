@@ -34,7 +34,7 @@ body {
   right: 7px;
   width: 13px;
   height: 13px;
-  color: #818cf8;
+  color: var(--accent-bright);
   opacity: 0.9;
   pointer-events: none;
 }
@@ -123,7 +123,7 @@ body {
 
 /* v0.9.9: checkmark for checkable rows ("Don't close this window"). */
 .tile-menu-check {
-  color: #818cf8;
+  color: var(--accent-bright);
 }
 
 .tile-menu-item.is-danger:hover,
@@ -223,9 +223,9 @@ body {
 }
 
 .modal-field input:focus {
-  outline: 2px solid #818cf8;
+  outline: 2px solid var(--accent-bright);
   outline-offset: -1px;
-  border-color: #818cf8;
+  border-color: var(--accent-bright);
 }
 
 .modal-path-row {
@@ -288,7 +288,7 @@ body {
 
 .modal-primary {
   padding: 9px 16px;
-  background: #818cf8;
+  background: var(--accent-bright);
   border: none;
   border-radius: 10px;
   color: #14151c;
@@ -307,7 +307,7 @@ body {
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
-  color: #a5b4fc;
+  color: var(--accent-text);
 }
 
 .error-details-body {
@@ -381,7 +381,7 @@ button.cmd-row:hover,
 button.cmd-row:focus-visible {
   background: rgba(255, 255, 255, 0.1);
   outline: none;
-  border-color: rgba(129, 140, 248, 0.6);
+  border-color: rgba(var(--accent-bright-rgb), 0.6);
 }
 
 .cmd-row .cmd-title {
@@ -430,7 +430,7 @@ button.cmd-row:focus-visible {
 .cmd-pin-btn:focus-visible {
   background: rgba(255, 255, 255, 0.1);
   outline: none;
-  border-color: rgba(129, 140, 248, 0.6);
+  border-color: rgba(var(--accent-bright-rgb), 0.6);
 }
 
 .cmd-hint {
@@ -545,9 +545,9 @@ button.cmd-row:focus-visible {
   flex: none;
   font-size: 11px;
   font-weight: 600;
-  color: #818cf8;
-  background: rgba(129, 140, 248, 0.14);
-  border: 1px solid rgba(129, 140, 248, 0.35);
+  color: var(--accent-bright);
+  background: rgba(var(--accent-bright-rgb), 0.14);
+  border: 1px solid rgba(var(--accent-bright-rgb), 0.35);
   border-radius: 999px;
   padding: 2px 8px;
 }
@@ -579,8 +579,8 @@ button.cmd-row:focus-visible {
 
 .ram-tab-chip.active {
   color: #c7d2fe;
-  background: rgba(129, 140, 248, 0.16);
-  border-color: rgba(129, 140, 248, 0.4);
+  background: rgba(var(--accent-bright-rgb), 0.16);
+  border-color: rgba(var(--accent-bright-rgb), 0.4);
 }
 
 /* v0.9.9: "Don't close this window" toggle sits under each window row. */
@@ -600,7 +600,7 @@ button.cmd-row:focus-visible {
 }
 
 .ram-pin-toggle input {
-  accent-color: #818cf8;
+  accent-color: var(--accent-bright);
   width: 14px;
   height: 14px;
   margin: 0;
@@ -628,7 +628,7 @@ button.cmd-row:focus-visible {
 }
 
 .ram-row-close:focus-visible {
-  outline: 2px solid #818cf8;
+  outline: 2px solid var(--accent-bright);
   outline-offset: 1px;
 }
 
@@ -653,7 +653,7 @@ button.cmd-row:focus-visible {
 }
 
 .ram-row-add:focus-visible {
-  outline: 2px solid #818cf8;
+  outline: 2px solid var(--accent-bright);
   outline-offset: 1px;
 }
 
@@ -690,4 +690,9 @@ button.cmd-row:focus-visible {
 /* .muted is a light-theme gray; inside the dark RAM card it must be light. */
 .ram-card .muted {
   color: rgba(255, 255, 255, 0.6);
+}
+/* v0.13.17: page canvas follows the resolved theme (see App.css). */
+:root[data-theme="dark"] {
+  background-color: #16171b;
+  color: #eceef1;
 }

@@ -149,6 +149,45 @@ pub struct LauncherSettings {
     /// Old files migrate to false.
     #[serde(default)]
     pub allow_popups_globally: bool,
+    /// Accent color for the launcher/manager UI (v0.13.17): "indigo"
+    /// (default), "violet", "blue", "teal", "green", "amber", or "rose".
+    /// The frontend maps the name to a palette of CSS variables.
+    #[serde(default = "default_accent")]
+    pub accent: String,
+    /// UI theme (v0.13.17): "system" (default, follow the OS), "dark",
+    /// or "light". The frontend resolves "system" live.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Launcher tile size (v0.13.17): "cozy" (default) or "compact".
+    #[serde(default = "default_tile_size")]
+    pub tile_size: String,
+}
+
+fn default_accent() -> String {
+    "indigo".to_string()
+}
+
+fn default_theme() -> String {
+    "system".to_string()
+}
+
+fn default_tile_size() -> String {
+    "cozy".to_string()
+}
+
+/// The accent's bright text hex, for native-injected UI (the F1
+/// shortcuts overlay) that can't read CSS variables. Mirrors the
+/// frontend palette's text tone per accent.
+pub fn accent_text_hex(accent: &str) -> &'static str {
+    match accent {
+        "violet" => "#c4b5fd",
+        "blue" => "#93c5fd",
+        "teal" => "#5eead4",
+        "green" => "#86efac",
+        "amber" => "#fcd34d",
+        "rose" => "#fda4af",
+        _ => "#a5b4fc",
+    }
 }
 
 fn default_custom_cursor() -> String {
@@ -177,6 +216,9 @@ impl Default for LauncherSettings {
             custom_cursor: default_custom_cursor(),
             open_as_tabbed: false,
             allow_popups_globally: false,
+            accent: default_accent(),
+            theme: default_theme(),
+            tile_size: default_tile_size(),
         }
     }
 }
@@ -351,6 +393,56 @@ pub fn set_search_engine(
         .lock()
         .map_err(|e| format!("settings state poisoned: {e}"))?;
     settings.search_engine = engine;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Set the UI accent color (v0.13.17). JS: `invoke("set_accent", { accent })`.
+#[tauri::command]
+pub fn set_accent(app: AppHandle, accent: String) -> Result<LauncherSettings, String> {
+    let accent = accent.trim().to_lowercase();
+    if !["indigo", "violet", "blue", "teal", "green", "amber", "rose"].contains(&accent.as_str()) {
+        return Err("Unknown accent color.".to_string());
+    }
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.accent = accent;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Set the UI theme (v0.13.17): "system", "dark", or "light".
+/// JS: `invoke("set_theme", { theme })`.
+#[tauri::command]
+pub fn set_theme(app: AppHandle, theme: String) -> Result<LauncherSettings, String> {
+    let theme = theme.trim().to_lowercase();
+    if !["system", "dark", "light"].contains(&theme.as_str()) {
+        return Err("Unknown theme.".to_string());
+    }
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.theme = theme;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Set the launcher tile size (v0.13.17): "cozy" or "compact".
+/// JS: `invoke("set_tile_size", { size })`.
+#[tauri::command]
+pub fn set_tile_size(app: AppHandle, size: String) -> Result<LauncherSettings, String> {
+    let size = size.trim().to_lowercase();
+    if !["cozy", "compact"].contains(&size.as_str()) {
+        return Err("Unknown tile size.".to_string());
+    }
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.tile_size = size;
     save(&app, &settings)?;
     Ok(settings.clone())
 }

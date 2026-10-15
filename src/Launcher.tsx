@@ -642,6 +642,10 @@ export function LauncherSettingsPanel({
   const [opacity, setOpacity] = useState(
     Math.round((settings.panel_opacity ?? 0.55) * 100)
   );
+  // v0.13.17: appearance customization.
+  const [accent, setAccent] = useState<string>(settings.accent ?? "indigo");
+  const [theme, setTheme] = useState<string>(settings.theme ?? "system");
+  const [tileSize, setTileSize] = useState<string>(settings.tile_size ?? "cozy");
   const [saving, setSaving] = useState(false);
   const [rescanning, setRescanning] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -823,6 +827,45 @@ export function LauncherSettingsPanel({
     }, 300);
   }
 
+  async function handleAccent(next: string) {
+    setAccent(next);
+    setFormError(null);
+    try {
+      onSaved(await invoke<LauncherSettings>("set_accent", { accent: next }));
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setAccent(settings.accent ?? "indigo");
+    }
+  }
+
+  async function handleTheme(next: string) {
+    setTheme(next);
+    setFormError(null);
+    try {
+      onSaved(await invoke<LauncherSettings>("set_theme", { theme: next }));
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setTheme(settings.theme ?? "system");
+    }
+  }
+
+  async function handleTileSize(next: string) {
+    setTileSize(next);
+    setFormError(null);
+    try {
+      onSaved(await invoke<LauncherSettings>("set_tile_size", { size: next }));
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setTileSize(settings.tile_size ?? "cozy");
+    }
+  }
+
   async function handleRescan() {
     setFormError(null);
     setRescanning(true);
@@ -939,20 +982,20 @@ export function LauncherSettingsPanel({
       )}
 
       <details style={{ marginTop: 10, marginBottom: 12 }}>
-        <summary style={{ cursor: "pointer", color: "#a5b4fc", fontSize: 13, userSelect: "none" }}>
+        <summary style={{ cursor: "pointer", color: "var(--accent-text)", fontSize: 13, userSelect: "none" }}>
           Keyboard shortcuts (or press F1 in any window)
         </summary>
         <div style={{ marginTop: 8, padding: "8px 12px", background: "rgba(255, 255, 255, 0.04)", borderRadius: 6, fontSize: 12, lineHeight: 1.6 }}>
           <div style={{ display: "grid", gridTemplateColumns: "130px 1fr", gap: "4px 8px" }}>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>F1</span><span>Show / hide floating cheatsheet</span>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Alt + ← / →</span><span>Back / forward</span>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>F5</span><span>Reload page</span>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>F11</span><span>Full screen on / off</span>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Ctrl + Shift + A</span><span>Add the current page to your apps</span>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Ctrl + + / - / 0</span><span>Zoom in / out / reset</span>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Ctrl + F</span><span>Find in page</span>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Hold LMB + Esc</span><span>Close window</span>
-            <span style={{ fontFamily: "monospace", color: "#a5b4fc" }}>Alt + F4</span><span>Close window</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>F1</span><span>Show / hide floating cheatsheet</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>Alt + ← / →</span><span>Back / forward</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>F5</span><span>Reload page</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>F11</span><span>Full screen on / off</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>Ctrl + Shift + A</span><span>Add the current page to your apps</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>Ctrl + + / - / 0</span><span>Zoom in / out / reset</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>Ctrl + F</span><span>Find in page</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>Hold LMB + Esc</span><span>Close window</span>
+            <span style={{ fontFamily: "monospace", color: "var(--accent-text)" }}>Alt + F4</span><span>Close window</span>
           </div>
         </div>
       </details>
@@ -1048,6 +1091,51 @@ export function LauncherSettingsPanel({
         <span className="help">
           How solid the launcher panel looks. Lower is more see-through.
         </span>
+      </label>
+
+      <div className="inline-form">
+        <span>Accent color</span>
+        <div className="accent-swatches">
+          {[
+            { id: "indigo", name: "Indigo", hex: "#4f46e5" },
+            { id: "violet", name: "Violet", hex: "#7c3aed" },
+            { id: "blue", name: "Blue", hex: "#2563eb" },
+            { id: "teal", name: "Teal", hex: "#0d9488" },
+            { id: "green", name: "Green", hex: "#16a34a" },
+            { id: "amber", name: "Amber", hex: "#d97706" },
+            { id: "rose", name: "Rose", hex: "#e11d48" },
+          ].map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              title={c.name}
+              aria-label={`Accent color: ${c.name}`}
+              className={accent === c.id ? "accent-swatch is-active" : "accent-swatch"}
+              style={{ background: c.hex }}
+              onClick={() => void handleAccent(c.id)}
+            />
+          ))}
+        </div>
+        <span className="help">The one color used across the launcher and library.</span>
+      </div>
+
+      <label className="inline-form">
+        <span>Appearance</span>
+        <select value={theme} onChange={(e) => void handleTheme(e.target.value)}>
+          <option value="system">Match system</option>
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
+        <span className="help">Dark or light for the launcher and library, or follow Windows.</span>
+      </label>
+
+      <label className="inline-form">
+        <span>Launcher tile size</span>
+        <select value={tileSize} onChange={(e) => void handleTileSize(e.target.value)}>
+          <option value="cozy">Cozy</option>
+          <option value="compact">Compact</option>
+        </select>
+        <span className="help">Compact fits the same tiles in less space.</span>
       </label>
 
       <div className="inline-form">

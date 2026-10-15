@@ -1970,6 +1970,69 @@ function UpdaterSection({
   );
 }
 
+/**
+ * v0.13.17: accent palettes for the appearance settings. Each maps the
+ * CSS variables declared in App.css (indigo defaults) to one accent's
+ * tones: base / hover / mid / bright / text + RGB triplets for rgba().
+ */
+const ACCENT_PALETTES: Record<string, Record<string, string>> = {
+  indigo: {
+    "--accent": "#4f46e5", "--accent-hover": "#4338ca", "--accent-mid": "#6366f1",
+    "--accent-bright": "#818cf8", "--accent-text": "#a5b4fc",
+    "--accent-rgb": "79, 70, 229", "--accent-mid-rgb": "99, 102, 241", "--accent-bright-rgb": "129, 140, 248",
+  },
+  violet: {
+    "--accent": "#7c3aed", "--accent-hover": "#6d28d9", "--accent-mid": "#8b5cf6",
+    "--accent-bright": "#a78bfa", "--accent-text": "#c4b5fd",
+    "--accent-rgb": "124, 58, 237", "--accent-mid-rgb": "139, 92, 246", "--accent-bright-rgb": "167, 139, 250",
+  },
+  blue: {
+    "--accent": "#2563eb", "--accent-hover": "#1d4ed8", "--accent-mid": "#3b82f6",
+    "--accent-bright": "#60a5fa", "--accent-text": "#93c5fd",
+    "--accent-rgb": "37, 99, 235", "--accent-mid-rgb": "59, 130, 246", "--accent-bright-rgb": "96, 165, 250",
+  },
+  teal: {
+    "--accent": "#0d9488", "--accent-hover": "#0f766e", "--accent-mid": "#14b8a6",
+    "--accent-bright": "#2dd4bf", "--accent-text": "#5eead4",
+    "--accent-rgb": "13, 148, 136", "--accent-mid-rgb": "20, 184, 166", "--accent-bright-rgb": "45, 212, 191",
+  },
+  green: {
+    "--accent": "#16a34a", "--accent-hover": "#15803d", "--accent-mid": "#22c55e",
+    "--accent-bright": "#4ade80", "--accent-text": "#86efac",
+    "--accent-rgb": "22, 163, 74", "--accent-mid-rgb": "34, 197, 94", "--accent-bright-rgb": "74, 222, 128",
+  },
+  amber: {
+    "--accent": "#d97706", "--accent-hover": "#b45309", "--accent-mid": "#f59e0b",
+    "--accent-bright": "#fbbf24", "--accent-text": "#fcd34d",
+    "--accent-rgb": "217, 119, 6", "--accent-mid-rgb": "245, 158, 11", "--accent-bright-rgb": "251, 191, 36",
+  },
+  rose: {
+    "--accent": "#e11d48", "--accent-hover": "#be123c", "--accent-mid": "#f43f5e",
+    "--accent-bright": "#fb7185", "--accent-text": "#fda4af",
+    "--accent-rgb": "225, 29, 72", "--accent-mid-rgb": "244, 63, 94", "--accent-bright-rgb": "251, 113, 133",
+  },
+};
+
+/**
+ * v0.13.17: push the saved appearance onto <html>: the resolved theme
+ * ("system" follows the OS live), the tile size, and the accent palette
+ * as CSS variables. The CSS keys everything off these attributes/vars.
+ */
+function applyAppearance(s: LauncherSettings | null) {
+  const root = document.documentElement;
+  const theme = s?.theme ?? "system";
+  const resolved =
+    theme === "system"
+      ? window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light"
+      : theme;
+  root.dataset.theme = resolved;
+  root.dataset.tileSize = s?.tile_size ?? "cozy";
+  const pal = ACCENT_PALETTES[s?.accent ?? "indigo"] ?? ACCENT_PALETTES.indigo;
+  for (const [k, v] of Object.entries(pal)) root.style.setProperty(k, v);
+}
+
 export default function App() {
   return (
     <DownloadsProvider>
@@ -2022,6 +2085,20 @@ function AppShell() {
   // Launcher: hotkey-summoned search over apps, accounts, and programs.
   const [programs, setPrograms] = useState<NativeProgram[]>([]);
   const [launcherSettings, setLauncherSettings] = useState<LauncherSettings | null>(null);
+  // v0.13.17: apply the saved appearance (accent/theme/tile size) to
+  // <html> whenever settings load or change, and re-resolve "system"
+  // when the OS theme flips.
+  const launcherSettingsRef = useRef<LauncherSettings | null>(null);
+  launcherSettingsRef.current = launcherSettings;
+  useEffect(() => {
+    applyAppearance(launcherSettings);
+  }, [launcherSettings]);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyAppearance(launcherSettingsRef.current);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
   const [launcherPanelOpen, setLauncherPanelOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);

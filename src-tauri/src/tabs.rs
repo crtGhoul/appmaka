@@ -504,7 +504,7 @@ fn build_tabbed_window(
         .on_download(crate::downloads::make_download_handler(window_app.clone()))
         .initialization_script(crate::windows::TARGET_BLANK_SHIM_JS)
         .initialization_script(crate::windows::NAV_KEYS_JS)
-        .initialization_script(crate::windows::SHORTCUTS_OVERLAY_JS);
+        .initialization_script(crate::windows::shortcuts_overlay_js(&window_app));
     if !page.adblock_css.is_empty() {
         builder = builder.initialization_script(crate::windows::cosmetic_init_script(&page.adblock_css));
     }

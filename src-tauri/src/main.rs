@@ -1350,6 +1350,10 @@ fn main() {
             // v0.7.0: launcher search-engine setting
             launcher_settings::set_search_engine,
             launcher_settings::set_custom_cursor,
+            // v0.13.17: appearance customization
+            launcher_settings::set_accent,
+            launcher_settings::set_theme,
+            launcher_settings::set_tile_size,
             launcher_settings::set_open_as_tabbed,
             launcher_settings::set_allow_popups_globally,
             // v0.8.0: hidden-programs collapse state (polish)
