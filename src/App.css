@@ -313,10 +313,19 @@ input[type="color"] {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
   padding: 8px 10px;
   background: #fff;
   border: 1px solid #eceef1;
   border-radius: 8px;
+}
+
+/* The row's eight actions get their own full-width line: in one line
+   they overflowed the card and crushed the label column to a few
+   pixels (v0.13.14 — the "settings not showing" screenshot). */
+.account-row .app-actions {
+  flex: 1 1 100%;
+  flex-wrap: wrap;
 }
 
 .dot {
@@ -354,7 +363,9 @@ input[type="color"] {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  flex: 1 1 auto;
+  /* Floor width: the label + "opened" line never crush again, no
+     matter how much the actions line wraps (v0.13.14). */
+  flex: 1 1 150px;
 }
 
 .account-label {
@@ -368,6 +379,7 @@ input[type="color"] {
 .account-opened {
   font-size: 12px;
   color: #5b5e66;
+  white-space: nowrap;
 }
 
 .popup-badge {
