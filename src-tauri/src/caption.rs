@@ -354,7 +354,26 @@ mod imp {
         dragging: bool,
         last_x: i32,
         last_y: i32,
+        /// v0.13.20: while the owner is fullscreen, the strip is hidden —
+        /// except when this is set: the mouse is at the top edge of the
+        /// screen and the strip is revealed over the fullscreen window so
+        /// the user can reach its buttons (exit fullscreen via the
+        /// right-click menu, minimize, close) with no keyboard at all.
+        /// That matters most in Dictation compatibility mode, where the
+        /// Esc/F11 hook paths are off by design.
+        fs_reveal: bool,
+        /// v0.13.20: the strip is currently in the topmost band (only
+        /// while fs_reveal placed it over a fullscreen owner). The first
+        /// normal placement afterwards clears the band again.
+        fs_topmost: bool,
     }
+
+    /// v0.13.20: poll timer on the strip window, running ONLY while its
+    /// owner is fullscreen: watches the cursor for the top-edge reveal.
+    /// A timer (pure GetCursorPos queries on our own thread) — never a
+    /// mouse hook; the dictation story stays clean.
+    const FS_REVEAL_TIMER: usize = 0xF501;
+    const FS_REVEAL_POLL_MS: u32 = 120;
 
     struct Chrome {
         app: AppHandle,
@@ -1714,6 +1733,12 @@ mod imp {
                 on_mouse_leave(hwnd);
                 LRESULT(0)
             }
+            WM_TIMER => {
+                if wparam.0 == FS_REVEAL_TIMER {
+                    on_fs_reveal_tick(hwnd);
+                }
+                LRESULT(0)
+            }
             WM_WINDOWPOSCHANGED => {
                 on_pos_changed(hwnd);
                 LRESULT(0)
@@ -1820,6 +1845,15 @@ mod imp {
     /// pure queries — they deliver no messages); phase 2 acts with the
     /// borrow released; phase 3 records the result under a short borrow.
     unsafe fn reposition_caption(label: &str) {
+        // Z-band for a placement: Keep = the usual owned-window order;
+        // Top = over a fullscreen owner (reveal); UnTop = first normal
+        // placement after a reveal, clearing the topmost band again.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Z {
+            Keep,
+            Top,
+            UnTop,
+        }
         enum Plan {
             Skip,
             // v0.11.2: owner window is dead — the strip is an orphaned
@@ -1828,12 +1862,16 @@ mod imp {
             // Owner is minimized: hide the strip. It restores automatically
             // when the owner is un-minimized and reposition is called.
             Hide(HWND),
+            // v0.13.20: owner is fullscreen: hide the strip AND start the
+            // top-edge reveal poll (see FS_REVEAL_TIMER).
+            HideFs(HWND),
             Place {
                 hwnd: HWND,
                 tx: i32,
                 ty: i32,
                 w: i32,
                 h: i32,
+                z: Z,
             },
         }
         let plan = with_chrome(|ch| {
@@ -1854,10 +1892,24 @@ mod imp {
             // v0.13.12: a fullscreen owner (F11, or the page's own
             // fullscreen request mirrored onto the window) hides its
             // strip, exactly like a minimized one; the reposition that
-            // follows the exit places it again.
+            // follows the exit places it again. v0.13.20: while the
+            // reveal poll has the strip up (mouse at the top edge), it
+            // sits at the monitor's top over the fullscreen window.
             if has_mi && owner_is_fullscreen(cp.owner) {
-                return Some(Plan::Hide(cp.hwnd));
+                if cp.fs_reveal {
+                    let w = mi.rcMonitor.right - mi.rcMonitor.left;
+                    return Some(Plan::Place {
+                        hwnd: cp.hwnd,
+                        tx: mi.rcMonitor.left,
+                        ty: mi.rcMonitor.top,
+                        w,
+                        h,
+                        z: Z::Top,
+                    });
+                }
+                return Some(Plan::HideFs(cp.hwnd));
             }
+            let z = if cp.fs_topmost { Z::UnTop } else { Z::Keep };
             if IsZoomed(cp.owner).as_bool() {
                 // Maximized: GetWindowRect bleeds past the monitor by the
                 // (hidden) border size, so anchor to the work area instead.
@@ -1871,6 +1923,7 @@ mod imp {
                     ty: mi.rcWork.top,
                     w,
                     h,
+                    z,
                 });
             }
             let mut orc = RECT::default();
@@ -1888,6 +1941,7 @@ mod imp {
                 ty,
                 w,
                 h,
+                z,
             })
         });
         let plan = match plan {
@@ -1900,9 +1954,21 @@ mod imp {
                 remove_caption(label);
             }
             Plan::Hide(hwnd) => {
+                let _ = KillTimer(hwnd, FS_REVEAL_TIMER);
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
-            Plan::Place { hwnd, tx, ty, w, h } => {
+            Plan::HideFs(hwnd) => {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                // Poll for the top-edge reveal while fullscreen lasts.
+                // SetTimer on an existing id just resets it.
+                let _ = SetTimer(hwnd, FS_REVEAL_TIMER, FS_REVEAL_POLL_MS, None);
+            }
+            Plan::Place { hwnd, tx, ty, w, h, z } => {
+                // The reveal poll only lives while a reveal placement
+                // (z == Top) is the current state.
+                if z != Z::Top {
+                    let _ = KillTimer(hwnd, FS_REVEAL_TIMER);
+                }
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 let mut crc = RECT::default();
                 let same = GetWindowRect(hwnd, &mut crc).is_ok()
@@ -1910,7 +1976,9 @@ mod imp {
                     && crc.top == ty
                     && crc.right - crc.left == w
                     && crc.bottom - crc.top == h;
-                if !same {
+                // A z-band change must apply even when the rect already
+                // matches (leaving fullscreen back to the same geometry).
+                if !same || z != Z::Keep {
                     // Flag syncing across our own SetWindowPos so the
                     // re-entrant on_pos_changed ignores the echo.
                     with_chrome(|ch| {
@@ -1919,24 +1987,104 @@ mod imp {
                         }
                         Some(())
                     });
-                    let _ = SetWindowPos(
-                        hwnd,
-                        None,
-                        tx,
-                        ty,
-                        w,
-                        h,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    );
+                    let (insert_after, flags) = match z {
+                        Z::Keep => (None, SWP_NOZORDER | SWP_NOACTIVATE),
+                        Z::Top => (Some(HWND_TOPMOST), SWP_NOACTIVATE),
+                        Z::UnTop => (Some(HWND_NOTOPMOST), SWP_NOACTIVATE),
+                    };
+                    let _ = SetWindowPos(hwnd, insert_after, tx, ty, w, h, flags);
                 }
                 with_chrome(|ch| {
                     let cp = ch.captions.get_mut(label)?;
                     cp.syncing = false;
                     cp.last_x = tx;
                     cp.last_y = ty;
+                    cp.fs_topmost = match z {
+                        Z::Top => true,
+                        Z::UnTop => false,
+                        Z::Keep => cp.fs_topmost,
+                    };
                     Some(())
                 });
             }
+        }
+    }
+
+    /// v0.13.20: one tick of the fullscreen reveal poll. Snapshot under
+    /// a short borrow, decide from pure cursor/monitor queries, and let
+    /// reposition_caption do the moving (it re-derives everything from
+    /// live state + the fs_reveal flag this sets).
+    unsafe fn on_fs_reveal_tick(hwnd: HWND) {
+        struct TickPlan {
+            label: String,
+            owner: HWND,
+            scale: f64,
+            revealed: bool,
+        }
+        let plan = with_chrome(|ch| {
+            let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
+            let cp = ch.captions.get(&label)?;
+            Some(TickPlan {
+                label,
+                owner: cp.owner,
+                scale: cp.scale,
+                revealed: cp.fs_reveal,
+            })
+        });
+        let Some(plan) = plan else {
+            return;
+        };
+        // Fullscreen is over (or the owner is gone/minimized): stand
+        // down — clear the flag, stop the poll, restore normal placing.
+        if !IsWindow(Some(plan.owner)).as_bool()
+            || IsIconic(plan.owner).as_bool()
+            || !owner_is_fullscreen(plan.owner)
+        {
+            if plan.revealed {
+                with_chrome(|ch| {
+                    if let Some(cp) = ch.captions.get_mut(&plan.label) {
+                        cp.fs_reveal = false;
+                    }
+                    Some(())
+                });
+            }
+            let _ = KillTimer(hwnd, FS_REVEAL_TIMER);
+            reposition_caption(&plan.label);
+            return;
+        }
+        let hmon = MonitorFromWindow(plan.owner, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return;
+        }
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let mon = mi.rcMonitor;
+        let h = (BAR_H_LOGICAL * plan.scale).round() as i32;
+        let in_x = pt.x >= mon.left && pt.x < mon.right;
+        // Reveal only when the cursor truly touches the top edge; hide
+        // once it drops below the strip plus a small slack, so using
+        // the strip itself never flickers it away.
+        let want_show = in_x && pt.y <= mon.top + 2;
+        let want_hide = !in_x || pt.y > mon.top + h + 12;
+        let target = if want_show {
+            true
+        } else if want_hide {
+            false
+        } else {
+            plan.revealed
+        };
+        if target != plan.revealed {
+            with_chrome(|ch| {
+                if let Some(cp) = ch.captions.get_mut(&plan.label) {
+                    cp.fs_reveal = target;
+                }
+                Some(())
+            });
+            reposition_caption(&plan.label);
         }
     }
 
@@ -2024,6 +2172,8 @@ mod imp {
                     dragging: false,
                     last_x: 0,
                     last_y: 0,
+                    fs_reveal: false,
+                    fs_topmost: false,
                 },
             );
             Some(())

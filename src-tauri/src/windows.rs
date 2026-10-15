@@ -984,6 +984,7 @@ pub(crate) const SHORTCUTS_OVERLAY_JS: &str = r#"(function () {
       ["F1",             "Show / hide this shortcuts list"],
       ["F5",             "Reload page"],
       ["F11",            "Full screen on / off"],
+      ["Mouse to top",   "Show the window bar while full screen"],
       ["Ctrl + Shift + A", "Add this page to your apps"],
       ["Ctrl + +",       "Zoom in"],
       ["Ctrl + -",       "Zoom out"],
