@@ -1954,20 +1954,20 @@ mod imp {
                 remove_caption(label);
             }
             Plan::Hide(hwnd) => {
-                let _ = KillTimer(hwnd, FS_REVEAL_TIMER);
+                let _ = KillTimer(Some(hwnd), FS_REVEAL_TIMER);
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
             Plan::HideFs(hwnd) => {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 // Poll for the top-edge reveal while fullscreen lasts.
                 // SetTimer on an existing id just resets it.
-                let _ = SetTimer(hwnd, FS_REVEAL_TIMER, FS_REVEAL_POLL_MS, None);
+                let _ = SetTimer(Some(hwnd), FS_REVEAL_TIMER, FS_REVEAL_POLL_MS, None);
             }
             Plan::Place { hwnd, tx, ty, w, h, z } => {
                 // The reveal poll only lives while a reveal placement
                 // (z == Top) is the current state.
                 if z != Z::Top {
-                    let _ = KillTimer(hwnd, FS_REVEAL_TIMER);
+                    let _ = KillTimer(Some(hwnd), FS_REVEAL_TIMER);
                 }
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 let mut crc = RECT::default();
@@ -2048,7 +2048,7 @@ mod imp {
                     Some(())
                 });
             }
-            let _ = KillTimer(hwnd, FS_REVEAL_TIMER);
+            let _ = KillTimer(Some(hwnd), FS_REVEAL_TIMER);
             reposition_caption(&plan.label);
             return;
         }
