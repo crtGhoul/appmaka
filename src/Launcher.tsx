@@ -625,6 +625,10 @@ export function LauncherSettingsPanel({
   const [openAsTabbed, setOpenAsTabbed] = useState(
     settings.open_as_tabbed ?? false
   );
+  // v0.13.9: global popup override for all apps.
+  const [allowPopupsGlobally, setAllowPopupsGlobally] = useState(
+    settings.allow_popups_globally ?? false
+  );
   const [startupMode, setStartupMode] = useState<"restore" | "ask" | "fresh">(
     settings.startup_mode ?? "restore"
   );
@@ -768,6 +772,24 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setOpenAsTabbed(settings.open_as_tabbed ?? false);
+    }
+  }
+
+  // v0.13.9: global popup override — applies live, no reopen needed.
+  async function handleAllowPopupsGlobally(enabled: boolean) {
+    setAllowPopupsGlobally(enabled);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>(
+        "set_allow_popups_globally",
+        { enabled }
+      );
+      onSaved(updated);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setAllowPopupsGlobally(settings.allow_popups_globally ?? false);
     }
   }
 
@@ -978,6 +1000,22 @@ export function LauncherSettingsPanel({
           Apps and accounts open in a tabbed window instead of a plain page
           window. You can still open a plain window from the tile's
           right-click menu.
+        </span>
+      </label>
+
+      <label className="inline-form">
+        <span>Allow popups in all apps</span>
+        <input
+          type="checkbox"
+          checked={allowPopupsGlobally}
+          onChange={(e) => void handleAllowPopupsGlobally(e.target.checked)}
+          aria-label="Allow popups in all apps"
+        />
+        <span className="help">
+          Sites can open popup windows in every app, right away — no
+          per-app setup and no reopening windows. Turn it off and each
+          app's own popup setting applies again. Careful: ad-heavy sites
+          can open windows too.
         </span>
       </label>
 

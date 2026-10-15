@@ -127,6 +127,12 @@ export interface LauncherSettings {
    */
   open_as_tabbed: boolean;
   /**
+   * Global popup override (v0.13.9): when true, popups open in every app
+   * regardless of the per-app popup policy. Backend always sends it
+   * (serde default).
+   */
+  allow_popups_globally: boolean;
+  /**
    * Whether the library's "Hidden programs" list is collapsed. Null when the
    * user never toggled it: the UI then defaults to collapsed whenever the
    * list is non-empty.

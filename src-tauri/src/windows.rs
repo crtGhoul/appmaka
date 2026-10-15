@@ -941,7 +941,9 @@ pub(crate) struct PopupContext {
 /// NOTE: the policy is captured when the account window is built. Changing
 /// the per-account or app-level popup policy while the window is open has
 /// no effect until the window is closed and reopened — the edit dialogs
-/// must say so (frontend copy, coordinator-owned).
+/// must say so (frontend copy, coordinator-owned). The one exception is
+/// the global override (`allow_popups_globally` in launcher settings),
+/// which is read live on every request and applies immediately.
 pub(crate) fn make_popup_handler(
     ctx: PopupContext,
 ) -> impl Fn(url::Url, tauri::webview::NewWindowFeatures) -> tauri::webview::NewWindowResponse<tauri::Wry>
@@ -950,7 +952,7 @@ pub(crate) fn make_popup_handler(
     // Origin used by the OAuth modal's best-effort auto-close.
     let home_origin = app_origin(&ctx.app_url);
     move |url: url::Url, _features| {
-        if ctx.popup_policy == "allow" {
+        if popup_opens_plain(&ctx.popup_policy, global_popups_allowed(&ctx.app)) {
             spawn_popup_window(&ctx.app, &url, &ctx.app_name, &ctx.session_dir);
         } else {
             // "block": only allowlisted hosts get a contained popup.
@@ -977,6 +979,23 @@ pub(crate) fn make_popup_handler(
         }
         tauri::webview::NewWindowResponse::Deny
     }
+}
+
+/// The global popup override from launcher settings, read live on
+/// every new-window request so the Settings switch applies to
+/// already-open windows immediately. Fail-closed: any trouble
+/// reading the setting means no override.
+fn global_popups_allowed(app: &AppHandle) -> bool {
+    app.try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.allow_popups_globally))
+        .unwrap_or(false)
+}
+
+/// Plain-popup decision: the per-app "allow" policy, or the global
+/// override. (Under "block" without the override, allowlisted hosts
+/// still get the OAuth modal instead — decided by the caller.)
+fn popup_opens_plain(policy: &str, global_allow: bool) -> bool {
+    policy == "allow" || global_allow
 }
 
 /// `scheme://host[:port]` of the app's URL, for the modal auto-close check.
@@ -2138,6 +2157,18 @@ mod tests {
         assert!(!js.contains("cursor:none"));
         // A live style applies the full install script verbatim.
         assert_eq!(cursor_live_apply_js("ring"), cursor_chrome_js("ring"));
+    }
+
+    #[test]
+    fn popup_opens_plain_matrix() {
+        // Per-app allow always opens plain popups.
+        assert!(popup_opens_plain("allow", false));
+        assert!(popup_opens_plain("allow", true));
+        // The global override opens them under a block policy too.
+        assert!(popup_opens_plain("block", true));
+        // Block without the override stays blocked (allowlist path).
+        assert!(!popup_opens_plain("block", false));
+        assert!(!popup_opens_plain("", false));
     }
 
     #[test]
