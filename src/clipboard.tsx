@@ -50,6 +50,25 @@ interface ClipboardListEntry {
   height: number | null;
 }
 
+/** v0.14.0: built-in dictation lives in this popup as its own tab. */
+type PopupTab = ClipboardTab | "dictation";
+
+interface Transcript {
+  id: string;
+  ts: number;
+  text: string;
+}
+
+interface DictationStatus {
+  ready: boolean;
+  binaryInstalled: boolean;
+  model: string;
+  modelInstalled: boolean;
+  recording: boolean;
+  transcribing: boolean;
+  hotkey: string;
+}
+
 function timeAgo(ms: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
   if (s < 10) return "just now";
@@ -68,7 +87,12 @@ function ClipboardPopup() {
   const [error, setError] = useState<string | null>(null);
   // v0.9.4: tab separating pictures from text. Defaults to the mixed
   // list; the saved value loads on mount and every change persists.
-  const [tab, setTab] = useState<ClipboardTab>("all");
+  // v0.14.0: the Dictation tab is local-only (the backend tab setting
+  // covers clipboard kinds), so reopening lands on a clipboard tab.
+  const [tab, setTab] = useState<PopupTab>("all");
+  const [transcripts, setTranscripts] = useState<Transcript[]>([]);
+  const [dictStatus, setDictStatus] = useState<DictationStatus | null>(null);
+  const [dictBusy, setDictBusy] = useState(false);
   // v0.9.12: "Pinned only" filter switch. Composes with the tab
   // (Text + Pinned only = pinned text, and so on); persists across
   // summons and restarts exactly like the tab.
@@ -87,6 +111,17 @@ function ClipboardPopup() {
       setError(null);
     } catch (err) {
       setError(typeof err === "string" ? err : "Something went wrong.");
+    }
+    // Dictation data rides the same 1s poll (cheap, local).
+    try {
+      const [ts, st] = await Promise.all([
+        invoke<Transcript[]>("list_dictation_transcripts"),
+        invoke<DictationStatus>("get_dictation_status"),
+      ]);
+      setTranscripts(ts);
+      setDictStatus(st);
+    } catch {
+      // Dictation is additive; its failure must not break the popup.
     }
   };
 
@@ -136,11 +171,13 @@ function ClipboardPopup() {
   // Switching tabs clears checks: copySelected acts on the visible
   // filtered rows, so a stale check from another tab would make the
   // "Copy selected (N)" count lie.
-  const changeTab = (t: ClipboardTab) => {
+  const changeTab = (t: PopupTab) => {
     setTab(t);
     setSelected(0);
     setChecked(new Set());
-    void invoke("set_clipboard_popup_tab", { tab: t }).catch(() => {});
+    if (t !== "dictation") {
+      void invoke("set_clipboard_popup_tab", { tab: t }).catch(() => {});
+    }
   };
 
   const changePinnedOnly = (v: boolean) => {
@@ -150,10 +187,9 @@ function ClipboardPopup() {
   };
 
   const cycleTab = (dir: 1 | -1) => {
-    const i = CLIPBOARD_TABS.indexOf(tab);
-    changeTab(
-      CLIPBOARD_TABS[(i + dir + CLIPBOARD_TABS.length) % CLIPBOARD_TABS.length]
-    );
+    const order: PopupTab[] = [...CLIPBOARD_TABS, "dictation"];
+    const i = order.indexOf(tab);
+    changeTab(order[(i + dir + order.length) % order.length]);
   };
 
   useEffect(() => {
@@ -205,10 +241,39 @@ function ClipboardPopup() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const clipTab: ClipboardTab = tab === "dictation" ? "all" : tab;
   const filtered = useMemo(
-    () => filterClipboardEntries(entries, tab, query, pinnedOnly),
-    [entries, tab, query, pinnedOnly]
+    () => filterClipboardEntries(entries, clipTab, query, pinnedOnly),
+    [entries, clipTab, query, pinnedOnly]
   );
+  const filteredTranscripts = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return transcripts;
+    return transcripts.filter((t) => t.text.toLowerCase().includes(q));
+  }, [transcripts, query]);
+
+  // Clicking a transcript copies it — the standard clipboard contract:
+  // it lands on the OS clipboard and Ctrl+V pastes it anywhere.
+  async function chooseTranscript(t: Transcript) {
+    try {
+      await invoke("copy_dictation_transcript", { id: t.id });
+    } catch {
+      // Honest close, same rule as clipboard entries.
+    }
+    hide();
+  }
+
+  async function downloadDictation() {
+    setDictBusy(true);
+    try {
+      const st = await invoke<DictationStatus>("download_dictation");
+      setDictStatus(st);
+    } catch (err) {
+      setError(typeof err === "string" ? err : "Download failed.");
+    } finally {
+      setDictBusy(false);
+    }
+  }
 
   useEffect(() => {
     setSelected(0);
@@ -282,7 +347,7 @@ function ClipboardPopup() {
     ) : pinnedOnly ? (
       <>{emptyPinnedCopy()}</>
     ) : (
-      <>{emptyTabCopy(tab) || "Nothing here yet."}</>
+      <>{emptyTabCopy(clipTab) || "Nothing here yet."}</>
     );
 
   return (
@@ -303,6 +368,7 @@ function ClipboardPopup() {
             </button>
           </>
         ) : (
+          tab !== "dictation" &&
           hasText && (
             <button
               type="button"
@@ -320,7 +386,11 @@ function ClipboardPopup() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Search clipboard history…"
+            placeholder={
+              tab === "dictation"
+                ? "Search transcripts…"
+                : "Search clipboard history…"
+            }
             aria-label="Search clipboard history"
             autoComplete="off"
             spellCheck={false}
@@ -343,16 +413,118 @@ function ClipboardPopup() {
         ))}
         <button
           type="button"
-          role="switch"
-          aria-checked={pinnedOnly}
-          className={"clip-pinnedonly" + (pinnedOnly ? " active" : "")}
-          onClick={() => changePinnedOnly(!pinnedOnly)}
-          title="Show only pinned items"
+          role="tab"
+          aria-selected={tab === "dictation"}
+          className={tab === "dictation" ? "active" : ""}
+          onClick={() => changeTab("dictation")}
+          title="Dictation transcripts"
         >
-          Pinned only
+          Dictation
         </button>
+        {tab !== "dictation" && (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={pinnedOnly}
+            className={"clip-pinnedonly" + (pinnedOnly ? " active" : "")}
+            onClick={() => changePinnedOnly(!pinnedOnly)}
+            title="Show only pinned items"
+          >
+            Pinned only
+          </button>
+        )}
       </div>
-      {error ? (
+      {tab === "dictation" ? (
+        <div className="clip-dict">
+          <div className="clip-dict-bar">
+            {dictStatus?.recording ? (
+              <>
+                <span className="clip-dict-live">Listening…</span>
+                <button
+                  type="button"
+                  className="clip-top-btn primary"
+                  onClick={() => void invoke("toggle_dictation").catch(() => {})}
+                >
+                  Stop
+                </button>
+              </>
+            ) : dictStatus?.transcribing ? (
+              <span className="muted">Transcribing…</span>
+            ) : dictStatus && !dictStatus.ready ? (
+              <>
+                <span className="muted">
+                  One-time download: speech engine +{" "}
+                  {dictStatus.model === "base" ? "base" : "tiny"} model.
+                </span>
+                <button
+                  type="button"
+                  className="clip-top-btn primary"
+                  disabled={dictBusy}
+                  onClick={() => void downloadDictation()}
+                >
+                  {dictBusy ? "Downloading…" : "Download"}
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="muted">
+                  {dictStatus?.hotkey
+                    ? `${dictStatus.hotkey} starts and stops dictation, in any window.`
+                    : "Dictation is ready."}
+                </span>
+                <button
+                  type="button"
+                  className="clip-top-btn primary"
+                  onClick={() => void invoke("toggle_dictation").catch(() => {})}
+                >
+                  Dictate
+                </button>
+              </>
+            )}
+            {transcripts.length > 0 && (
+              <button
+                type="button"
+                className="clip-top-btn"
+                onClick={() => {
+                  void invoke("clear_dictation_transcripts")
+                    .then(() => refresh())
+                    .catch(() => {});
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          {error && (
+            <div className="clip-error" role="alert">
+              {error}
+            </div>
+          )}
+          {filteredTranscripts.length === 0 ? (
+            <div className="clip-empty">
+              {transcripts.length === 0
+                ? "Nothing dictated yet. Your last 50 transcripts will live here."
+                : `No matches for "${query}".`}
+            </div>
+          ) : (
+            <ul className="clip-list" aria-label="Dictation transcripts">
+              {filteredTranscripts.map((t) => (
+                <li key={t.id} className="clip-row">
+                  <button
+                    type="button"
+                    className="clip-item"
+                    onClick={() => void chooseTranscript(t)}
+                    title="Copy to clipboard"
+                  >
+                    <span className="text">{t.text}</span>
+                    <span className="meta">{timeAgo(t.ts)}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : error ? (
         <div className="clip-error" role="alert">
           {error}
         </div>
@@ -452,7 +624,9 @@ function ClipboardPopup() {
         </ul>
       )}
       <div className="clip-foot">
-        {selectMode ? (
+        {tab === "dictation" ? (
+          <span className="muted">Click a transcript to copy it — Ctrl+V pastes it anywhere</span>
+        ) : selectMode ? (
           <span className="muted">text entries only</span>
         ) : (
           <>

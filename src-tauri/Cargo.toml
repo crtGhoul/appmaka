@@ -33,6 +33,9 @@ tauri-plugin-updater = "2"
 sysinfo = "0.34"
 # Filter-list downloads. rustls ("tls") only; no native-tls dependency.
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# Microphone capture for built-in dictation (v0.14.0). WASAPI on Windows,
+# ALSA on Linux. The stream only opens while the user is dictating.
+cpal = "0.15"
 url = "2"
 # v0.9.1: PNG encode/decode for clipboard image history (clipboard.rs).
 # Pure Rust, no system libs — needed on all platforms.

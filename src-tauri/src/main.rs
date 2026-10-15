@@ -3,6 +3,7 @@
 mod adblock;
 mod clipboard;
 mod custom_programs;
+mod dictation;
 mod downloads;
 mod favicon;
 mod favicon_parse;
@@ -980,6 +981,9 @@ fn main() {
                                 crate::hotkeys::HotkeyKind::Clipboard => {
                                     crate::clipboard::toggle_window(app);
                                 }
+                                crate::hotkeys::HotkeyKind::Dictation => {
+                                    crate::dictation::toggle(app);
+                                }
                                 _ => {
                                     crate::hotkeys::emit_hotkey_fired(
                                         app,
@@ -1141,6 +1145,9 @@ fn main() {
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
             app.manage(crate::clipboard::load(app.handle()));
+            // Built-in dictation (v0.14.0): state + saved global hotkey.
+            app.manage(crate::dictation::load(app.handle()));
+            crate::dictation::register_saved_hotkey(app.handle());
             crate::clipboard::ensure_summon_registered(app.handle());
             crate::clipboard::start_watcher(app.handle().clone());
             // First program scan runs in the background; results land in the
@@ -1373,6 +1380,15 @@ fn main() {
             // v0.9.0: clipboard history (local; v0.9.1 added images)
             clipboard::list_clipboard,
             clipboard::copy_clipboard_entry,
+            dictation::get_dictation_status,
+            dictation::list_dictation_transcripts,
+            dictation::clear_dictation_transcripts,
+            dictation::copy_dictation_transcript,
+            dictation::set_dictation_model,
+            dictation::set_dictation_hotkey,
+            dictation::dictation_hotkey_status,
+            dictation::download_dictation,
+            dictation::toggle_dictation,
             // v0.9.3: multi-select — several text entries, one payload
             clipboard::copy_clipboard_entries,
             clipboard::hide_clipboard_popup,

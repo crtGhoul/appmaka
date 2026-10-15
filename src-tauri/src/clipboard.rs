@@ -879,6 +879,15 @@ pub fn list_clipboard(app: AppHandle) -> Result<Vec<ClipboardListEntry>, String>
     })
 }
 
+/// Mark `text` as written by AppMaka itself so the clipboard watcher
+/// doesn't re-record it as a fresh copy. Used by copy-back and by
+/// dictation (v0.14.0), whose transcripts live in their own list.
+pub fn note_self_write(app: &AppHandle, text: &str) {
+    let _ = with_state(app, |data| {
+        data.last_seen = Some(text.to_string());
+    });
+}
+
 /// Copy an entry back to the OS clipboard (v2 contract: the user pastes
 /// from there; we don't synthesize keystrokes into other apps).
 /// JS: `invoke("copy_clipboard_entry", { entryId })`.
@@ -895,9 +904,7 @@ pub fn copy_clipboard_entry(app: AppHandle, entry_id: String) -> Result<(), Stri
                 .map_err(|e| format!("Couldn't write to the clipboard: {e}"))?;
             // Remember what we just wrote so the watcher doesn't
             // re-record it as a new copy.
-            let _ = with_state(&app, |data| {
-                data.last_seen = Some(entry.text);
-            });
+            note_self_write(&app, &entry.text);
         }
         EntryKind::Image => {
             let file = entry

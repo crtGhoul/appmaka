@@ -28,6 +28,7 @@ jobs:
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
+            libasound2-dev \
             librsvg2-dev
 
       - name: Setup Node

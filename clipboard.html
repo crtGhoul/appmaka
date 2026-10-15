@@ -189,6 +189,29 @@
     display: flex;
     gap: 12px;
   }
+  /* v0.14.0: Dictation tab. The bar carries state + the one action that
+     fits it (Download / Dictate / Stop / Clear); transcripts reuse the
+     clip list rows below. */
+  .clip-dict { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .clip-dict-bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #eceef1;
+  }
+  .clip-dict-bar .muted { color: #8a8f98; font-size: 12.5px; flex: 1 1 auto; }
+  .clip-dict-live { color: #b3261e; font-weight: 600; font-size: 12.5px; flex: 1 1 auto; }
+  .clip-dict-live::before {
+    content: "";
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #e5484d;
+    margin-right: 6px;
+  }
   .clip-foot b { font-weight: 600; color: #6b7078; }
   .clip-foot .muted { color: #b0b5bd; }
   .clip-foot button {

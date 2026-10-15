@@ -33,6 +33,8 @@ pub enum HotkeyKind {
     },
     /// The clipboard history popup (v0.9.0).
     Clipboard,
+    /// Built-in dictation start/stop (v0.14.0).
+    Dictation,
 }
 
 /// Friendly one-line description of a binding, used in conflict errors.
@@ -48,6 +50,7 @@ fn describe_binding(binding_id: &str, kind: &HotkeyKind) -> String {
             None => format!("the hotkey for app \"{app_id}\""),
         },
         HotkeyKind::Clipboard => "the clipboard history popup".to_string(),
+        HotkeyKind::Dictation => "the dictation hotkey".to_string(),
     }
 }
 
@@ -377,6 +380,17 @@ pub fn emit_hotkey_fired(app: &AppHandle, binding_id: &str, kind: &HotkeyKind) {
         ),
         HotkeyKind::Clipboard => (
             "clipboard",
+            HotkeyTarget {
+                routine_id: None,
+                workspace_id: None,
+                app_id: None,
+                account_id: None,
+            },
+        ),
+        // Dictation is dispatched in Rust (main.rs), like Clipboard;
+        // this arm only keeps the match exhaustive.
+        HotkeyKind::Dictation => (
+            "dictation",
             HotkeyTarget {
                 routine_id: None,
                 workspace_id: None,

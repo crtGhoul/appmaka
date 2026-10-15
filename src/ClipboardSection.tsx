@@ -1,7 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { HotkeyCapture } from "./HotkeyCapture";
 import type { ClipboardSettings } from "./types";
+
+/** Built-in dictation status (v0.14.0, dictation.rs). */
+interface DictationStatus {
+  ready: boolean;
+  binaryInstalled: boolean;
+  model: string;
+  modelInstalled: boolean;
+  recording: boolean;
+  transcribing: boolean;
+  hotkey: string;
+}
 
 /**
  * Clipboard history settings (v0.9.2, text + images, Win-key tap opt-in).
@@ -39,6 +51,73 @@ export function ClipboardSection() {
   const [winTap, setWinTap] = useState(false);
   const [winTapSupported, setWinTapSupported] = useState(false);
   const [winTapBusy, setWinTapBusy] = useState(false);
+  // Dictation (v0.14.0).
+  const [dict, setDict] = useState<DictationStatus | null>(null);
+  const [dictHotkey, setDictHotkey] = useState("");
+  const [dictStatus, setDictStatus] = useState<HotkeyStatus | null>(null);
+  const [dictError, setDictError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  const refreshDict = useCallback(async () => {
+    try {
+      const [st, hs] = await Promise.all([
+        invoke<DictationStatus>("get_dictation_status"),
+        invoke<HotkeyStatus | null>("dictation_hotkey_status"),
+      ]);
+      setDict(st);
+      setDictHotkey(st.hotkey);
+      setDictStatus(hs);
+    } catch {
+      // Dictation is additive; a failure here must not break the section.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshDict();
+    const un = listen("dictation-state", () => void refreshDict());
+    return () => {
+      void un.then((u) => u());
+    };
+  }, [refreshDict]);
+
+  async function saveDictHotkey(next: string) {
+    setDictHotkey(next);
+    setDictError(null);
+    try {
+      const st = await invoke<HotkeyStatus>("set_dictation_hotkey", {
+        hotkey: next.trim(),
+      });
+      setDictStatus(st);
+      if (st) setDictHotkey(st.hotkey);
+    } catch (err) {
+      setDictError(errMsg(err));
+    }
+  }
+
+  async function downloadDictation() {
+    setDownloading(true);
+    setDictError(null);
+    try {
+      const st = await invoke<DictationStatus>("download_dictation");
+      setDict(st);
+    } catch (err) {
+      setDictError(errMsg(err));
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  async function chooseModel(model: string) {
+    setDictError(null);
+    try {
+      const st = await invoke<DictationStatus>("set_dictation_model", {
+        model,
+      });
+      setDict(st);
+    } catch (err) {
+      setDictError(errMsg(err));
+    }
+  }
 
   const refresh = useCallback(async () => {
     try {
@@ -248,6 +327,87 @@ export function ClipboardSection() {
         sent anywhere. Win+V is Windows' own clipboard (off by default, can
         sync to your Microsoft account); this one is separate and stays here.
       </p>
+
+      <div style={{ marginTop: 20, borderTop: "1px solid var(--border, #e4e6ea)", paddingTop: 14 }}>
+        <span className="field-label" style={{ display: "block", marginBottom: 8 }}>
+          Dictation
+        </span>
+        <p className="muted small" style={{ margin: "0 0 12px" }}>
+          Press the dictation hotkey in any window to start, and again to
+          stop. What you said is pasted where you were typing, copied to the
+          clipboard, and kept under the clipboard popup's Dictation tab —
+          your last 50 transcripts. It all runs on this PC; the speech model
+          only loads while you dictate, so it costs no memory the rest of
+          the time.
+        </p>
+        <label style={{ display: "block", fontSize: 14, marginBottom: 8 }}>
+          <span className="field-label">Dictation hotkey</span>
+          <div style={{ marginTop: 4 }}>
+            <HotkeyCapture
+              value={dictHotkey}
+              onChange={(v) => void saveDictHotkey(v)}
+              ariaLabel="Dictation hotkey"
+              placeholder="Click to set…"
+              allowClear
+            />
+          </div>
+        </label>
+        {dictError && (
+          <p className="modal-error" role="alert">
+            {dictError}
+          </p>
+        )}
+        {dictStatus && !dictStatus.registered && !dictError && (
+          <p className="muted small" role="status">
+            {dictStatus.error
+              ? `Couldn't register "${dictStatus.hotkey}": ${dictStatus.error}`
+              : "No dictation hotkey set."}
+          </p>
+        )}
+        <div role="radiogroup" aria-label="Speech model" style={{ marginBottom: 8 }}>
+          <label style={{ display: "block", marginBottom: 6, cursor: "pointer" }}>
+            <input
+              type="radio"
+              name="dictation-model"
+              checked={!dict || dict.model !== "base"}
+              onChange={() => void chooseModel("tiny")}
+              style={{ marginRight: 8 }}
+            />
+            Tiny — lightest download, good for clear speech
+          </label>
+          <label style={{ display: "block", cursor: "pointer" }}>
+            <input
+              type="radio"
+              name="dictation-model"
+              checked={dict?.model === "base"}
+              onChange={() => void chooseModel("base")}
+              style={{ marginRight: 8 }}
+            />
+            Base — hears better, bigger download
+          </label>
+        </div>
+        {dict && !dict.ready ? (
+          <div>
+            <button onClick={() => void downloadDictation()} disabled={downloading}>
+              {downloading
+                ? "Downloading…"
+                : `Download speech model (about ${dict.model === "base" ? "150" : "85"} MB)`}
+            </button>
+            <p className="muted small" style={{ margin: "6px 0 0" }}>
+              One-time download. Nothing is installed or loaded until this
+              is done.
+            </p>
+          </div>
+        ) : dict ? (
+          <p className="muted small" role="status" style={{ margin: 0 }}>
+            {dict.recording
+              ? "Listening now…"
+              : dict.transcribing
+                ? "Transcribing…"
+                : "Speech model ready."}
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }
