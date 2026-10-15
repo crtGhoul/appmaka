@@ -295,6 +295,7 @@ pub fn open_account_placed(
             session_dir: session_dir.clone(),
             popup_policy,
             popup_allowlist: web_app.settings.popup_allowlist.clone(),
+            parent_label: label.clone(),
         }))
         // In-app download manager (v0.7.0): downloads stay in the account
         // window's own session instead of kicking out to the system browser.
@@ -1007,6 +1008,7 @@ pub(crate) const SHORTCUTS_OVERLAY_JS: &str = r#"(function () {
 /// `Fn`, so it can't borrow from the stack frame that creates the window).
 /// Shared with the preview flow (`preview.rs`), which passes placeholder
 /// ids since the app doesn't exist yet.
+#[derive(Clone)]
 pub(crate) struct PopupContext {
     pub(crate) app: AppHandle,
     pub(crate) app_id: String,
@@ -1016,21 +1018,24 @@ pub(crate) struct PopupContext {
     pub(crate) session_dir: PathBuf,
     pub(crate) popup_policy: String,
     pub(crate) popup_allowlist: Vec<String>,
+    /// Label of the window this context's webview lives in, so a popup
+    /// can be placed over its opener (v0.13.15). Empty when unknown —
+    /// placement falls back to screen-center.
+    pub(crate) parent_label: String,
 }
 
 /// Build the `on_new_window` handler for an account window.
 ///
-/// Runs on a separate thread on Windows, so it must stay non-blocking: the
-/// decision is made synchronously and any window creation is bounced to a
-/// dedicated spawned thread (never the calling thread, never the main
-/// thread — see `spawn_oauth_modal`). The original request is always
-/// denied — allowed popups are re-created as contained windows instead.
-///
 /// Policy "allow": every new-window request (window.open, target=_blank)
-/// becomes a plain contained popup sharing the account's session directory,
-/// so logins carry over. Policy "block": only allowlisted hosts get the
+/// becomes a contained popup sharing the account's session directory, so
+/// logins carry over. Policy "block": only allowlisted hosts get the
 /// OAuth modal (with its auto-close script); everything else is denied
-/// silently, with no intrusive UI.
+/// with a notice saying how to allow it.
+///
+/// How an allowed popup is created differs by platform — see
+/// `open_contained` (Windows returns a real popup with a live
+/// `window.opener`; other platforms deny and rebuild on a spawned
+/// thread, the historically proven path there).
 ///
 /// Also used by the preview flow with placeholder ids.
 ///
@@ -1045,11 +1050,9 @@ pub(crate) fn make_popup_handler(
 ) -> impl Fn(url::Url, tauri::webview::NewWindowFeatures) -> tauri::webview::NewWindowResponse<tauri::Wry>
        + Send
        + 'static {
-    // Origin used by the OAuth modal's best-effort auto-close.
-    let home_origin = app_origin(&ctx.app_url);
-    move |url: url::Url, _features| {
+    move |url: url::Url, features| {
         if popup_opens_plain(&ctx.popup_policy, global_popups_allowed(&ctx.app)) {
-            spawn_popup_window(&ctx.app, &url, &ctx.app_name, &ctx.session_dir);
+            open_contained(&ctx, "popup", &url, &features)
         } else {
             // "block": only allowlisted hosts get a contained popup.
             let host = url.host_str().unwrap_or("").to_lowercase();
@@ -1058,23 +1061,179 @@ pub(crate) fn make_popup_handler(
                 .iter()
                 .any(|h| h.eq_ignore_ascii_case(&host))
             {
-                spawn_oauth_modal(
-                    &ctx.app,
-                    &url,
-                    &ctx.app_id,
-                    &ctx.account_id,
-                    &ctx.app_name,
-                    &home_origin,
-                    &ctx.session_dir,
-                );
+                open_contained(&ctx, "oauth", &url, &features)
             } else {
                 // Not silent: the user clicked something expecting a
                 // window, so say what happened and how to allow it.
                 notify_popup_blocked(&ctx.app, &ctx.app_name, &host);
+                tauri::webview::NewWindowResponse::Deny
             }
         }
-        tauri::webview::NewWindowResponse::Deny
     }
+}
+
+/// Route an allowed popup to a window.
+///
+/// Windows (v0.13.15): build the window inside the handler and return it
+/// as the popup itself (`NewWindowResponse::Create`), so the page keeps
+/// a live `window.opener`. The old deny-and-rebuild severed that link,
+/// which broke sign-in popups two ways: flows that open an initially
+/// blank popup and navigate it afterwards had nothing to navigate (the
+/// popup sat blank forever), and flows that postMessage their result
+/// back to the opener (Google/Apple/Microsoft sign-in) never delivered
+/// it — the user's "popups open blank and logins don't finish" report.
+/// Building here is the designed flow, not the wry#583 trap: wry takes a
+/// WebView2 deferral and dispatches this handler onto the message loop
+/// precisely so Create can build (Microsoft's reentrancy guidance), and
+/// Tauri's dispatcher executes window creation inline when already on
+/// the main thread. If the build somehow fails, fall back to the legacy
+/// spawned rebuild rather than swallowing the popup.
+///
+/// Other platforms keep deny + rebuild on a spawned thread: WebKitGTK
+/// verified working end-to-end, and wry's Create there wants a
+/// related-view the Tauri window API doesn't expose.
+fn open_contained(
+    ctx: &PopupContext,
+    kind: &str,
+    url: &url::Url,
+    features: &tauri::webview::NewWindowFeatures,
+) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+    #[cfg(windows)]
+    {
+        if let Some(window) = build_contained_window(ctx, kind, url, features) {
+            return tauri::webview::NewWindowResponse::Create { window };
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = features;
+    match kind {
+        "oauth" => spawn_oauth_modal(
+            &ctx.app,
+            url,
+            &ctx.app_id,
+            &ctx.account_id,
+            &ctx.app_name,
+            &app_origin(&ctx.app_url),
+            &ctx.session_dir,
+        ),
+        _ => spawn_popup_window(&ctx.app, url, &ctx.app_name, &ctx.session_dir),
+    }
+    tauri::webview::NewWindowResponse::Deny
+}
+
+/// Build a contained popup window synchronously for
+/// `NewWindowResponse::Create` (Windows only — see `open_contained`).
+/// Mirrors what the legacy spawned builder set up — same session
+/// directory (so the same WebView2 environment and cookie jar), the
+/// download hook, the title-bar tint machinery — plus the two things the
+/// rebuild could never do: honor the size/position the page requested,
+/// and attach this same popup policy to the new window so nested
+/// popups in a sign-in chain behave identically instead of being
+/// denied outright.
+#[cfg(windows)]
+fn build_contained_window(
+    ctx: &PopupContext,
+    kind: &str,
+    url: &url::Url,
+    features: &tauri::webview::NewWindowFeatures,
+) -> Option<tauri::WebviewWindow> {
+    let n = OAUTH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let label = format!("{kind}-{n}");
+    let title = if kind == "oauth" {
+        format!("{} — sign-in", ctx.app_name)
+    } else {
+        format!("{} — popup", ctx.app_name)
+    };
+    // Honor the size the page asked for, clamped to something sane.
+    // (The rebuild always used 640x720, whatever the page requested.)
+    let (mut w, mut h) = features
+        .size()
+        .map(|s| (s.width, s.height))
+        .unwrap_or((640.0, 720.0));
+    w = w.clamp(320.0, 1600.0);
+    h = h.clamp(240.0, 1200.0);
+    let mut nested_ctx = ctx.clone();
+    nested_ctx.parent_label = label.clone();
+    let mut builder = WebviewWindowBuilder::new(&ctx.app, &label, WebviewUrl::External(url.clone()))
+        .data_directory(ctx.session_dir.clone())
+        .title(&title)
+        .inner_size(w, h)
+        .on_new_window(make_popup_handler(nested_ctx))
+        .on_download(crate::downloads::make_download_handler(ctx.app.clone()));
+    if kind == "oauth" {
+        builder = builder.initialization_script(oauth_autoclose_script(&app_origin(&ctx.app_url)));
+    }
+    // Placement: where the page asked, else centered over the window
+    // that opened it — the popup lands on the user's actual screen, not
+    // blindly on the primary monitor.
+    if let Some(pos) = features.position() {
+        builder = builder.position(pos.x, pos.y);
+    } else if let Some((x, y)) = centered_over_parent(ctx, w, h) {
+        builder = builder.position(x, y);
+    } else {
+        builder = builder.center();
+    }
+    if kind == "popup" {
+        let nav_app = ctx.app.clone();
+        let nav_label = label.clone();
+        builder = builder.on_navigation(move |nav_url: &url::Url| {
+            let app = nav_app.clone();
+            let lbl = nav_label.clone();
+            let u = nav_url.clone();
+            std::thread::Builder::new()
+                .name(format!("appmaka-popup-retint-{lbl}"))
+                .spawn(move || crate::popup_chrome::tint_popup_caption(&app, &lbl, &u))
+                .ok();
+            true
+        });
+    }
+    match builder.build() {
+        Ok(window) => {
+            if kind == "popup" {
+                crate::popup_chrome::setup_popup_chrome(&ctx.app, &window, &label, url);
+            }
+            Some(window)
+        }
+        Err(e) => {
+            crate::errors::record(
+                &ctx.app,
+                "window-open",
+                &format!("Could not open the {kind} window."),
+                &format!("{kind} window failed for {}/{}: {e}", ctx.app_id, ctx.account_id),
+                true,
+            );
+            None
+        }
+    }
+}
+
+/// Logical (x, y) that centers a `w`x`h` popup over the context's
+/// parent window, or None when the parent can't be measured (the
+/// builder's plain center() is the fallback).
+#[cfg(windows)]
+fn centered_over_parent(ctx: &PopupContext, w: f64, h: f64) -> Option<(f64, f64)> {
+    let parent = ctx.app.get_webview_window(&ctx.parent_label)?;
+    let pos = parent.outer_position().ok()?;
+    let size = parent.outer_size().ok()?;
+    let scale = parent.scale_factor().ok()?;
+    Some((
+        pos.x as f64 / scale + (size.width as f64 / scale - w) / 2.0,
+        pos.y as f64 / scale + (size.height as f64 / scale - h) / 2.0,
+    ))
+}
+
+/// The OAuth modal's best-effort auto-close script: poll until the
+/// popup navigates back to the app's own origin, then close. Shared by
+/// the spawned builder and the in-handler builder so both paths behave
+/// identically.
+fn oauth_autoclose_script(home_origin: &str) -> String {
+    let json_home = serde_json::to_string(home_origin).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "(function(){{var home={json_home};\
+        var t=setInterval(function(){{try{{\
+        if(window.location.origin===home){{window.close();clearInterval(t);}}\
+        }}catch(e){{}}}},1500);}})();"
+    )
 }
 
 /// The global popup override from launcher settings, read live on
@@ -1132,13 +1291,7 @@ fn spawn_oauth_modal(
     home_origin: &str,
     session_dir: &Path,
 ) {
-    let json_home = serde_json::to_string(home_origin).unwrap_or_else(|_| "\"\"".to_string());
-    let autoclose = format!(
-        "(function(){{var home={json_home};\
-        var t=setInterval(function(){{try{{\
-        if(window.location.origin===home){{window.close();clearInterval(t);}}\
-        }}catch(e){{}}}},1500);}})();"
-    );
+    let autoclose = oauth_autoclose_script(home_origin);
     let title = format!("{app_name} — sign-in");
     let log_ctx = format!("{app_id}/{account_id}");
     spawn_contained_window(app, "oauth", url, &title, session_dir, Some(autoclose), &log_ctx);

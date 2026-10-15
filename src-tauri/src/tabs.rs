@@ -419,6 +419,9 @@ fn resolve_tab_page(
                     session_dir: session_dir.clone(),
                     popup_policy,
                     popup_allowlist: web_app.settings.popup_allowlist.clone(),
+                    // Set for real in build_tabbed_window, which knows the
+                    // group window's label; empty until then.
+                    parent_label: String::new(),
                 }),
                 adblock_css: adblock.cosmetic_css_for(&web_app.url),
                 session_dir,
@@ -486,7 +489,8 @@ fn build_tabbed_window(
     }
     let window_app = app.clone();
     match page.popup {
-        Some(ctx) => {
+        Some(mut ctx) => {
+            ctx.parent_label = args.label.to_string();
             builder = builder.on_new_window(crate::windows::make_popup_handler(ctx));
         }
         None => {
