@@ -961,8 +961,8 @@ export function LauncherSettingsPanel({
         </select>
         <span className="help">
           Draws a lightweight pointer inside app windows. Useful if the
-          system cursor ever goes invisible there. Applies to windows opened
-          after the change.
+          system cursor ever goes invisible there. Applies right away,
+          including to windows already open.
         </span>
       </label>
 

@@ -526,7 +526,12 @@ fn build_tabbed_window(
             let u = nav_url.clone();
             std::thread::Builder::new()
                 .name(format!("appmaka-tabbed-retint-{lbl}"))
-                .spawn(move || tint_tabbed_caption(&app, &lbl, &u))
+                .spawn(move || {
+                    tint_tabbed_caption(&app, &lbl, &u);
+                    // v0.13.8: converge the cursor to the saved style
+                    // (see windows::schedule_cursor_reapply).
+                    crate::windows::schedule_cursor_reapply(app.clone(), lbl.clone());
+                })
                 .ok();
             true
         });

@@ -314,7 +314,11 @@ pub fn open_account_placed(
             std::thread::Builder::new()
                 .name(format!("appmaka-page-retint-{lbl}"))
                 .spawn(move || {
-                    crate::tint::request_retint(&app, &lbl, &u, crate::tint::TintTarget::PageStrip)
+                    crate::tint::request_retint(&app, &lbl, &u, crate::tint::TintTarget::PageStrip);
+                    // v0.13.8: a window built before a cursor settings
+                    // change re-runs its old init script on navigation;
+                    // converge it to the saved style.
+                    schedule_cursor_reapply(app.clone(), lbl.clone());
                 })
                 .ok();
             true
@@ -474,6 +478,14 @@ pub(crate) fn cosmetic_init_script(css: &str) -> String {
 /// cursor via CSS or the OS cursor theme fails to render inside the
 /// webview. Minimal RAM by construction — one rAF loop, transform-only
 /// movement (no layout), a handful of divs for the trail.
+///
+/// Live-apply (v0.13.8): the script installs a controller on
+/// `window.__appmakaCursor` with a `destroy()` that removes the style,
+/// the dots, the listeners, and the rAF loop. Re-running the script
+/// with the same style is a no-op; running it with a different style
+/// destroys the old cursor first. That is what lets a settings change
+/// (or a navigation in a window built before the change) swap cursors
+/// in place instead of waiting for a window reopen.
 pub(crate) fn cursor_chrome_js(style: &str) -> String {
     let dots: usize = match style {
         "dot" | "ring" => 1,
@@ -495,6 +507,11 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
     format!(
         r#"(function () {{
   try {{
+    var STYLE = {style_json};
+    if (window.__appmakaCursor) {{
+      if (window.__appmakaCursor.style === STYLE) return;
+      try {{ window.__appmakaCursor.destroy(); }} catch (e) {{}}
+    }}
     // Inject cursor:none as early as possible. initialization_script runs
     // before <head> exists, so target <html> first and re-inject into
     // <head> once available so page stylesheets can't override us.
@@ -507,9 +524,10 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
       (document.head || document.documentElement).appendChild(s);
     }}
     injectStyle();
+    var obs = null;
     if (!document.head) {{
-      var obs = new MutationObserver(function() {{
-        if (document.head) {{ injectStyle(); obs.disconnect(); }}
+      obs = new MutationObserver(function() {{
+        if (document.head) {{ injectStyle(); if (obs) obs.disconnect(); }}
       }});
       obs.observe(document.documentElement, {{ childList: true }});
     }}
@@ -534,7 +552,7 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
       nodes.push({{ el: d, x: -100, y: -100, o: N > 1 ? 0.9 * (1 - i / N) + 0.1 : 1 }});
     }}
 
-    var tx = -100, ty = -100, inside = false;
+    var tx = -100, ty = -100, inside = false, dead = false, rafId = 0;
 
     function showAt(cx, cy) {{
       tx = cx; ty = cy;
@@ -548,25 +566,23 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
     }}
 
     // mousemove is the primary tracker.
-    document.addEventListener("mousemove", function(e) {{
-      showAt(e.clientX, e.clientY);
-    }}, {{ passive: true }});
-
+    function onMove(e) {{ showAt(e.clientX, e.clientY); }}
     // mouseenter on window fires when the pointer enters the webview from
     // outside (titlebar, edge) before any mousemove fires — this is the
     // fix for "cursor never appears until I wiggle it".
-    window.addEventListener("mouseenter", function(e) {{
-      showAt(e.clientX, e.clientY);
-    }}, {{ passive: true }});
-
-    document.addEventListener("mouseleave", function() {{
+    function onEnter(e) {{ showAt(e.clientX, e.clientY); }}
+    function onLeave() {{
       inside = false;
       for (var i = 0; i < nodes.length; i++) nodes[i].el.style.opacity = 0;
-    }});
+    }}
+    document.addEventListener("mousemove", onMove, {{ passive: true }});
+    window.addEventListener("mouseenter", onEnter, {{ passive: true }});
+    document.addEventListener("mouseleave", onLeave);
 
     // One rAF loop: head snaps, followers lerp (trail effect).
     // transform-only — no layout, no paint beyond the dot elements.
     (function frame() {{
+      if (dead) return;
       var px = tx, py = ty;
       for (var i = 0; i < nodes.length; i++) {{
         var n = nodes[i];
@@ -575,13 +591,92 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
         n.el.style.transform = "translate(" + n.x + "px," + n.y + "px)";
         px = n.x; py = n.y;
       }}
-      requestAnimationFrame(frame);
+      rafId = requestAnimationFrame(frame);
     }})();
+
+    function destroy() {{
+      dead = true;
+      cancelAnimationFrame(rafId);
+      document.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseenter", onEnter);
+      document.removeEventListener("mouseleave", onLeave);
+      if (obs) obs.disconnect();
+      var junk = document.querySelectorAll("[data-appmaka=cursor],[data-appmaka=cursor-dot]");
+      for (var i = 0; i < junk.length; i++) junk[i].remove();
+      if (window.__appmakaCursor && window.__appmakaCursor.style === STYLE) {{
+        window.__appmakaCursor = null;
+      }}
+    }}
+    window.__appmakaCursor = {{ style: STYLE, destroy: destroy }};
   }} catch(e) {{}}
 }})();"#,
         dots = dots,
         shape_css_json = serde_json::to_string(shape_css).unwrap_or_default(),
+        style_json = serde_json::to_string(style).unwrap_or_default(),
     )
+}
+
+/// The script to eval into a live page so its cursor matches `style`
+/// right now: the full install script for dot/ring/trail (it destroys
+/// any previous controller first), or a teardown-only snippet for
+/// "off" — `cursor_chrome_js` returns "" for off because build-time
+/// callers skip injection, but a live page needs the old cursor gone.
+pub(crate) fn cursor_live_apply_js(style: &str) -> String {
+    match style {
+        "dot" | "ring" | "trail" => cursor_chrome_js(style),
+        _ => "(function(){try{if(window.__appmakaCursor&&window.__appmakaCursor.destroy)window.__appmakaCursor.destroy();}catch(e){}})();"
+            .to_string(),
+    }
+}
+
+/// Which open windows carry the custom cursor: account windows, tabbed
+/// windows, and the search window — the same set that gets the script
+/// as an initialization script at build time. Popups never get it.
+fn cursor_window_label(label: &str) -> bool {
+    label.starts_with("acct-")
+        || label.starts_with("tabbed-")
+        || label == crate::websearch::SEARCH_WINDOW_LABEL
+}
+
+/// Push the cursor style into every open app window (settings-change
+/// broadcast). Best-effort: a window mid-navigation may drop the eval;
+/// the navigation re-apply below converges it on the next page load.
+pub(crate) fn apply_cursor_live(app: &AppHandle, style: &str) {
+    let js = cursor_live_apply_js(style);
+    for (label, window) in app.webview_windows() {
+        if cursor_window_label(&label) {
+            let _ = window.eval(&js);
+        }
+    }
+}
+
+/// Re-apply the *current* saved cursor style shortly after a
+/// navigation. A window built before a settings change re-runs its
+/// build-time initialization script (old style) on every navigation;
+/// this converges it to the saved style. Two passes, because an eval
+/// that lands before the new document commits is discarded with the
+/// old one — the same-style guard in the script makes a redundant
+/// pass a no-op. Called from the navigation hooks, which must never
+/// block: everything here runs on a detached thread. Windows-only
+/// because the navigation hooks themselves are Windows-only (the
+/// retint pipeline); elsewhere the settings broadcast still applies.
+#[cfg(windows)]
+pub(crate) fn schedule_cursor_reapply(app: AppHandle, label: String) {
+    let _ = std::thread::Builder::new()
+        .name("appmaka-cursor-reapply".to_string())
+        .spawn(move || {
+            for delay_ms in [600, 2000] {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                let style = app
+                    .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+                    .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
+                    .unwrap_or_default();
+                let Some(window) = app.get_webview_window(&label) else {
+                    return;
+                };
+                let _ = window.eval(cursor_live_apply_js(&style));
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -2018,4 +2113,41 @@ mod tests {
         assert!(cursor_chrome_js("trail").contains("var N = 6"));
         assert!(cursor_chrome_js("dot").contains("var N = 1"));
     }
+
+    #[test]
+    fn cursor_scripts_register_a_destroyable_controller() {
+        // Live-apply contract: every install script registers
+        // window.__appmakaCursor with its style + destroy(), and
+        // re-running with a different style destroys the old one.
+        for style in ["dot", "ring", "trail"] {
+            let js = cursor_chrome_js(style);
+            assert!(js.contains("__appmakaCursor"), "{style}");
+            assert!(js.contains("destroy"), "{style}");
+            assert!(js.contains(&format!("\"{style}\"")), "{style}");
+        }
+    }
+
+    #[test]
+    fn cursor_live_apply_off_is_teardown_only() {
+        let js = cursor_live_apply_js("off");
+        assert!(!js.is_empty());
+        assert!(js.contains("__appmakaCursor"));
+        assert!(js.contains("destroy"));
+        // No install: no dots are created and the native cursor stays.
+        assert!(!js.contains("cursor-dot"));
+        assert!(!js.contains("cursor:none"));
+        // A live style applies the full install script verbatim.
+        assert_eq!(cursor_live_apply_js("ring"), cursor_chrome_js("ring"));
+    }
+
+    #[test]
+    fn cursor_window_labels_cover_injected_windows_only() {
+        assert!(cursor_window_label("acct-app1-acct1"));
+        assert!(cursor_window_label("tabbed-group1-g0"));
+        assert!(cursor_window_label(crate::websearch::SEARCH_WINDOW_LABEL));
+        assert!(!cursor_window_label("main"));
+        assert!(!cursor_window_label("popup-3"));
+        assert!(!cursor_window_label("oauth-1"));
+    }
 }
+

@@ -348,8 +348,9 @@ pub fn set_search_engine(
 }
 
 /// Set the custom page cursor ("off", "dot", "ring", "trail").
-/// JS: `invoke("set_custom_cursor", { style })`. Takes effect on windows
-/// opened after the change; already-open windows keep their cursor.
+/// JS: `invoke("set_custom_cursor", { style })`. Applies live to
+/// already-open windows (v0.13.8); windows opened later read the saved
+/// setting at build time.
 #[tauri::command]
 pub fn set_custom_cursor(
     app: AppHandle,
@@ -359,13 +360,19 @@ pub fn set_custom_cursor(
     if !["off", "dot", "ring", "trail"].contains(&style.as_str()) {
         return Err("Unknown cursor style.".to_string());
     }
-    let state = app.state::<Mutex<LauncherSettings>>();
-    let mut settings = state
-        .lock()
-        .map_err(|e| format!("settings state poisoned: {e}"))?;
-    settings.custom_cursor = style;
-    save(&app, &settings)?;
-    Ok(settings.clone())
+    let saved = {
+        let state = app.state::<Mutex<LauncherSettings>>();
+        let mut settings = state
+            .lock()
+            .map_err(|e| format!("settings state poisoned: {e}"))?;
+        settings.custom_cursor = style.clone();
+        save(&app, &settings)?;
+        settings.clone()
+    };
+    // Broadcast after the settings lock is released: eval is a webview
+    // call and must not run under the lock.
+    crate::windows::apply_cursor_live(&app, &style);
+    Ok(saved)
 }
 
 /// Set whether opening an app/account creates a tabbed window instead of
