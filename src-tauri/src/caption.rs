@@ -2307,7 +2307,12 @@ mod imp {
                 });
                 if let Some((app, is_fs)) = ctx {
                     if let Some(w) = app.get_webview_window(&label) {
-                        let _ = w.set_fullscreen(!is_fs);
+                        if is_fs {
+                            let _ = w.set_fullscreen(false);
+                        } else {
+                            // v0.13.13: land on the cursor's monitor.
+                            crate::windows::enter_fullscreen_on_cursor_monitor(&w);
+                        }
                     }
                 }
             }

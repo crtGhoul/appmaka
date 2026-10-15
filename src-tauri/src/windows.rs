@@ -456,6 +456,29 @@ pub fn open_account_placed(
     Ok(())
 }
 
+/// Enter fullscreen on the monitor the CURSOR is on (v0.13.13, the
+/// user's ask — plain set_fullscreen lands on the window's monitor,
+/// which reads as "it jumped to my other screen" on multi-monitor
+/// setups). The cursor is what the user is pointing at; when it can't
+/// be read, fall back to the window-monitor behavior.
+#[cfg(windows)]
+pub(crate) fn enter_fullscreen_on_cursor_monitor(window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT::default();
+    let pos = unsafe { GetCursorPos(&mut pt) }
+        .is_ok()
+        .then(|| tauri::PhysicalPosition::new(pt.x as f64, pt.y as f64));
+    match pos {
+        Some(p) => {
+            let _ = window.set_fullscreen_on_monitor(p);
+        }
+        None => {
+            let _ = window.set_fullscreen(true);
+        }
+    }
+}
+
 /// Page-requested fullscreen (v0.13.12, Windows): when a page calls
 /// `requestFullscreen()` — a video player's fullscreen button — WebView2
 /// flips its ContainsFullScreenElement state, but nothing resizes the
@@ -482,7 +505,15 @@ pub(crate) fn attach_fullscreen_sync(window: &tauri::WebviewWindow) {
                     let mut fs = windows_core::BOOL::default();
                     if unsafe { core.ContainsFullScreenElement(&mut fs) }.is_ok() {
                         if let Some(w) = app.get_webview_window(&label) {
-                            let _ = w.set_fullscreen(fs.as_bool());
+                            // v0.13.13: entering goes to the cursor's
+                            // monitor (this handler registers after the
+                            // runtime's own, so it has the final say on
+                            // placement); exiting just restores.
+                            if fs.as_bool() {
+                                enter_fullscreen_on_cursor_monitor(&w);
+                            } else {
+                                let _ = w.set_fullscreen(false);
+                            }
                         }
                     }
                 }
