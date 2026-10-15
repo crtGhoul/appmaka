@@ -456,7 +456,9 @@ pub fn set_tile_size(app: AppHandle, size: String) -> Result<LauncherSettings, S
 
 /// Read the dictation-compatibility setting from live state (false
 /// when state is unavailable). The hook installers consult this so
-/// the mode also holds for hooks installed after a restart.
+/// the mode also holds for hooks installed after a restart. Only the
+/// Windows hook machinery calls it — dead code elsewhere.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn dictation_compat_enabled(app: &AppHandle) -> bool {
     app.try_state::<Mutex<LauncherSettings>>()
         .and_then(|s| s.lock().ok().map(|s| s.dictation_compat))
