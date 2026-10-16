@@ -245,6 +245,14 @@ export interface AccountMemory {
   rssKb: number;
 }
 
+/** v0.15.0: one sleeping account, from `sleep_state`. */
+export interface SleepInfo {
+  appId: string;
+  accountId: string;
+  /** Last attributed RSS at automatic-reclaim time, KiB. */
+  rssKb: number;
+}
+
 /** v0.10.0: one open tabbed window, from `list_tabbed_windows`. */
 export interface TabSummary {
   appId: string;

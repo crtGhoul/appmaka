@@ -454,6 +454,7 @@ export function IconGrid({
   pinnedIds,
   badgeFor,
   ramFor,
+  sleepingFor,
   onTileContextMenu,
 }: {
   items: SearchResult[];
@@ -467,6 +468,8 @@ export function IconGrid({
   badgeFor?: (r: SearchResult) => number | undefined;
   /** Attributed RAM in KiB per result (v0.15.0). Undefined draws no line. Optional. */
   ramFor?: (r: SearchResult) => number | undefined;
+  /** Sleeping (auto-reclaimed) accounts (v0.15.0). Optional. */
+  sleepingFor?: (r: SearchResult) => boolean;
   /** Right-click on a tile. Receives the result and the cursor position. Optional. */
   onTileContextMenu?: (r: SearchResult, x: number, y: number) => void;
 }) {
@@ -520,6 +523,11 @@ export function IconGrid({
               </span>
             ) : null;
           })()}
+          {sleepingFor?.(r) ? (
+            <span className="tile-sleep" title="Closed automatically to save memory — reopening restores it">
+              Sleeping
+            </span>
+          ) : null}
         </button>
       ))}
     </div>

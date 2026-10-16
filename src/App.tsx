@@ -68,6 +68,7 @@ import type {
   PreviewStart,
   Routine,
   SessionRestoreOffer,
+  SleepInfo,
   WebApp,
 } from "./types";
 
@@ -454,6 +455,7 @@ function AccountRow({
   app,
   unread,
   ramKb,
+  sleeping,
   onOpen,
   onOpenPrivate,
   onFillLogin,
@@ -470,6 +472,8 @@ function AccountRow({
   unread?: number;
   /** v0.15.0: attributed RAM in KiB; undefined draws no line. */
   ramKb?: number;
+  /** v0.15.0: closed by automatic reclaim; shows the Sleeping chip. */
+  sleeping?: boolean;
   onOpen: () => void;
   onOpenPrivate: () => void;
   onFillLogin: () => void;
@@ -500,6 +504,14 @@ function AccountRow({
               {unread > 99 ? "99+" : unread}
             </span>
           )}
+          {sleeping ? (
+            <span
+              className="account-sleep-chip"
+              title="Closed automatically to save memory — reopening restores it"
+            >
+              Sleeping
+            </span>
+          ) : null}
         </span>
         <span className="account-opened">
           {openedLabel(account.last_opened)}
@@ -2235,12 +2247,15 @@ function AppShell() {
   // v0.15.0: per-account RAM keyed `${appId}:${accountId}`. The scan can
   // stall on some PCs, so it races a timeout and never delays the poll.
   const [accountRam, setAccountRam] = useState<Map<string, number>>(new Map());
+  // v0.15.0: sleeping accounts (idle auto-close / LRU cap) keyed the same
+  // way, with their last attributed RAM for the "Memory saved" total.
+  const [sleeping, setSleeping] = useState<Map<string, number>>(new Map());
   const refreshWindowPins = useCallback(async () => {
     try {
       const ramTimeout = new Promise<AccountMemory[]>((resolve) =>
         setTimeout(() => resolve([]), 5000)
       );
-      const [wins, ram] = await Promise.all([
+      const [wins, ram, sleep] = await Promise.all([
         invoke<OpenAccountWindow[]>("list_open_account_windows"),
         Promise.race([
           invoke<AccountMemory[]>("account_memory").catch(
@@ -2248,6 +2263,7 @@ function AppShell() {
           ),
           ramTimeout,
         ]),
+        invoke<SleepInfo[]>("sleep_state").catch((): SleepInfo[] => []),
       ]);
       setOpenLabels(new Set(wins.map((w) => w.label)));
       setPinnedLabels(
@@ -2267,6 +2283,11 @@ function AppShell() {
         }
       }
       setAccountRam(ramMap);
+      const sleepMap = new Map<string, number>();
+      for (const s of sleep) {
+        sleepMap.set(`${s.appId}:${s.accountId}`, s.rssKb);
+      }
+      setSleeping(sleepMap);
     } catch {
       /* older backend without the command; the menu entry stays hidden */
     }
@@ -3349,6 +3370,11 @@ function AppShell() {
                     ? accountRam.get(`${r.app.id}:${r.account.id}`)
                     : undefined
                 }
+                sleepingFor={(r) =>
+                  r.kind === "account"
+                    ? sleeping.has(`${r.app.id}:${r.account.id}`)
+                    : false
+                }
                 onTileContextMenu={(r, x, y) => openTileMenu(r, x, y)}
               />
             )}
@@ -3486,6 +3512,15 @@ function AppShell() {
 
       <section className="panel">
         <h2>Library</h2>
+        {(() => {
+          const total = [...sleeping.values()].reduce((a, b) => a + b, 0);
+          return total > 0 ? (
+            <p className="muted small memory-saved">
+              Memory saved: {formatMb(total)} — reclaimed automatically from
+              idle apps.
+            </p>
+          ) : null;
+        })()}
         {loading ? (
           <p className="muted">Loading…</p>
         ) : apps.length === 0 ? (
@@ -3542,6 +3577,7 @@ function AppShell() {
                               app={app}
                               unread={unreadCounts.get(`${app.id}:${account.id}`)}
                               ramKb={accountRam.get(`${app.id}:${account.id}`)}
+                              sleeping={sleeping.has(`${app.id}:${account.id}`)}
                               onOpen={() => void handleOpenAccount(app, account)}
                               onOpenPrivate={() =>
                                 void handleOpenAccount(app, account, true, true)

@@ -734,6 +734,28 @@ input[type="color"] {
   color: #5b5e66;
 }
 
+/* v0.15.0: "Sleeping" chip — quiet, muted, no accent: it's a state note,
+   not a call to action. */
+.tile-sleep {
+  font-size: 11px;
+  color: #5b5e66;
+  white-space: nowrap;
+}
+
+.account-sleep-chip {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #5b5e66;
+  border: 1px solid #3a3d44;
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.memory-saved {
+  margin: -4px 0 8px;
+}
+
 .tile-icon .app-icon {
   width: 44px;
   height: 44px;

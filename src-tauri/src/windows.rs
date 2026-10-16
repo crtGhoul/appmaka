@@ -21,7 +21,8 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowB
 use crate::adblock::AdblockState;
 use crate::store::AppStore;
 
-fn unix_secs() -> u64 {
+/// v0.15.0: crate-visible so the sleep module can stamp entries.
+pub(crate) fn unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -535,6 +536,8 @@ pub fn open_account_placed(
     store.touch_account(app_id, account_id);
     // A window opened (or re-focused above): persist the session.
     crate::session::write_session(app);
+    // v0.15.0: the account is awake again — drop its saved figure.
+    crate::sleep::clear_sleep(app, app_id, account_id);
     Ok(())
 }
 
@@ -1882,6 +1885,9 @@ fn try_suspend_webview(window: &WebviewWindow) -> bool {
 use crate::pin::{CloseIntent, ClosePlan};
 
 pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIntent) {
+    // v0.15.0: only automatic reclaims bank "Memory saved" — user closes
+    // never count.
+    let automatic = matches!(intent, CloseIntent::Background);
     // Pinned windows (v0.9.9): the plan is pure and unit-tested —
     // background reclaims skip silently, user closes ask first, and
     // shutdown always proceeds.
@@ -1908,6 +1914,12 @@ pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIn
             if let Some(t) = tracked.remove(label) {
                 if let Some(dir) = t.private_dir {
                     delete_private_session_dir(&dir);
+                }
+                // v0.15.0: an automatic reclaim banks the last attributed
+                // RAM as saved (attribution is still present here — prune
+                // runs after). User closes never count.
+                if automatic && label.starts_with("acct-") {
+                    crate::sleep::record_sleep(app, &t.app_id, &t.account_id);
                 }
                 // v0.15.0: drop per-account process attribution once the
                 // account's last window is gone.

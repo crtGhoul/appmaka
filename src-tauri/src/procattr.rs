@@ -182,18 +182,15 @@ fn attributed_rss(
         .sum()
 }
 
-/// Per-account RSS for the tiles. One scan; accounts with no open window
-/// (or no captured processes yet) are omitted.
-#[tauri::command]
-pub fn account_memory(app: tauri::AppHandle) -> Vec<AccountMemory> {
+/// One memory-only scan as (pid, parent_pid, rss_kb), excluding ourselves.
+fn scan_processes() -> Vec<(u32, Option<u32>, u64)> {
     use sysinfo::{ProcessRefreshKind, RefreshKind, System};
     let sys = System::new_with_specifics(
         RefreshKind::nothing()
             .with_processes(ProcessRefreshKind::nothing().with_memory().without_tasks()),
     );
     let self_pid = std::process::id();
-    let processes: Vec<(u32, Option<u32>, u64)> = sys
-        .processes()
+    sys.processes()
         .iter()
         .filter_map(|(pid, proc_)| {
             let p = pid.as_u32();
@@ -202,7 +199,32 @@ pub fn account_memory(app: tauri::AppHandle) -> Vec<AccountMemory> {
             }
             Some((p, proc_.parent().map(|a| a.as_u32()), proc_.memory() / 1024))
         })
-        .collect();
+        .collect()
+}
+
+/// v0.15.0: attributed RSS for one account, used by the sleep module to
+/// bank the last-known figure at automatic-reclaim time.
+pub(crate) fn rss_for_key(
+    app: &tauri::AppHandle,
+    app_id: &str,
+    account_id: &str,
+) -> u64 {
+    let pids: HashSet<u32> = app
+        .try_state::<ProcessAttribution>()
+        .and_then(|a| {
+            a.inner.lock().ok().and_then(|m| {
+                m.get(&account_key(app_id, account_id)).cloned()
+            })
+        })
+        .unwrap_or_default();
+    attributed_rss(&scan_processes(), &pids)
+}
+
+/// Per-account RSS for the tiles. One scan; accounts with no open window
+/// (or no captured processes yet) are omitted.
+#[tauri::command]
+pub fn account_memory(app: tauri::AppHandle) -> Vec<AccountMemory> {
+    let processes = scan_processes();
     let map: HashMap<String, HashSet<u32>> = app
         .try_state::<ProcessAttribution>()
         .and_then(|a| a.inner.lock().ok().map(|m| m.clone()))
