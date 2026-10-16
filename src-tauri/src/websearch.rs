@@ -292,6 +292,31 @@ fn build_search_window(
     let mut builder = WebviewWindowBuilder::new(app, SEARCH_WINDOW_LABEL, WebviewUrl::External(url.clone()))
         .data_directory(data_dir.to_path_buf())
         .title(title);
+    // v0.15.1: re-arm the cursor reapply on EVERY navigation, like the
+    // account windows do from their navigation hook. The search window
+    // only had the reuse path's timed passes, which are scheduled from
+    // when the navigation is ISSUED — a results page that commits late
+    // (slow engine, VPN, a consent interstitial) outlived both passes,
+    // and the passes were discarded with the previous document. The
+    // hook never blocks the navigation: it hands off to a detached
+    // thread and always allows. Ungated — the reuse path already
+    // reapplies on all platforms.
+    {
+        let nav_app = app.clone();
+        builder = builder.on_navigation(move |_nav_url: &url::Url| {
+            let app = nav_app.clone();
+            std::thread::Builder::new()
+                .name("appmaka-search-cursor".to_string())
+                .spawn(move || {
+                    crate::windows::schedule_cursor_reapply(
+                        app,
+                        SEARCH_WINDOW_LABEL.to_string(),
+                    );
+                })
+                .ok();
+            true
+        });
+    }
     // v0.9.6 (Windows): frameless + our caption strip, like account
     // windows. Linux keeps native decorations.
     #[cfg(windows)]

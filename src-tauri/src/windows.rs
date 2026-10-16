@@ -872,18 +872,19 @@ pub(crate) fn apply_cursor_live(app: &AppHandle, style: &str) {
 /// Re-apply the *current* saved cursor style shortly after a
 /// navigation. A window built before a settings change re-runs its
 /// build-time initialization script (old style) on every navigation;
-/// this converges it to the saved style. Two passes, because an eval
-/// that lands before the new document commits is discarded with the
-/// old one — the same-style guard in the script makes a redundant
-/// pass a no-op. Called from the navigation hooks (Windows-only —
-/// they ride the retint pipeline) and from the search window's reuse
-/// path (all platforms). Never blocks the caller: everything here
-/// runs on a detached thread.
+/// this converges it to the saved style. Passes at widening delays,
+/// because an eval that lands before the new document commits is
+/// discarded with the old one — the same-style guard in the script
+/// makes a redundant pass a no-op. The third pass (v0.15.1) covers
+/// slow commits (VPN, consent interstitials). Called from the
+/// navigation hooks and from the search window's reuse path (all
+/// platforms). Never blocks the caller: everything here runs on a
+/// detached thread.
 pub(crate) fn schedule_cursor_reapply(app: AppHandle, label: String) {
     let _ = std::thread::Builder::new()
         .name("appmaka-cursor-reapply".to_string())
         .spawn(move || {
-            for delay_ms in [600, 2000] {
+            for delay_ms in [600, 2000, 4000] {
                 std::thread::sleep(Duration::from_millis(delay_ms));
                 let style = app
                     .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
