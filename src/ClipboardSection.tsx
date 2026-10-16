@@ -13,6 +13,7 @@ interface DictationStatus {
   recording: boolean;
   transcribing: boolean;
   hotkey: string;
+  holdToTalk: boolean;
 }
 
 /**
@@ -104,6 +105,18 @@ export function ClipboardSection() {
       setDictError(errMsg(err));
     } finally {
       setDownloading(false);
+    }
+  }
+
+  async function saveDictHold(enabled: boolean) {
+    setDictError(null);
+    try {
+      const st = await invoke<DictationStatus>("set_dictation_hold", {
+        enabled,
+      });
+      setDict(st);
+    } catch (err) {
+      setDictError(errMsg(err));
     }
   }
 
@@ -333,8 +346,9 @@ export function ClipboardSection() {
           Dictation
         </span>
         <p className="muted small" style={{ margin: "0 0 12px" }}>
-          Press the dictation hotkey in any window to start, and again to
-          stop. What you said is pasted where you were typing, copied to the
+          Use the dictation hotkey in any window — hold it while you
+          speak, or press to start and stop (see Hold to talk below).
+          What you said is pasted where you were typing, copied to the
           clipboard, and kept under the clipboard popup's Dictation tab —
           your last 50 transcripts. It all runs on this PC; the speech model
           only loads while you dictate, so it costs no memory the rest of
@@ -364,6 +378,21 @@ export function ClipboardSection() {
               : "No dictation hotkey set."}
           </p>
         )}
+        <label style={{ display: "block", fontSize: 14, marginBottom: 4, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={dict?.holdToTalk ?? true}
+            onChange={(e) => void saveDictHold(e.target.checked)}
+            style={{ marginRight: 8 }}
+          />
+          Hold to talk
+        </label>
+        <p className="muted small" style={{ margin: "0 0 12px" }}>
+          On: hold the shortcut down, speak, and let go to send. Off:
+          press once to start, and again (or Esc) to stop. The clipboard
+          popup's Dictate button always works as press-to-start,
+          press-to-stop.
+        </p>
         <div role="radiogroup" aria-label="Speech model" style={{ marginBottom: 8 }}>
           <label style={{ display: "block", marginBottom: 6, cursor: "pointer" }}>
             <input

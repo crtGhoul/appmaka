@@ -77,8 +77,16 @@ struct DictationFile {
     /// "tiny" or "base".
     #[serde(default = "default_model")]
     model: String,
+    /// Hold-to-talk (v0.14.2): hold the hotkey to record, let go to
+    /// send. Off = toggle (press to start, press again or Esc to stop).
+    #[serde(default = "default_hold_to_talk")]
+    hold_to_talk: bool,
     #[serde(default)]
     transcripts: Vec<Transcript>,
+}
+
+fn default_hold_to_talk() -> bool {
+    true
 }
 
 fn default_hotkey() -> String {
@@ -93,6 +101,7 @@ impl Default for DictationFile {
         Self {
             hotkey: default_hotkey(),
             model: default_model(),
+            hold_to_talk: default_hold_to_talk(),
             transcripts: Vec::new(),
         }
     }
@@ -100,6 +109,10 @@ impl Default for DictationFile {
 
 struct Session {
     stop: Arc<AtomicBool>,
+    /// True only for a hold-to-talk take started from the hotkey: the
+    /// recorder ends it when the combo is released, and repeat hotkey
+    /// events from the held keys are ignored (they are not a stop).
+    hold_armed: bool,
 }
 
 pub struct DictationState {
@@ -211,11 +224,14 @@ pub struct DictationStatus {
     pub recording: bool,
     pub transcribing: bool,
     pub hotkey: String,
+    pub hold_to_talk: bool,
 }
 
 fn status(app: &AppHandle) -> DictationStatus {
-    let (model, hotkey) = with_data(app, |d| (d.model.clone(), d.hotkey.clone()))
-        .unwrap_or_else(|_| (default_model(), default_hotkey()));
+    let (model, hotkey, hold_to_talk) = with_data(app, |d| {
+        (d.model.clone(), d.hotkey.clone(), d.hold_to_talk)
+    })
+    .unwrap_or_else(|_| (default_model(), default_hotkey(), default_hold_to_talk()));
     let model_installed = model_path(app, &model).map(|p| p.exists()).unwrap_or(false);
     let binary_installed = binary_path(app).is_some();
     let state = app.try_state::<DictationState>();
@@ -235,6 +251,7 @@ fn status(app: &AppHandle) -> DictationStatus {
         recording,
         transcribing,
         hotkey,
+        hold_to_talk,
     }
 }
 
@@ -279,6 +296,14 @@ pub fn set_dictation_model(app: AppHandle, model: String) -> Result<DictationSta
         return Err("Unknown speech model.".to_string());
     }
     with_data(&app, |d| d.model = model)?;
+    save(&app)?;
+    emit_state(&app);
+    Ok(status(&app))
+}
+
+#[tauri::command]
+pub fn set_dictation_hold(app: AppHandle, enabled: bool) -> Result<DictationStatus, String> {
+    with_data(&app, |d| d.hold_to_talk = enabled)?;
     save(&app)?;
     emit_state(&app);
     Ok(status(&app))
@@ -491,6 +516,82 @@ fn esc_pressed() -> bool {
     false
 }
 
+/// A parsed hotkey combo for hold-to-talk release detection: which
+/// modifiers must be down and the trigger key's virtual-key code
+/// (0 = unrecognized, then only modifier release can end the take).
+#[derive(Debug, Clone, Copy, Default)]
+struct ComboKeys {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    super_key: bool,
+    key: u16,
+}
+
+fn parse_combo(hotkey: &str) -> ComboKeys {
+    let mut combo = ComboKeys::default();
+    for part in hotkey.split('+') {
+        let p = part.trim();
+        match p.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => combo.ctrl = true,
+            "alt" => combo.alt = true,
+            "shift" => combo.shift = true,
+            "super" | "win" | "windows" | "meta" | "cmd" | "command" => combo.super_key = true,
+            "space" => combo.key = 0x20,
+            "tab" => combo.key = 0x09,
+            "enter" | "return" => combo.key = 0x0D,
+            other => {
+                if other.len() == 1 {
+                    combo.key = other.to_ascii_uppercase().as_bytes()[0] as u16;
+                } else if let Some(n) = other
+                    .strip_prefix('f')
+                    .and_then(|n| n.parse::<u16>().ok())
+                    .filter(|n| (1..=24).contains(n))
+                {
+                    combo.key = 0x70 + n - 1;
+                }
+            }
+        }
+    }
+    combo
+}
+
+#[cfg(windows)]
+fn key_down(vk: u16) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
+}
+
+/// Hold-to-talk end condition: the trigger key or any combo modifier
+/// has been let go. Polled with GetAsyncKeyState — no keyboard hook,
+/// so it composes with Dictation compatibility mode like the rest of
+/// dictation. Off Windows there is no poll source; the take then ends
+/// via the stop flag / Esc / cap like a toggle take.
+#[cfg(windows)]
+fn combo_released(combo: &ComboKeys) -> bool {
+    if combo.key != 0 && !key_down(combo.key) {
+        return true;
+    }
+    if combo.ctrl && !key_down(0x11) {
+        return true;
+    }
+    if combo.alt && !key_down(0x12) {
+        return true;
+    }
+    if combo.shift && !key_down(0x10) {
+        return true;
+    }
+    if combo.super_key && !key_down(0x5B) && !key_down(0x5C) {
+        return true;
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn combo_released(_combo: &ComboKeys) -> bool {
+    false
+}
+
 /// Windows: synthesize Ctrl+V into the focused window (the pill never
 /// takes focus, so focus is still on the user's target).
 #[cfg(windows)]
@@ -523,22 +624,28 @@ fn send_ctrl_v() {
 
 /// Hotkey path (main.rs dispatch): fire-and-forget toggle.
 pub fn toggle(app: &AppHandle) {
-    let _ = toggle_inner(app.clone());
+    let _ = toggle_inner(app.clone(), true);
 }
 
 #[tauri::command]
 pub fn toggle_dictation(app: AppHandle) -> Result<(), String> {
-    toggle_inner(app)
+    toggle_inner(app, false)
 }
 
-fn toggle_inner(app: AppHandle) -> Result<(), String> {
+fn toggle_inner(app: AppHandle, via_hotkey: bool) -> Result<(), String> {
     let state = app
         .try_state::<DictationState>()
         .ok_or("dictation state missing")?;
-    // Stop path: flip the flag; the recorder thread finalizes.
+    // Stop path: flip the flag; the recorder thread finalizes. One
+    // exception: during a hold-to-talk take, extra hotkey events are
+    // just key-repeat from the held combo — the release ends the take,
+    // so a repeat must not stop it early.
     {
         let session = state.session.lock().unwrap();
         if let Some(s) = session.as_ref() {
+            if s.hold_armed && via_hotkey {
+                return Ok(());
+            }
             s.stop.store(true, Ordering::SeqCst);
             return Ok(());
         }
@@ -549,16 +656,20 @@ fn toggle_inner(app: AppHandle) -> Result<(), String> {
         crate::errors::record(&app, "dictation", msg, "", true);
         return Err(msg.to_string());
     }
+    let hold_armed = st.hold_to_talk && via_hotkey;
     let stop = Arc::new(AtomicBool::new(false));
     {
         let mut session = state.session.lock().unwrap();
-        *session = Some(Session { stop: stop.clone() });
+        *session = Some(Session {
+            stop: stop.clone(),
+            hold_armed,
+        });
     }
     emit_state(&app);
     let app2 = app.clone();
     if let Err(e) = std::thread::Builder::new()
         .name("appmaka-dictation".to_string())
-        .spawn(move || record_and_transcribe(app2, stop))
+        .spawn(move || record_and_transcribe(app2, stop, hold_armed, st.hotkey.clone()))
     {
         if let Some(state) = app.try_state::<DictationState>() {
             *state.session.lock().unwrap() = None;
@@ -576,8 +687,8 @@ fn finish_session(app: &AppHandle) {
     emit_state(app);
 }
 
-fn record_and_transcribe(app: AppHandle, stop: Arc<AtomicBool>) {
-    let result = run_session(&app, &stop);
+fn record_and_transcribe(app: AppHandle, stop: Arc<AtomicBool>, hold_armed: bool, hotkey: String) {
+    let result = run_session(&app, &stop, hold_armed, &hotkey);
     #[cfg(windows)]
     pill::hide();
     if let Err(e) = result {
@@ -586,7 +697,12 @@ fn record_and_transcribe(app: AppHandle, stop: Arc<AtomicBool>) {
     finish_session(&app);
 }
 
-fn run_session(app: &AppHandle, stop: &AtomicBool) -> Result<(), String> {
+fn run_session(
+    app: &AppHandle,
+    stop: &AtomicBool,
+    hold_armed: bool,
+    hotkey: &str,
+) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
     let host = cpal::default_host();
@@ -637,13 +753,18 @@ fn run_session(app: &AppHandle, stop: &AtomicBool) -> Result<(), String> {
         .map_err(|e| format!("Couldn't start the microphone: {e}"))?;
 
     #[cfg(windows)]
-    pill::show();
+    pill::show(hold_armed);
+    let combo = parse_combo(hotkey);
 
     let started = std::time::Instant::now();
     loop {
         // The hotkey and Esc end the take the same way (v0.14.1: Esc is
         // the user's "back out" — it delivers, it does not discard).
+        // A hold-to-talk take also ends the moment the combo is let go.
         if stop.load(Ordering::SeqCst) || esc_pressed() {
+            break;
+        }
+        if hold_armed && combo_released(&combo) {
             break;
         }
         if started.elapsed().as_secs() >= MAX_RECORD_SECS {
@@ -837,13 +958,17 @@ mod pill {
     };
 
     static PILL_HWND: AtomicIsize = AtomicIsize::new(0);
+    /// Set by show(); the paint code (window proc) reads it to pick the
+    /// hint text for the active dictation mode.
+    static PILL_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     const PILL_W: i32 = 380;
     const PILL_H: i32 = 44;
 
-    pub fn show() {
+    pub fn show(hold: bool) {
         if PILL_HWND.load(Ordering::SeqCst) != 0 {
             return;
         }
+        PILL_HOLD.store(hold, Ordering::SeqCst);
         std::thread::Builder::new()
             .name("appmaka-dictation-pill".to_string())
             .spawn(|| unsafe { run() })
@@ -966,7 +1091,11 @@ mod pill {
         let old_font = SelectObject(dc, HGDIOBJ(font.0));
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, windows::Win32::Foundation::COLORREF(0x00F2F2F5));
-        let mut text: Vec<u16> = "Listening — hotkey or Esc to stop"
+        let mut text: Vec<u16> = (if PILL_HOLD.load(Ordering::SeqCst) {
+            "Listening — let go to send"
+        } else {
+            "Listening — hotkey or Esc to stop"
+        })
             .encode_utf16()
             .collect();
         let mut trect = RECT { left: 34, top: 0, right: PILL_W - 8, bottom: PILL_H };
@@ -980,6 +1109,22 @@ mod pill {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combo_parses_modifiers_and_key() {
+        let c = parse_combo("Ctrl+Super+Z");
+        assert!(c.ctrl && c.super_key && !c.alt && !c.shift);
+        assert_eq!(c.key, b'Z' as u16);
+        let c = parse_combo("Ctrl+Alt+D");
+        assert!(c.ctrl && c.alt && !c.super_key);
+        assert_eq!(c.key, b'D' as u16);
+        let c = parse_combo("Shift+F5");
+        assert!(c.shift);
+        assert_eq!(c.key, 0x74);
+        let c = parse_combo("Alt+Space");
+        assert!(c.alt);
+        assert_eq!(c.key, 0x20);
+    }
 
     #[test]
     fn clean_drops_silence_markers() {

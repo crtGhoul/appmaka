@@ -1385,6 +1385,7 @@ fn main() {
             dictation::clear_dictation_transcripts,
             dictation::copy_dictation_transcript,
             dictation::set_dictation_model,
+            dictation::set_dictation_hold,
             dictation::set_dictation_hotkey,
             dictation::dictation_hotkey_status,
             dictation::download_dictation,
