@@ -1373,6 +1373,13 @@ fn main() {
             launcher_settings::set_accent,
             launcher_settings::set_theme,
             launcher_settings::set_tile_size,
+            // v0.16.0: cursor color + launcher customization
+            launcher_settings::set_custom_cursor_color,
+            launcher_settings::set_tile_corners,
+            launcher_settings::set_launcher_background,
+            launcher_settings::set_show_badges,
+            launcher_settings::set_show_tile_ram,
+            launcher_settings::set_show_sleep_labels,
             launcher_settings::set_dictation_compat,
             launcher_settings::set_open_as_tabbed,
             launcher_settings::set_allow_popups_globally,

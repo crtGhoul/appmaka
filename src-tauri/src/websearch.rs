@@ -351,12 +351,9 @@ fn build_search_window(
     // build_search_url.
     builder = builder.initialization_script(search_chrome_js(&search_engine(app)));
     builder = builder.initialization_script(cosmetic_init_script(SEARCH_CHROME_CSS));
-    // v0.12.0: custom page cursor, same as account windows. Skipped when off.
-    let cursor_style = app
-        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
-        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
-        .unwrap_or_default();
-    let cursor_js = crate::windows::cursor_chrome_js(&cursor_style);
+    // v0.12.0: custom page cursor, same as account windows (saved style
+    // + color via the shared funnel). Skipped when off.
+    let cursor_js = crate::windows::saved_cursor_js(app);
     if !cursor_js.is_empty() {
         builder = builder.initialization_script(cursor_js);
     }

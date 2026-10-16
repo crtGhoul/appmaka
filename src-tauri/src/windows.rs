@@ -651,41 +651,132 @@ pub(crate) fn saved_cursor_js(app: &AppHandle) -> String {
         .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
         .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
         .unwrap_or_default();
-    cursor_chrome_js(&style)
+    let (hex, rgb) = resolve_cursor_colors(app);
+    cursor_chrome_js(&style, &hex, &rgb)
 }
 
-pub(crate) fn cursor_chrome_js(style: &str) -> String {
+/// Resolve the saved cursor color to (hex, "r,g,b") for the script
+/// generator (v0.16.0). "accent" follows the launcher accent's bright
+/// tone; anything unknown falls back to the brand violet.
+pub(crate) fn resolve_cursor_colors(app: &AppHandle) -> (String, String) {
+    let (color, accent) = app
+        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| {
+            s.lock()
+                .ok()
+                .map(|s| (s.custom_cursor_color.clone(), s.accent.clone()))
+        })
+        .unwrap_or_default();
+    cursor_palette(&color, &accent)
+}
+
+fn cursor_palette(color: &str, accent: &str) -> (String, String) {
+    let (hex, rgb): (&str, &str) = match color {
+        "white" => ("#f8fafc", "248,250,252"),
+        "sky" => ("#38bdf8", "56,189,248"),
+        "lime" => ("#a3e635", "163,230,53"),
+        "amber" => ("#fbbf24", "251,191,36"),
+        "rose" => ("#fb7185", "251,113,133"),
+        "accent" => {
+            let hex = crate::launcher_settings::accent_text_hex(accent);
+            return (hex.to_string(), hex_rgb(hex));
+        }
+        _ => ("#8b5cf6", "139,92,246"),
+    };
+    (hex.to_string(), rgb.to_string())
+}
+
+/// "#fb7185" -> "251,113,133" (for rgba() strings in generated JS).
+fn hex_rgb(hex: &str) -> String {
+    let h = hex.trim_start_matches('#');
+    if h.len() != 6 {
+        return "139,92,246".to_string();
+    }
+    let parse = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
+    format!("{},{},{}", parse(0), parse(2), parse(4))
+}
+
+pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
     let dots: usize = match style {
-        "dot" | "ring" | "halo" | "pulse" | "crosshair" => 1,
+        "dot" | "ring" | "halo" | "pulse" | "crosshair" | "diamond" | "arrow" | "plus"
+        | "star" | "bullseye" | "blob" | "neon" | "ghost" | "firefly" => 1,
         "orbit" | "ripple" => 2,
+        // v0.16.0: bubbles — a head with four orbiters of growing radius.
+        "bubbles" => 5,
         "trail" | "comet" => 6,
+        // v0.16.0: snake (slow-lerp trail) and rainbow (hue trail).
+        "snake" | "rainbow" => 8,
         // v0.13.18: stardust — a longer, jittery particle trail.
         "stardust" => 10,
         _ => return String::new(),
     };
-    let shape_css = match style {
+    // @C@ = color hex, @R@ = "r,g,b" for rgba(); substituted below.
+    let shape_template = match style {
         "ring" | "pulse" => {
             "width:26px;height:26px;margin:-13px 0 0 -13px;\
-             border:2px solid #8b5cf6;border-radius:50%;background:transparent;"
+             border:2px solid @C@;border-radius:50%;background:transparent;"
         }
         "halo" => {
             "width:12px;height:12px;margin:-6px 0 0 -6px;\
-             border-radius:50%;background:#8b5cf6;\
-             box-shadow:0 0 14px 5px rgba(139,92,246,0.55);"
+             border-radius:50%;background:@C@;\
+             box-shadow:0 0 14px 5px rgba(@R@,0.55);"
         }
         // v0.13.18: crosshair — a thin reticle ring with a center dot.
         "crosshair" => {
             "width:24px;height:24px;margin:-12px 0 0 -12px;\
-             border:1.5px solid #8b5cf6;border-radius:50%;\
-             background:radial-gradient(circle,#8b5cf6 2px,transparent 3px);"
+             border:1.5px solid @C@;border-radius:50%;\
+             background:radial-gradient(circle,@C@ 2px,transparent 3px);"
         }
-        // "dot" and the trail head share the dot look; trail followers
-        // are smaller and fade via the per-dot opacity below.
+        // v0.16.0 shapes: single elements, clip-path / gradient drawn.
+        "diamond" => {
+            "width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:2px;\
+             background:@C@;rotate:45deg;"
+        }
+        "arrow" => {
+            "width:15px;height:15px;margin:-1px 0 0 -1px;background:@C@;\
+             clip-path:polygon(0 0,0 100%,30% 74%,47% 100%,61% 93%,45% 68%,76% 68%);"
+        }
+        "plus" => {
+            "width:15px;height:15px;margin:-7px 0 0 -7px;background:@C@;\
+             clip-path:polygon(35% 0,65% 0,65% 35%,100% 35%,100% 65%,65% 65%,\
+             65% 100%,35% 100%,35% 65%,0 65%,0 35%,35% 35%);"
+        }
+        "star" => {
+            "width:19px;height:19px;margin:-9px 0 0 -9px;background:@C@;\
+             clip-path:polygon(50% 0,63% 37%,100% 50%,63% 63%,50% 100%,37% 63%,\
+             0 50%,37% 37%);"
+        }
+        "bullseye" => {
+            "width:21px;height:21px;margin:-10px 0 0 -10px;border-radius:50%;\
+             background:radial-gradient(circle,@C@ 0 2px,transparent 3px 5px,\
+             @C@ 6px 7px,transparent 8px);"
+        }
+        "blob" => {
+            "width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;\
+             background:@C@;box-shadow:0 0 14px 7px rgba(@R@,0.35);"
+        }
+        "neon" => {
+            "width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%;\
+             background:@C@;box-shadow:0 0 6px 2px rgba(@R@,0.85),\
+             0 0 20px 10px rgba(@R@,0.35);"
+        }
+        "ghost" => {
+            "width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:50%;\
+             border:2px solid rgba(@R@,0.55);background:rgba(@R@,0.08);"
+        }
+        "firefly" => {
+            "width:9px;height:9px;margin:-4px 0 0 -4px;border-radius:50%;\
+             background:@C@;box-shadow:0 0 12px 5px rgba(@R@,0.55);"
+        }
+        // "dot" and the trail heads (trail/comet/snake/rainbow/bubbles)
+        // share the dot look; followers are smaller and fade via the
+        // per-dot opacity below.
         _ => {
             "width:8px;height:8px;margin:-4px 0 0 -4px;\
-             border-radius:50%;background:#8b5cf6;"
+             border-radius:50%;background:@C@;"
         }
     };
+    let shape_css = shape_template.replace("@C@", hex).replace("@R@", rgb);
     format!(
         r#"(function () {{
   try {{
@@ -737,10 +828,14 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
           "position:fixed;left:0;top:0;z-index:2147483647;" +
           "pointer-events:none;will-change:transform,opacity;opacity:0;" +
           "width:26px;height:26px;margin:-13px 0 0 -13px;" +
-          "border:2px solid #8b5cf6;border-radius:50%;background:transparent;";
+          "border:2px solid {color_hex};border-radius:50%;background:transparent;";
+      }}
+      if (STYLE === "rainbow") {{
+        // Each dot gets its own hue, head first (v0.16.0).
+        d.style.background = "hsl(" + Math.round(i * 360 / N) + ",90%,65%)";
       }}
       if (STYLE === "comet" && i === 0) {{
-        d.style.boxShadow = "0 0 10px 3px rgba(139,92,246,0.6)";
+        d.style.boxShadow = "0 0 10px 3px rgba({color_rgb},0.6)";
       }}
       document.documentElement.appendChild(d);
       var op = N > 1 ? 0.9 * (1 - i / N) + 0.1 : 1;
@@ -783,16 +878,30 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
       var px = tx, py = ty;
       for (var i = 0; i < nodes.length; i++) {{
         var n = nodes[i];
-        if (i === 0) {{ n.x = px; n.y = py; }}
-        else if (STYLE === "orbit") {{
-          var a = now / 350;
-          n.x = px + Math.cos(a) * 16;
-          n.y = py + Math.sin(a) * 16;
+        if (i === 0) {{
+          n.x = px; n.y = py;
+          if (STYLE === "firefly") {{
+            // The head itself wanders a few px around the pointer.
+            n.x += Math.sin(now / 130) * 3;
+            n.y += Math.cos(now / 170) * 3;
+          }}
+        }}
+        else if (STYLE === "orbit" || STYLE === "bubbles") {{
+          // Orbit: one follower, fixed radius. Bubbles: each follower
+          // gets a wider, slower orbit of its own (v0.16.0).
+          var a = STYLE === "orbit" ? now / 350 : now / (300 + i * 80) + i * 1.7;
+          var r = STYLE === "orbit" ? 16 : 9 + i * 5;
+          n.x = px + Math.cos(a) * r;
+          n.y = py + Math.sin(a) * r;
         }}
         else if (STYLE === "ripple") {{ n.x = px; n.y = py; }}
         else if (STYLE === "stardust") {{
           n.x += (px - n.x) * 0.35 + Math.sin(now / 90 + i * 1.7) * 0.7;
           n.y += (py - n.y) * 0.35 + Math.cos(now / 110 + i * 2.3) * 0.7;
+        }}
+        else if (STYLE === "snake") {{
+          // A lazier lerp than trail — the body swings wide (v0.16.0).
+          n.x += (px - n.x) * 0.22; n.y += (py - n.y) * 0.22;
         }}
         else {{ n.x += (px - n.x) * 0.4; n.y += (py - n.y) * 0.4; }}
         var tr = "translate(" + n.x + "px," + n.y + "px)";
@@ -827,8 +936,10 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
   }} catch(e) {{}}
 }})();"#,
         dots = dots,
-        shape_css_json = serde_json::to_string(shape_css).unwrap_or_default(),
+        shape_css_json = serde_json::to_string(&shape_css).unwrap_or_default(),
         style_json = serde_json::to_string(style).unwrap_or_default(),
+        color_hex = hex,
+        color_rgb = rgb,
     )
 }
 
@@ -837,11 +948,12 @@ pub(crate) fn cursor_chrome_js(style: &str) -> String {
 /// any previous controller first), or a teardown-only snippet for
 /// "off" — `cursor_chrome_js` returns "" for off because build-time
 /// callers skip injection, but a live page needs the old cursor gone.
-pub(crate) fn cursor_live_apply_js(style: &str) -> String {
+pub(crate) fn cursor_live_apply_js(style: &str, hex: &str, rgb: &str) -> String {
     match style {
         "dot" | "ring" | "trail" | "halo" | "pulse" | "orbit" | "comet" | "crosshair"
-        | "ripple" | "stardust" => {
-            cursor_chrome_js(style)
+        | "ripple" | "stardust" | "diamond" | "arrow" | "plus" | "star" | "bullseye"
+        | "blob" | "neon" | "ghost" | "firefly" | "snake" | "rainbow" | "bubbles" => {
+            cursor_chrome_js(style, hex, rgb)
         }
         _ => "(function(){try{if(window.__appmakaCursor&&window.__appmakaCursor.destroy)window.__appmakaCursor.destroy();}catch(e){}})();"
             .to_string(),
@@ -861,7 +973,8 @@ fn cursor_window_label(label: &str) -> bool {
 /// broadcast). Best-effort: a window mid-navigation may drop the eval;
 /// the navigation re-apply below converges it on the next page load.
 pub(crate) fn apply_cursor_live(app: &AppHandle, style: &str) {
-    let js = cursor_live_apply_js(style);
+    let (hex, rgb) = resolve_cursor_colors(app);
+    let js = cursor_live_apply_js(style, &hex, &rgb);
     for (label, window) in app.webview_windows() {
         if cursor_window_label(&label) {
             let _ = window.eval(&js);
@@ -893,7 +1006,8 @@ pub(crate) fn schedule_cursor_reapply(app: AppHandle, label: String) {
                 let Some(window) = app.get_webview_window(&label) else {
                     return;
                 };
-                let _ = window.eval(cursor_live_apply_js(&style));
+                let (hex, rgb) = resolve_cursor_colors(&app);
+                let _ = window.eval(cursor_live_apply_js(&style, &hex, &rgb));
             }
         });
 }
@@ -2578,15 +2692,15 @@ mod tests {
 
     #[test]
     fn cursor_chrome_off_is_empty() {
-        assert!(cursor_chrome_js("off").is_empty());
-        assert!(cursor_chrome_js("").is_empty());
-        assert!(cursor_chrome_js("bogus").is_empty());
+        assert!(cursor_chrome_js("off", "#8b5cf6", "139,92,246").is_empty());
+        assert!(cursor_chrome_js("", "#8b5cf6", "139,92,246").is_empty());
+        assert!(cursor_chrome_js("bogus", "#8b5cf6", "139,92,246").is_empty());
     }
 
     #[test]
     fn cursor_chrome_styles() {
         for style in ["dot", "ring", "trail", "halo", "pulse", "orbit", "comet", "crosshair", "ripple", "stardust"] {
-            let js = cursor_chrome_js(style);
+            let js = cursor_chrome_js(style, "#8b5cf6", "139,92,246");
             assert!(!js.is_empty(), "{style}");
             // Native cursor hidden; dots never intercept clicks.
             assert!(js.contains("cursor:none"), "{style}");
@@ -2596,16 +2710,52 @@ mod tests {
             assert!(js.contains("translate("), "{style}");
         }
         // Trail has followers; dot/ring are a single node.
-        assert!(cursor_chrome_js("trail").contains("var N = 6"));
-        assert!(cursor_chrome_js("dot").contains("var N = 1"));
+        assert!(cursor_chrome_js("trail", "#8b5cf6", "139,92,246").contains("var N = 6"));
+        assert!(cursor_chrome_js("dot", "#8b5cf6", "139,92,246").contains("var N = 1"));
         // v0.13.10 styles: halo glows, orbit has a satellite, comet is
         // a glowing trail.
-        assert!(cursor_chrome_js("halo").contains("box-shadow"));
-        assert!(cursor_chrome_js("halo").contains("var N = 1"));
-        assert!(cursor_chrome_js("orbit").contains("var N = 2"));
-        assert!(cursor_chrome_js("comet").contains("var N = 6"));
-        assert!(cursor_chrome_js("comet").contains("boxShadow"));
-        assert!(cursor_chrome_js("pulse").contains("scale("));
+        assert!(cursor_chrome_js("halo", "#8b5cf6", "139,92,246").contains("box-shadow"));
+        assert!(cursor_chrome_js("halo", "#8b5cf6", "139,92,246").contains("var N = 1"));
+        assert!(cursor_chrome_js("orbit", "#8b5cf6", "139,92,246").contains("var N = 2"));
+        assert!(cursor_chrome_js("comet", "#8b5cf6", "139,92,246").contains("var N = 6"));
+        assert!(cursor_chrome_js("comet", "#8b5cf6", "139,92,246").contains("boxShadow"));
+        assert!(cursor_chrome_js("pulse", "#8b5cf6", "139,92,246").contains("scale("));
+    }
+
+    #[test]
+    fn cursor_chrome_styles_v016() {
+        // The v0.16.0 batch installs like the originals and carries the
+        // caller's color (no leftover brand violet when recolored).
+        for style in [
+            "diamond", "arrow", "plus", "star", "bullseye", "blob", "neon", "ghost",
+            "firefly", "snake", "rainbow", "bubbles",
+        ] {
+            let js = cursor_chrome_js(style, "#fb7185", "251,113,133");
+            assert!(!js.is_empty(), "{style}");
+            assert!(js.contains("cursor:none"), "{style}");
+            assert!(js.contains("__appmakaCursor"), "{style}");
+        }
+        assert!(cursor_chrome_js("snake", "#8b5cf6", "139,92,246").contains("var N = 8"));
+        assert!(cursor_chrome_js("rainbow", "#8b5cf6", "139,92,246").contains("var N = 8"));
+        assert!(cursor_chrome_js("bubbles", "#8b5cf6", "139,92,246").contains("var N = 5"));
+        // Color substitution reaches shapes and glows.
+        let rose = cursor_chrome_js("neon", "#fb7185", "251,113,133");
+        assert!(rose.contains("#fb7185"));
+        assert!(rose.contains("251,113,133"));
+        assert!(!rose.contains("#8b5cf6"));
+        // Rainbow recolors its own dots in JS, hues present.
+        assert!(cursor_chrome_js("rainbow", "#8b5cf6", "139,92,246").contains("hsl("));
+    }
+
+    #[test]
+    fn cursor_palette_resolution() {
+        assert_eq!(cursor_palette("violet", "indigo").0, "#8b5cf6");
+        assert_eq!(cursor_palette("bogus", "indigo").0, "#8b5cf6");
+        assert_eq!(cursor_palette("rose", "indigo").1, "251,113,133");
+        // "accent" follows the accent's bright tone.
+        assert_eq!(cursor_palette("accent", "rose").0, "#fda4af");
+        assert_eq!(cursor_palette("accent", "rose").1, "253,164,175");
+        assert_eq!(hex_rgb("#38bdf8"), "56,189,248");
     }
 
     #[test]
@@ -2614,7 +2764,7 @@ mod tests {
         // window.__appmakaCursor with its style + destroy(), and
         // re-running with a different style destroys the old one.
         for style in ["dot", "ring", "trail", "halo", "pulse", "orbit", "comet", "crosshair", "ripple", "stardust"] {
-            let js = cursor_chrome_js(style);
+            let js = cursor_chrome_js(style, "#8b5cf6", "139,92,246");
             assert!(js.contains("__appmakaCursor"), "{style}");
             assert!(js.contains("destroy"), "{style}");
             assert!(js.contains(&format!("\"{style}\"")), "{style}");
@@ -2623,7 +2773,7 @@ mod tests {
 
     #[test]
     fn cursor_live_apply_off_is_teardown_only() {
-        let js = cursor_live_apply_js("off");
+        let js = cursor_live_apply_js("off", "#8b5cf6", "139,92,246");
         assert!(!js.is_empty());
         assert!(js.contains("__appmakaCursor"));
         assert!(js.contains("destroy"));
@@ -2631,7 +2781,10 @@ mod tests {
         assert!(!js.contains("cursor-dot"));
         assert!(!js.contains("cursor:none"));
         // A live style applies the full install script verbatim.
-        assert_eq!(cursor_live_apply_js("ring"), cursor_chrome_js("ring"));
+        assert_eq!(
+            cursor_live_apply_js("ring", "#8b5cf6", "139,92,246"),
+            cursor_chrome_js("ring", "#8b5cf6", "139,92,246")
+        );
     }
 
     #[test]

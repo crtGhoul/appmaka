@@ -158,9 +158,33 @@ pub struct LauncherSettings {
     /// or "light". The frontend resolves "system" live.
     #[serde(default = "default_theme")]
     pub theme: String,
-    /// Launcher tile size (v0.13.17): "cozy" (default) or "compact".
+    /// Launcher tile size (v0.13.17): "cozy" (default), "compact", or
+    /// "large" (v0.16.0).
     #[serde(default = "default_tile_size")]
     pub tile_size: String,
+    /// Drawn-cursor color (v0.16.0): "violet" (default), "accent"
+    /// (follow the launcher accent), "white", "sky", "lime", "amber",
+    /// or "rose". Old files migrate to "violet" (the pre-0.16.0 look).
+    #[serde(default = "default_custom_cursor_color")]
+    pub custom_cursor_color: String,
+    /// Launcher tile corners (v0.16.0): "round" (default), "soft", or
+    /// "sharp". Old files migrate to "round".
+    #[serde(default = "default_tile_corners")]
+    pub tile_corners: String,
+    /// Launcher background (v0.16.0): "frosted" (default, translucent),
+    /// "solid" (opaque), or "tinted" (accent wash). Old files migrate
+    /// to "frosted".
+    #[serde(default = "default_launcher_background")]
+    pub launcher_background: String,
+    /// Tile detail toggles (v0.16.0): unread badges, per-app memory,
+    /// and Sleeping labels on tiles/rows. All default on — hiding them
+    /// is a preference, never a data change.
+    #[serde(default = "default_true")]
+    pub show_badges: bool,
+    #[serde(default = "default_true")]
+    pub show_tile_ram: bool,
+    #[serde(default = "default_true")]
+    pub show_sleep_labels: bool,
     /// Dictation compatibility (v0.13.18): when true, AppMaka's global
     /// keyboard hooks stay uninstalled — the caption Esc/F11/Ctrl+Tab
     /// hook and the Windows-key clipboard watcher — so low-level-hook
@@ -179,6 +203,18 @@ fn default_theme() -> String {
 
 fn default_tile_size() -> String {
     "cozy".to_string()
+}
+
+fn default_custom_cursor_color() -> String {
+    "violet".to_string()
+}
+
+fn default_tile_corners() -> String {
+    "round".to_string()
+}
+
+fn default_launcher_background() -> String {
+    "frosted".to_string()
 }
 
 /// The accent's bright text hex, for native-injected UI (the F1
@@ -225,6 +261,12 @@ impl Default for LauncherSettings {
             accent: default_accent(),
             theme: default_theme(),
             tile_size: default_tile_size(),
+            custom_cursor_color: default_custom_cursor_color(),
+            tile_corners: default_tile_corners(),
+            launcher_background: default_launcher_background(),
+            show_badges: true,
+            show_tile_ram: true,
+            show_sleep_labels: true,
             dictation_compat: false,
         }
     }
@@ -437,12 +479,13 @@ pub fn set_theme(app: AppHandle, theme: String) -> Result<LauncherSettings, Stri
     Ok(settings.clone())
 }
 
-/// Set the launcher tile size (v0.13.17): "cozy" or "compact".
+/// Set the launcher tile size (v0.13.17): "cozy", "compact", or
+/// "large" (v0.16.0).
 /// JS: `invoke("set_tile_size", { size })`.
 #[tauri::command]
 pub fn set_tile_size(app: AppHandle, size: String) -> Result<LauncherSettings, String> {
     let size = size.trim().to_lowercase();
-    if !["cozy", "compact"].contains(&size.as_str()) {
+    if !["cozy", "compact", "large"].contains(&size.as_str()) {
         return Err("Unknown tile size.".to_string());
     }
     let state = app.state::<Mutex<LauncherSettings>>();
@@ -503,7 +546,9 @@ pub fn set_custom_cursor(
     style: String,
 ) -> Result<LauncherSettings, String> {
     let style = style.trim().to_lowercase();
-    if !["off", "dot", "ring", "trail", "halo", "pulse", "orbit", "comet", "crosshair", "ripple", "stardust"]
+    if !["off", "dot", "ring", "trail", "halo", "pulse", "orbit", "comet", "crosshair",
+        "ripple", "stardust", "diamond", "arrow", "plus", "star", "bullseye", "blob",
+        "neon", "ghost", "firefly", "snake", "rainbow", "bubbles"]
         .contains(&style.as_str())
     {
         return Err("Unknown cursor style.".to_string());
@@ -521,6 +566,101 @@ pub fn set_custom_cursor(
     // call and must not run under the lock.
     crate::windows::apply_cursor_live(&app, &style);
     Ok(saved)
+}
+
+/// Set the drawn-cursor color (v0.16.0). JS: `invoke("set_custom_cursor_color", { color })`.
+/// Applies live to open windows like a style change does.
+#[tauri::command]
+pub fn set_custom_cursor_color(
+    app: AppHandle,
+    color: String,
+) -> Result<LauncherSettings, String> {
+    let color = color.trim().to_lowercase();
+    if !["violet", "accent", "white", "sky", "lime", "amber", "rose"].contains(&color.as_str()) {
+        return Err("Unknown cursor color.".to_string());
+    }
+    let saved = {
+        let state = app.state::<Mutex<LauncherSettings>>();
+        let mut settings = state
+            .lock()
+            .map_err(|e| format!("settings state poisoned: {e}"))?;
+        settings.custom_cursor_color = color;
+        save(&app, &settings)?;
+        settings.clone()
+    };
+    crate::windows::apply_cursor_live(&app, &saved.custom_cursor.clone());
+    Ok(saved)
+}
+
+/// Set the launcher tile corners (v0.16.0): "round", "soft", or "sharp".
+/// JS: `invoke("set_tile_corners", { corners })`.
+#[tauri::command]
+pub fn set_tile_corners(app: AppHandle, corners: String) -> Result<LauncherSettings, String> {
+    let corners = corners.trim().to_lowercase();
+    if !["round", "soft", "sharp"].contains(&corners.as_str()) {
+        return Err("Unknown tile corner style.".to_string());
+    }
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.tile_corners = corners;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Set the launcher background (v0.16.0): "frosted", "solid", or "tinted".
+/// JS: `invoke("set_launcher_background", { background })`.
+#[tauri::command]
+pub fn set_launcher_background(
+    app: AppHandle,
+    background: String,
+) -> Result<LauncherSettings, String> {
+    let background = background.trim().to_lowercase();
+    if !["frosted", "solid", "tinted"].contains(&background.as_str()) {
+        return Err("Unknown launcher background.".to_string());
+    }
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.launcher_background = background;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Tile detail toggles (v0.16.0). JS: `invoke("set_show_badges", { enabled })` etc.
+#[tauri::command]
+pub fn set_show_badges(app: AppHandle, enabled: bool) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.show_badges = enabled;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+pub fn set_show_tile_ram(app: AppHandle, enabled: bool) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.show_tile_ram = enabled;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+pub fn set_show_sleep_labels(app: AppHandle, enabled: bool) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.show_sleep_labels = enabled;
+    save(&app, &settings)?;
+    Ok(settings.clone())
 }
 
 /// Set whether opening an app/account creates a tabbed window instead of
