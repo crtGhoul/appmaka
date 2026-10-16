@@ -458,14 +458,8 @@ function AccountRow({
   ramKb,
   sleeping,
   onOpen,
-  onOpenPrivate,
-  onFillLogin,
-  onSaveLogin,
-  onSuspend,
-  onRemove,
+  onManage,
   onRename,
-  onEdit,
-  onForgetLogin,
 }: {
   account: Account;
   app: WebApp;
@@ -476,14 +470,9 @@ function AccountRow({
   /** v0.15.0: closed by automatic reclaim; shows the Sleeping chip. */
   sleeping?: boolean;
   onOpen: () => void;
-  onOpenPrivate: () => void;
-  onFillLogin: () => void;
-  onSaveLogin: () => void;
-  onSuspend: () => void;
-  onRemove: () => void;
+  /** v0.15.0: open the per-account settings panel. */
+  onManage: () => void;
   onRename: (label: string) => void;
-  onEdit: () => void;
-  onForgetLogin: () => void;
 }) {
   return (
     <li className="account-row">
@@ -537,43 +526,133 @@ function AccountRow({
       </div>
       <div className="app-actions">
         <button onClick={onOpen}>Open</button>
-        <button
-          className="text-button"
-          onClick={onOpenPrivate}
-          title="Open in a private window — nothing is saved after you close it."
-        >
-          Private
-        </button>
-        <button
-          className="text-button"
-          onClick={onFillLogin}
-          title="Fill the saved login into this account's open window. Only works on the site it was saved for."
-        >
-          Fill login
-        </button>
-        <button
-          className="text-button"
-          onClick={onSaveLogin}
-          title="Save this account's username and password in your system vault."
-        >
-          Save login
-        </button>
-        <button onClick={onSuspend}>Suspend</button>
-        <button className="text-button" onClick={onEdit}>
-          Edit
-        </button>
-        <button
-          className="text-button danger"
-          onClick={onForgetLogin}
-          title="Sign this account out by wiping its session. Other accounts are untouched."
-        >
-          Forget login
-        </button>
-        <button className="danger" onClick={onRemove}>
-          Remove
+        <button className="text-button" onClick={onManage}>
+          Manage
         </button>
       </div>
     </li>
+  );
+}
+
+/**
+ * v0.15.0: per-account settings panel — a slide-over in the same window
+ * that replaces the old crammed row of eight buttons. Groups what already
+ * exists: opening (Open / private / suspend), login (fill / save /
+ * forget), and account settings, reusing the existing commands. Esc or
+ * the backdrop closes it.
+ */
+function AccountPanel({
+  app,
+  account,
+  onClose,
+  onOpen,
+  onOpenPrivate,
+  onFillLogin,
+  onSaveLogin,
+  onSuspend,
+  onEdit,
+  onForgetLogin,
+  onRemove,
+}: {
+  app: WebApp;
+  account: Account;
+  onClose: () => void;
+  onOpen: () => void;
+  onOpenPrivate: () => void;
+  onFillLogin: () => void;
+  onSaveLogin: () => void;
+  onSuspend: () => void;
+  onEdit: () => void;
+  onForgetLogin: () => void;
+  onRemove: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const done = (fn: () => void) => () => {
+    fn();
+    onClose();
+  };
+  return (
+    <div className="account-panel-backdrop" onClick={onClose}>
+      <aside
+        className="account-panel"
+        role="dialog"
+        aria-modal="false"
+        aria-label={`${account.label} settings`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="account-panel-head">
+          <AccountThumb account={account} app={app} />
+          <div className="account-panel-titles">
+            <div className="account-panel-title">{account.label}</div>
+            <div className="muted small">{app.name}</div>
+          </div>
+          <button
+            type="button"
+            className="text-button"
+            onClick={onClose}
+            aria-label="Close panel"
+          >
+            Close
+          </button>
+        </div>
+        <div className="account-panel-group">
+          <p className="muted small account-panel-label">Open</p>
+          <button onClick={done(onOpen)}>Open</button>
+          <button
+            className="text-button"
+            onClick={done(onOpenPrivate)}
+            title="Open in a private window — nothing is saved after you close it."
+          >
+            Private window
+          </button>
+          <button className="text-button" onClick={done(onSuspend)}>
+            Suspend
+          </button>
+        </div>
+        <div className="account-panel-group">
+          <p className="muted small account-panel-label">Login</p>
+          <button
+            className="text-button"
+            onClick={done(onFillLogin)}
+            title="Fill the saved login into this account's open window. Only works on the site it was saved for."
+          >
+            Fill login
+          </button>
+          <button
+            className="text-button"
+            onClick={done(onSaveLogin)}
+            title="Save this account's username and password in your system vault."
+          >
+            Save login
+          </button>
+          <button
+            className="text-button danger"
+            onClick={done(onForgetLogin)}
+            title="Sign this account out by wiping its session. Other accounts are untouched."
+          >
+            Forget login
+          </button>
+        </div>
+        <div className="account-panel-group">
+          <p className="muted small account-panel-label">Settings</p>
+          <button className="text-button" onClick={done(onEdit)}>
+            Edit account…
+          </button>
+        </div>
+        <div className="account-panel-group">
+          <p className="muted small account-panel-label">Remove</p>
+          <button className="danger" onClick={done(onRemove)}>
+            Remove account
+          </button>
+        </div>
+      </aside>
+    </div>
   );
 }
 
@@ -2109,6 +2188,11 @@ function AppShell() {
     app: WebApp;
     account: Account;
   } | null>(null);
+  // v0.15.0: per-account settings panel target.
+  const [panelAccount, setPanelAccount] = useState<{
+    app: WebApp;
+    account: Account;
+  } | null>(null);
   // v0.7.0: "Forget this login" confirm dialog target (tile menu / account row).
   const [forgetLoginTarget, setForgetLoginTarget] = useState<{
     app: WebApp;
@@ -3619,18 +3703,8 @@ function AppShell() {
                               ramKb={accountRam.get(`${app.id}:${account.id}`)}
                               sleeping={sleeping.has(`${app.id}:${account.id}`)}
                               onOpen={() => void handleOpenAccount(app, account)}
-                              onOpenPrivate={() =>
-                                void handleOpenAccount(app, account, true, true)
-                              }
-                              onFillLogin={() => void handleFillLogin(app, account)}
-                              onSaveLogin={() =>
-                                setSaveLoginTarget({ app, account })
-                              }
-                              onSuspend={() => void handleSuspendAccount(app, account)}
-                              onRemove={() => void handleRemoveAccount(app, account)}
+                              onManage={() => setPanelAccount({ app, account })}
                               onRename={(label) => void handleRenameAccount(app, account, label)}
-                              onEdit={() => setEditingAccount({ app, account })}
-                              onForgetLogin={() => setForgetLoginTarget({ app, account })}
                             />
                           ))}
                         </ul>
@@ -3837,6 +3911,32 @@ function AppShell() {
           account={saveLoginTarget.account}
           onClose={() => setSaveLoginTarget(null)}
           onSaved={() => setSaveLoginTarget(null)}
+        />
+      )}
+
+      {panelAccount && (
+        <AccountPanel
+          app={panelAccount.app}
+          account={panelAccount.account}
+          onClose={() => setPanelAccount(null)}
+          onOpen={() => void handleOpenAccount(panelAccount.app, panelAccount.account)}
+          onOpenPrivate={() =>
+            void handleOpenAccount(panelAccount.app, panelAccount.account, true, true)
+          }
+          onFillLogin={() => void handleFillLogin(panelAccount.app, panelAccount.account)}
+          onSaveLogin={() =>
+            setSaveLoginTarget({ app: panelAccount.app, account: panelAccount.account })
+          }
+          onSuspend={() =>
+            void handleSuspendAccount(panelAccount.app, panelAccount.account)
+          }
+          onEdit={() =>
+            setEditingAccount({ app: panelAccount.app, account: panelAccount.account })
+          }
+          onForgetLogin={() =>
+            setForgetLoginTarget({ app: panelAccount.app, account: panelAccount.account })
+          }
+          onRemove={() => void handleRemoveAccount(panelAccount.app, panelAccount.account)}
         />
       )}
 

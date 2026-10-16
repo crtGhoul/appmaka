@@ -756,6 +756,72 @@ input[type="color"] {
   margin: -4px 0 8px;
 }
 
+/* v0.15.0: per-account settings slide-over. Same window, quiet panel. */
+.account-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.account-panel {
+  width: min(320px, 88vw);
+  height: 100%;
+  overflow-y: auto;
+  background: rgba(24, 25, 30, 0.96);
+  backdrop-filter: blur(18px);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.5);
+  padding: 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  animation: panel-in 160ms ease-out;
+}
+
+@keyframes panel-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.account-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.account-panel-titles {
+  min-width: 0;
+  flex: 1;
+}
+
+.account-panel-title {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-panel-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.account-panel-label {
+  margin: 0;
+}
+
 /* v0.15.0: Ctrl+K quick-switch palette — same frosted panel language as
    the launcher, quiet by default. */
 .palette-backdrop {
