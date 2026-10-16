@@ -2151,6 +2151,8 @@ function applyAppearance(s: LauncherSettings | null) {
       : theme;
   root.dataset.theme = resolved;
   root.dataset.tileSize = s?.tile_size ?? "cozy";
+  root.dataset.tileCorners = s?.tile_corners ?? "round";
+  root.dataset.launcherBg = s?.launcher_background ?? "frosted";
   const pal = ACCENT_PALETTES[s?.accent ?? "indigo"] ?? ACCENT_PALETTES.indigo;
   for (const [k, v] of Object.entries(pal)) root.style.setProperty(k, v);
 }
@@ -3478,16 +3480,17 @@ function AppShell() {
                 renderIcon={renderResultIcon}
                 pinnedIds={new Set(launcherSettings?.pinned ?? [])}
                 badgeFor={(r) =>
-                  r.kind === "account"
+                  (launcherSettings?.show_badges ?? true) && r.kind === "account"
                     ? unreadCounts.get(`${r.app.id}:${r.account.id}`)
                     : undefined
                 }
                 ramFor={(r) =>
-                  r.kind === "account"
+                  (launcherSettings?.show_tile_ram ?? true) && r.kind === "account"
                     ? accountRam.get(`${r.app.id}:${r.account.id}`)
                     : undefined
                 }
                 sleepingFor={(r) =>
+                  (launcherSettings?.show_sleep_labels ?? true) &&
                   r.kind === "account"
                     ? sleeping.has(`${r.app.id}:${r.account.id}`)
                     : false
@@ -3638,7 +3641,7 @@ function AppShell() {
         <h2>Library</h2>
         {(() => {
           const total = [...sleeping.values()].reduce((a, b) => a + b, 0);
-          return total > 0 ? (
+          return total > 0 && (launcherSettings?.show_sleep_labels ?? true) ? (
             <p className="muted small memory-saved">
               Memory saved: {formatMb(total)} — reclaimed automatically from
               idle apps.
@@ -3699,9 +3702,20 @@ function AppShell() {
                               key={account.id}
                               account={account}
                               app={app}
-                              unread={unreadCounts.get(`${app.id}:${account.id}`)}
-                              ramKb={accountRam.get(`${app.id}:${account.id}`)}
-                              sleeping={sleeping.has(`${app.id}:${account.id}`)}
+                              unread={
+                                (launcherSettings?.show_badges ?? true)
+                                  ? unreadCounts.get(`${app.id}:${account.id}`)
+                                  : undefined
+                              }
+                              ramKb={
+                                (launcherSettings?.show_tile_ram ?? true)
+                                  ? accountRam.get(`${app.id}:${account.id}`)
+                                  : undefined
+                              }
+                              sleeping={
+                                (launcherSettings?.show_sleep_labels ?? true) &&
+                                sleeping.has(`${app.id}:${account.id}`)
+                              }
                               onOpen={() => void handleOpenAccount(app, account)}
                               onManage={() => setPanelAccount({ app, account })}
                               onRename={(label) => void handleRenameAccount(app, account, label)}

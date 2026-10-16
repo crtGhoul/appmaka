@@ -131,7 +131,21 @@ export interface LauncherSettings {
     | "comet"
     | "crosshair"
     | "ripple"
-    | "stardust";
+    | "stardust"
+    | "diamond"
+    | "arrow"
+    | "plus"
+    | "star"
+    | "bullseye"
+    | "blob"
+    | "neon"
+    | "ghost"
+    | "firefly"
+    | "snake"
+    | "rainbow"
+    | "bubbles";
+  /** Drawn-cursor color (v0.16.0). Backend always sends it (serde default). */
+  custom_cursor_color: "violet" | "accent" | "white" | "sky" | "lime" | "amber" | "rose";
   /**
    * Open apps/accounts as tabbed windows instead of plain page windows
    * (v0.13.0). Backend always sends it (serde default).
@@ -147,8 +161,16 @@ export interface LauncherSettings {
   accent: "indigo" | "violet" | "blue" | "teal" | "green" | "amber" | "rose";
   /** UI theme (v0.13.17): follow the OS, or force dark/light. Backend always sends it. */
   theme: "system" | "dark" | "light";
-  /** Launcher tile size (v0.13.17). Backend always sends it. */
-  tile_size: "cozy" | "compact";
+  /** Launcher tile size (v0.13.17; "large" added v0.16.0). Backend always sends it. */
+  tile_size: "cozy" | "compact" | "large";
+  /** Launcher tile corners (v0.16.0). Backend always sends it. */
+  tile_corners: "round" | "soft" | "sharp";
+  /** Launcher background (v0.16.0). Backend always sends it. */
+  launcher_background: "frosted" | "solid" | "tinted";
+  /** Tile detail toggles (v0.16.0). Backend always sends them (serde defaults). */
+  show_badges: boolean;
+  show_tile_ram: boolean;
+  show_sleep_labels: boolean;
   /** Dictation compatibility: global keyboard hooks off (v0.13.18). Backend always sends it. */
   dictation_compat: boolean;
   /**

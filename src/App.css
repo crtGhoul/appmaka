@@ -1714,6 +1714,78 @@ input[type="color"] {
   font-size: 11px;
 }
 
+/* Large launcher tiles (v0.16.0). */
+:root[data-tile-size="large"] .icon-tile {
+  padding: 14px 6px 12px;
+  gap: 8px;
+}
+
+:root[data-tile-size="large"] .tile-icon,
+:root[data-tile-size="large"] .tile-icon .app-icon,
+:root[data-tile-size="large"] .tile-icon .account-thumb,
+:root[data-tile-size="large"] .tile-icon .app-icon-fallback,
+:root[data-tile-size="large"] .tile-icon .account-thumb-fallback {
+  width: 56px;
+  height: 56px;
+}
+
+:root[data-tile-size="large"] .tile-label {
+  font-size: 13.5px;
+}
+
+/* Tile corners (v0.16.0). Placed after the size rules so an explicit
+   corner choice wins over a size's built-in radius. "round" (14px) is
+   the base look and needs no rule. */
+:root[data-tile-corners="soft"] .icon-tile {
+  border-radius: 9px;
+}
+
+:root[data-tile-corners="sharp"] .icon-tile {
+  border-radius: 3px;
+}
+
+:root[data-tile-corners="soft"] .tile-icon .app-icon,
+:root[data-tile-corners="soft"] .tile-icon .account-thumb,
+:root[data-tile-corners="soft"] .tile-icon .app-icon-fallback,
+:root[data-tile-corners="soft"] .tile-icon .account-thumb-fallback {
+  border-radius: 6px;
+}
+
+:root[data-tile-corners="sharp"] .tile-icon .app-icon,
+:root[data-tile-corners="sharp"] .tile-icon .account-thumb,
+:root[data-tile-corners="sharp"] .tile-icon .app-icon-fallback,
+:root[data-tile-corners="sharp"] .tile-icon .account-thumb-fallback {
+  border-radius: 2px;
+}
+
+/* Launcher background (v0.16.0): "frosted" is the base glass look. */
+:root[data-launcher-bg="solid"] .folder-panel {
+  background: rgb(22, 24, 31);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+:root[data-theme="light"][data-launcher-bg="solid"] .folder-panel {
+  background: rgb(248, 249, 251);
+}
+
+/* The wash follows the saved accent via color-mix; the plain
+   translucent background is declared first so an engine without
+   color-mix keeps the frosted base instead of losing the panel. */
+:root[data-launcher-bg="tinted"] .folder-panel {
+  background: rgba(22, 24, 31, var(--folder-alpha, 0.55));
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--accent, #6366f1) 20%, transparent), transparent 55%),
+    rgba(22, 24, 31, var(--folder-alpha, 0.55));
+}
+
+:root[data-theme="light"][data-launcher-bg="tinted"] .folder-panel {
+  background: rgba(248, 249, 251, var(--folder-alpha, 0.55));
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--accent, #6366f1) 16%, transparent), transparent 55%),
+    rgba(248, 249, 251, var(--folder-alpha, 0.55));
+}
+
 /* Accent swatches in the launcher settings panel. */
 .accent-swatches {
   display: flex;

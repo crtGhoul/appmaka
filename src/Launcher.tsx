@@ -742,7 +742,34 @@ export function LauncherSettingsPanel({
     | "crosshair"
     | "ripple"
     | "stardust"
+    | "diamond"
+    | "arrow"
+    | "plus"
+    | "star"
+    | "bullseye"
+    | "blob"
+    | "neon"
+    | "ghost"
+    | "firefly"
+    | "snake"
+    | "rainbow"
+    | "bubbles"
   >(settings.custom_cursor ?? "off");
+  // v0.16.0: cursor color + launcher customization state.
+  const [cursorColor, setCursorColor] = useState<string>(
+    settings.custom_cursor_color ?? "violet"
+  );
+  const [tileCorners, setTileCorners] = useState<string>(
+    settings.tile_corners ?? "round"
+  );
+  const [launcherBg, setLauncherBg] = useState<string>(
+    settings.launcher_background ?? "frosted"
+  );
+  const [showBadges, setShowBadges] = useState(settings.show_badges ?? true);
+  const [showTileRam, setShowTileRam] = useState(settings.show_tile_ram ?? true);
+  const [showSleepLabels, setShowSleepLabels] = useState(
+    settings.show_sleep_labels ?? true
+  );
   // v0.13.0: open apps/accounts as tabbed windows.
   const [openAsTabbed, setOpenAsTabbed] = useState(
     settings.open_as_tabbed ?? false
@@ -872,7 +899,7 @@ export function LauncherSettingsPanel({
     }
   }
 
-  async function handleCustomCursor(style: "off" | "dot" | "ring" | "trail") {
+  async function handleCustomCursor(style: typeof customCursor) {
     setCustomCursor(style);
     setFormError(null);
     try {
@@ -885,6 +912,73 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setCustomCursor(settings.custom_cursor ?? "off");
+    }
+  }
+
+  async function handleCursorColor(next: string) {
+    setCursorColor(next);
+    setFormError(null);
+    try {
+      onSaved(
+        await invoke<LauncherSettings>("set_custom_cursor_color", {
+          color: next,
+        })
+      );
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setCursorColor(settings.custom_cursor_color ?? "violet");
+    }
+  }
+
+  async function handleTileCorners(next: string) {
+    setTileCorners(next);
+    setFormError(null);
+    try {
+      onSaved(
+        await invoke<LauncherSettings>("set_tile_corners", { corners: next })
+      );
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setTileCorners(settings.tile_corners ?? "round");
+    }
+  }
+
+  async function handleLauncherBg(next: string) {
+    setLauncherBg(next);
+    setFormError(null);
+    try {
+      onSaved(
+        await invoke<LauncherSettings>("set_launcher_background", {
+          background: next,
+        })
+      );
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setLauncherBg(settings.launcher_background ?? "frosted");
+    }
+  }
+
+  async function handleDetailToggle(
+    command: "set_show_badges" | "set_show_tile_ram" | "set_show_sleep_labels",
+    next: boolean,
+    setLocal: (v: boolean) => void,
+    saved: boolean | undefined
+  ) {
+    setLocal(next);
+    setFormError(null);
+    try {
+      onSaved(await invoke<LauncherSettings>(command, { enabled: next }));
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setLocal(saved ?? true);
     }
   }
 
@@ -1158,9 +1252,7 @@ export function LauncherSettingsPanel({
         <select
           value={customCursor}
           onChange={(e) =>
-            void handleCustomCursor(
-              e.target.value as "off" | "dot" | "ring" | "trail"
-            )
+            void handleCustomCursor(e.target.value as typeof customCursor)
           }
           aria-label="Custom cursor style for app windows"
         >
@@ -1175,11 +1267,44 @@ export function LauncherSettingsPanel({
           <option value="crosshair">Crosshair (reticle)</option>
           <option value="ripple">Ripple (pulsing rings)</option>
           <option value="stardust">Stardust (sparkle trail)</option>
+          <option value="diamond">Diamond</option>
+          <option value="arrow">Arrow (classic pointer)</option>
+          <option value="plus">Plus</option>
+          <option value="star">Star (sparkle)</option>
+          <option value="bullseye">Bullseye</option>
+          <option value="blob">Blob (soft glow)</option>
+          <option value="neon">Neon (bright glow)</option>
+          <option value="ghost">Ghost (faint ring)</option>
+          <option value="firefly">Firefly (wandering glow)</option>
+          <option value="snake">Snake (loose trail)</option>
+          <option value="rainbow">Rainbow trail</option>
+          <option value="bubbles">Bubbles (orbiting dots)</option>
         </select>
         <span className="help">
           Draws a lightweight pointer inside app windows. Useful if the
           system cursor ever goes invisible there. Applies right away,
           including to windows already open.
+        </span>
+      </label>
+
+      <label className="inline-form">
+        <span>Cursor color</span>
+        <select
+          value={cursorColor}
+          onChange={(e) => void handleCursorColor(e.target.value)}
+          aria-label="Custom cursor color"
+        >
+          <option value="violet">Violet</option>
+          <option value="accent">Match accent color</option>
+          <option value="white">White</option>
+          <option value="sky">Sky</option>
+          <option value="lime">Lime</option>
+          <option value="amber">Amber</option>
+          <option value="rose">Rose</option>
+        </select>
+        <span className="help">
+          The color of the drawn cursor above. Rainbow trail keeps its
+          own colors.
         </span>
       </label>
 
@@ -1290,8 +1415,68 @@ export function LauncherSettingsPanel({
         <select value={tileSize} onChange={(e) => void handleTileSize(e.target.value)}>
           <option value="cozy">Cozy</option>
           <option value="compact">Compact</option>
+          <option value="large">Large</option>
         </select>
-        <span className="help">Compact fits the same tiles in less space.</span>
+        <span className="help">Compact fits the same tiles in less space; Large makes them bigger.</span>
+      </label>
+
+      <label className="inline-form">
+        <span>Tile corners</span>
+        <select value={tileCorners} onChange={(e) => void handleTileCorners(e.target.value)}>
+          <option value="round">Round</option>
+          <option value="soft">Soft</option>
+          <option value="sharp">Sharp</option>
+        </select>
+        <span className="help">How rounded the launcher tiles are.</span>
+      </label>
+
+      <label className="inline-form">
+        <span>Launcher background</span>
+        <select value={launcherBg} onChange={(e) => void handleLauncherBg(e.target.value)}>
+          <option value="frosted">Frosted (translucent)</option>
+          <option value="solid">Solid</option>
+          <option value="tinted">Tinted (accent wash)</option>
+        </select>
+        <span className="help">What sits behind the launcher and library.</span>
+      </label>
+
+      <label className="inline-form">
+        <span>Unread badges on tiles</span>
+        <input
+          type="checkbox"
+          checked={showBadges}
+          onChange={(e) =>
+            void handleDetailToggle("set_show_badges", e.target.checked, setShowBadges, settings.show_badges)
+          }
+          aria-label="Show unread badges on tiles"
+        />
+        <span className="help">The small count on a tile when an app has unread items.</span>
+      </label>
+
+      <label className="inline-form">
+        <span>Memory use on tiles</span>
+        <input
+          type="checkbox"
+          checked={showTileRam}
+          onChange={(e) =>
+            void handleDetailToggle("set_show_tile_ram", e.target.checked, setShowTileRam, settings.show_tile_ram)
+          }
+          aria-label="Show memory use on tiles"
+        />
+        <span className="help">Each open app's memory, shown on its tile and library row.</span>
+      </label>
+
+      <label className="inline-form">
+        <span>Sleeping labels</span>
+        <input
+          type="checkbox"
+          checked={showSleepLabels}
+          onChange={(e) =>
+            void handleDetailToggle("set_show_sleep_labels", e.target.checked, setShowSleepLabels, settings.show_sleep_labels)
+          }
+          aria-label="Show sleeping labels on tiles"
+        />
+        <span className="help">The Sleeping mark and the Memory saved total for auto-closed apps.</span>
       </label>
 
       <div className="inline-form">
