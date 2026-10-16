@@ -39,6 +39,7 @@ import {
   IconGrid,
   LauncherCommandRows,
   LauncherSettingsPanel,
+  QuickSwitchPalette,
   NoMatchesHint,
   ProgramIcon,
   RescanButton,
@@ -2527,6 +2528,7 @@ function AppShell() {
     listen("appmaka:show-launcher", () => {
       setView("launcher");
       setSummonCount((c) => c + 1);
+      setPaletteOpen(false);
     })
       .then((off) => {
         offLauncher = off;
@@ -2538,6 +2540,21 @@ function AppShell() {
       window.removeEventListener("keydown", onKey);
     };
   }, []);
+
+  // v0.15.0: Ctrl+K quick-switch — opens the palette while the launcher
+  // is focused. In-window only; no global hotkey hook.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    if (view !== "launcher") return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && !e.repeat) {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view]);
 
   // Link dispatcher (v0.7.0): an incoming https URL with no matching
   // domain→account rule opens the small picker instead of going nowhere.
@@ -2927,12 +2944,17 @@ function AppShell() {
       ) ?? null,
     [workspaceList]
   );
+  // v0.15.0: hoisted so the Ctrl+K palette sees the same
+  // workspace-scoped apps as the tile grid.
+  const scopedApps = useMemo(
+    () => filterAppsByWorkspace(apps, activeWorkspace),
+    [apps, activeWorkspace]
+  );
   const items = useMemo(() => {
-    const scopedApps = filterAppsByWorkspace(apps, activeWorkspace);
     return query.trim()
       ? buildResults(query, scopedApps, programs, routines, sortOpts)
       : browseAll(scopedApps, programs, sortOpts);
-  }, [query, apps, programs, routines, sortOpts, activeWorkspace]);
+  }, [query, scopedApps, programs, routines, sortOpts]);
 
   // v0.7.0: built-in launcher commands (=calc, >system, ?web-search,
   // URL quick-add). Prefix commands take precedence over app/program
@@ -3198,6 +3220,17 @@ function AppShell() {
     return (
       <div className="launcher-shell">
         <ContextMenuGuard />
+        {paletteOpen && (
+          <QuickSwitchPalette
+            items={browseAll(scopedApps, programs, sortOpts)}
+            onActivate={(r) => {
+              setPaletteOpen(false);
+              void activateResult(r);
+            }}
+            onClose={() => setPaletteOpen(false)}
+            renderIcon={renderResultIcon}
+          />
+        )}
         <div
           className="folder-panel"
           key={summonCount}
@@ -3383,6 +3416,13 @@ function AppShell() {
           <footer className="launcher-foot">
             <button className="text-button" onClick={() => setView("library")}>
               Manage apps →
+            </button>
+            <button
+              className="text-button"
+              onClick={() => setPaletteOpen(true)}
+              title="Jump to any app or account (Ctrl+K)"
+            >
+              Quick switch (Ctrl+K)
             </button>
             <span className="launcher-foot-actions">
               <DownloadToolbarButton onOpen={() => setView("downloads")} />

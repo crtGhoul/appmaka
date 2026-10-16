@@ -3,6 +3,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { evaluateExpression, formatCalcResult } from "./calc";
 import { HotkeyCapture } from "./HotkeyCapture";
+import { fuzzyScore, rankQuickSwitch } from "./quickswitch";
 import type {
   Account,
   HotkeyStatus,
@@ -25,32 +26,10 @@ function hostOf(appUrl: string): string {
 }
 
 /**
- * Subsequence fuzzy score. Higher is better, 0 means no match. Rewards
- * word-start matches and consecutive runs; shorter names win ties.
+ * v0.15.0: the fuzzy matcher lives in ./quickswitch (single source of
+ * truth for the launcher search and the Ctrl+K palette).
  */
-export function fuzzyScore(query: string, text: string): number {
-  const q = query.toLowerCase().trim();
-  const t = text.toLowerCase();
-  if (!q) return 0;
-  let score = 0;
-  let ti = 0;
-  let lastMatch = -2;
-  for (let qi = 0; qi < q.length; qi++) {
-    const found = t.indexOf(q[qi], ti);
-    if (found === -1) return 0;
-    if (found === 0 || t[found - 1] === " " || t[found - 1] === "-" || t[found - 1] === "_") {
-      score += 3;
-    } else if (found === lastMatch + 1) {
-      score += 2;
-    } else {
-      score += 1;
-    }
-    lastMatch = found;
-    ti = found + 1;
-  }
-  score += Math.max(0, 20 - t.length);
-  return score;
-}
+export { fuzzyScore } from "./quickswitch";
 
 export type SearchResult =
   | { kind: "account"; id: string; title: string; context: string; score: number; app: WebApp; account: Account }
@@ -530,6 +509,94 @@ export function IconGrid({
           ) : null}
         </button>
       ))}
+    </div>
+  );
+}
+
+/**
+ * v0.15.0: Ctrl+K quick-switch palette. Renders inside the launcher
+ * webview (no new window). Arrow keys move, Enter opens/focuses and
+ * closes, Esc closes. Results come from the pure `rankQuickSwitch`
+ * matcher; activation reuses the caller's existing open/focus path.
+ */
+export function QuickSwitchPalette({
+  items,
+  onActivate,
+  onClose,
+  renderIcon,
+}: {
+  items: SearchResult[];
+  onActivate: (r: SearchResult) => void;
+  onClose: () => void;
+  renderIcon: (r: SearchResult) => React.ReactNode;
+}) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const results = rankQuickSwitch(query, items);
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    setActive(0);
+  }, [query]);
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive((a) => Math.min(a + 1, results.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((a) => Math.max(a - 1, 0));
+    } else if (e.key === "Enter") {
+      const r = results[active];
+      if (r) onActivate(r);
+    } else if (e.key === "Escape") {
+      onClose();
+    }
+  };
+  return (
+    <div className="palette-backdrop" onClick={onClose}>
+      <div
+        className="palette"
+        role="dialog"
+        aria-modal="false"
+        aria-label="Quick switch"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <input
+          ref={inputRef}
+          className="palette-input"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="Type an app or account name…"
+          aria-label="Quick switch — type an app or account name"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        {results.length === 0 ? (
+          <p className="muted small palette-empty">No matches.</p>
+        ) : (
+          <ul className="palette-list" role="listbox" aria-label="Matches">
+            {results.map((r, i) => (
+              <li key={r.id} role="option" aria-selected={i === active}>
+                <button
+                  type="button"
+                  className={`palette-row${i === active ? " is-active" : ""}`}
+                  onClick={() => onActivate(r)}
+                  onMouseEnter={() => setActive(i)}
+                >
+                  <span className="palette-icon">{renderIcon(r)}</span>
+                  <span className="palette-title">{r.title}</span>
+                  {r.context ? (
+                    <span className="palette-sub">{r.context}</span>
+                  ) : null}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
