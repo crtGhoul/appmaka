@@ -233,6 +233,8 @@ export interface OpenAccountWindow {
   focused: boolean;
   /** v0.9.9: "Don't close this window" state. */
   pinned: boolean;
+  /** v0.15.0: unread count from the live page title; null/undefined = no badge. */
+  unread?: number | null;
 }
 
 /** v0.10.0: one open tabbed window, from `list_tabbed_windows`. */

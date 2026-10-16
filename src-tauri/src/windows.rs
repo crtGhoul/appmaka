@@ -130,6 +130,11 @@ struct TrackedWindow {
     /// Title without the suspend cue, restored on focus/resume (Windows).
     #[cfg(windows)]
     base_title: String,
+    /// Latest live document.title (v0.15.0: feeds unread badges).
+    page_title: String,
+    /// Set when the user focuses the window: the badge clears until the
+    /// next title change, which re-arms it.
+    page_title_seen: bool,
     suspended: bool,
     /// Session-restore lazy load: the real URL, not yet navigated to. The
     /// window is built on about:blank and navigates here on first focus,
@@ -367,6 +372,23 @@ pub fn open_account_placed(
     if !css.is_empty() {
         builder = builder.initialization_script(cosmetic_init_script(&css));
     }
+    // v0.15.0: unread badges — track the live document.title per window.
+    // The callback only touches the state mutex (no Win32 calls), so it
+    // is safe on whatever thread Tauri invokes it from.
+    {
+        let title_app = app.clone();
+        let title_label = label.clone();
+        builder = builder.on_document_title_changed(move |_window, title: String| {
+            if let Some(winstate) = title_app.try_state::<WindowState>() {
+                if let Ok(mut tracked) = winstate.inner.lock() {
+                    if let Some(t) = tracked.get_mut(&title_label) {
+                        t.page_title = title;
+                        t.page_title_seen = false;
+                    }
+                }
+            }
+        });
+    }
     let window = builder.build().map_err(|e| {
         let msg = format!("could not open account window: {e}");
         // v0.11.0: recorded for Copy diagnostics. The launcher shows the
@@ -413,6 +435,8 @@ pub fn open_account_placed(
                 adblock_enabled: adblock_flag.clone(),
                 #[cfg(windows)]
                 base_title: title,
+                page_title: String::new(),
+                page_title_seen: true,
                 suspended: false,
                 pending_url,
                 is_private: private,
@@ -432,6 +456,15 @@ pub fn open_account_placed(
                 // Lazy restore: first focus navigates the deferred URL.
                 if *focused {
                     navigate_pending_url(&track_app, &track_label);
+                    // v0.15.0: visiting the window clears its unread badge
+                    // until the next title change.
+                    if let Some(winstate) = track_app.try_state::<WindowState>() {
+                        if let Ok(mut tracked) = winstate.inner.lock() {
+                            if let Some(t) = tracked.get_mut(&track_label) {
+                                t.page_title_seen = true;
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::Destroyed => {
@@ -2092,6 +2125,10 @@ pub struct OpenAccountInfo {
     /// v0.9.9: "Don't close this window" state, so the dashboard can
     /// render the toggle without a second round-trip.
     pub pinned: bool,
+    /// v0.15.0: unread count parsed from the live page title. `None`
+    /// means no badge — either the title carries no count or the user
+    /// has visited the window since the last title change.
+    pub unread: Option<u32>,
 }
 
 /// Close every open account window. Returns how many were closed. Sessions
@@ -2227,12 +2264,20 @@ pub fn list_open_account_windows(
     app: AppHandle,
     store: State<'_, AppStore>,
 ) -> Vec<OpenAccountInfo> {
-    let tracked: Vec<(String, String, String)> = match app.try_state::<WindowState>() {
+    let tracked: Vec<(String, String, String, String, bool)> = match app.try_state::<WindowState>() {
         Some(winstate) => match winstate.inner.lock() {
             Ok(map) => map
                 .iter()
                 .filter(|(l, _)| l.starts_with("acct-"))
-                .map(|(l, t)| (l.clone(), t.app_id.clone(), t.account_id.clone()))
+                .map(|(l, t)| {
+                    (
+                        l.clone(),
+                        t.app_id.clone(),
+                        t.account_id.clone(),
+                        t.page_title.clone(),
+                        t.page_title_seen,
+                    )
+                })
                 .collect(),
             Err(_) => return Vec::new(),
         },
@@ -2240,7 +2285,7 @@ pub fn list_open_account_windows(
     };
     tracked
         .into_iter()
-        .map(|(label, app_id, account_id)| {
+        .map(|(label, app_id, account_id, page_title, seen)| {
             let (app_name, account_label) = store
                 .get(&app_id)
                 .ok()
@@ -2265,6 +2310,13 @@ pub fn list_open_account_windows(
                 app_name,
                 account_label,
                 focused,
+                // v0.15.0: unread badge — only when the title carries a
+                // trusted count AND the user hasn't visited since.
+                unread: if seen {
+                    None
+                } else {
+                    crate::badges::parse_unread_count(&page_title)
+                },
             }
         })
         // The search window has no tile, so the dashboard is its only
@@ -2290,6 +2342,7 @@ pub fn list_open_account_windows(
                             &app,
                             crate::websearch::SEARCH_WINDOW_LABEL,
                         ),
+                        unread: None,
                     }
                 }),
         )
@@ -2319,6 +2372,7 @@ pub fn list_open_account_windows(
                 account_label: url_str,
                 focused: w.is_focused().unwrap_or(false),
                 pinned: false,
+                unread: None,
             })
         }))
         .collect()

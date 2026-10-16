@@ -443,6 +443,7 @@ export function IconGrid({
   onActivate,
   renderIcon,
   pinnedIds,
+  badgeFor,
   onTileContextMenu,
 }: {
   items: SearchResult[];
@@ -452,6 +453,8 @@ export function IconGrid({
   renderIcon: (r: SearchResult) => React.ReactNode;
   /** Tagged ids that show the small pin badge. Optional. */
   pinnedIds?: ReadonlySet<string>;
+  /** Unread count per result (v0.15.0). Returning undefined draws no badge. Optional. */
+  badgeFor?: (r: SearchResult) => number | undefined;
   /** Right-click on a tile. Receives the result and the cursor position. Optional. */
   onTileContextMenu?: (r: SearchResult, x: number, y: number) => void;
 }) {
@@ -478,7 +481,21 @@ export function IconGrid({
               </svg>
             </span>
           )}
-          <span className="tile-icon">{renderIcon(r)}</span>
+          <span className="tile-icon">
+            {renderIcon(r)}
+            {(() => {
+              const n = badgeFor?.(r);
+              return n != null && n > 0 ? (
+                <span
+                  className="tile-badge"
+                  aria-label={`${n} unread`}
+                  title={`${n} unread`}
+                >
+                  {n > 99 ? "99+" : n}
+                </span>
+              ) : null;
+            })()}
+          </span>
           <span className="tile-label">{r.title}</span>
           {(r.kind === "account" || r.kind === "routine") && (
             <span className="tile-sub">{r.context}</span>

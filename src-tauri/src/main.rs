@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod adblock;
+mod badges;
 mod clipboard;
 mod custom_programs;
 mod dictation;

@@ -450,6 +450,7 @@ function AccountThumb({ account, app }: { account: Account; app: WebApp }) {
 function AccountRow({
   account,
   app,
+  unread,
   onOpen,
   onOpenPrivate,
   onFillLogin,
@@ -462,6 +463,8 @@ function AccountRow({
 }: {
   account: Account;
   app: WebApp;
+  /** v0.15.0: unread count for the badge; undefined draws none. */
+  unread?: number;
   onOpen: () => void;
   onOpenPrivate: () => void;
   onFillLogin: () => void;
@@ -476,12 +479,23 @@ function AccountRow({
     <li className="account-row">
       <AccountThumb account={account} app={app} />
       <div className="account-meta">
-        <InlineEdit
-          value={account.label}
-          onSave={onRename}
-          className="account-label"
-          maxLength={60}
-        />
+        <span className="account-label-row">
+          <InlineEdit
+            value={account.label}
+            onSave={onRename}
+            className="account-label"
+            maxLength={60}
+          />
+          {unread != null && unread > 0 && (
+            <span
+              className="account-unread-badge"
+              aria-label={`${unread} unread`}
+              title={`${unread} unread`}
+            >
+              {unread > 99 ? "99+" : unread}
+            </span>
+          )}
+        </span>
         <span className="account-opened">{openedLabel(account.last_opened)}</span>
         {account.popup_policy && (
           <span
@@ -2197,6 +2211,11 @@ function AppShell() {
   // checkmarks are current. Labels are `acct-<appId>-<accountId>`.
   const [openLabels, setOpenLabels] = useState<Set<string>>(new Set());
   const [pinnedLabels, setPinnedLabels] = useState<Set<string>>(new Set());
+  // v0.15.0: unread counts keyed `${appId}:${accountId}`, for the tile
+  // and Library badges. Rides the same poll — no new timer.
+  const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(
+    new Map()
+  );
   const refreshWindowPins = useCallback(async () => {
     try {
       const wins = await invoke<OpenAccountWindow[]>(
@@ -2206,6 +2225,13 @@ function AppShell() {
       setPinnedLabels(
         new Set(wins.filter((w) => w.pinned).map((w) => w.label))
       );
+      const unread = new Map<string, number>();
+      for (const w of wins) {
+        if (w.unread != null && w.unread > 0) {
+          unread.set(`${w.appId}:${w.accountId}`, w.unread);
+        }
+      }
+      setUnreadCounts(unread);
     } catch {
       /* older backend without the command; the menu entry stays hidden */
     }
@@ -3278,6 +3304,11 @@ function AppShell() {
                 onActivate={(r) => void activateResult(r)}
                 renderIcon={renderResultIcon}
                 pinnedIds={new Set(launcherSettings?.pinned ?? [])}
+                badgeFor={(r) =>
+                  r.kind === "account"
+                    ? unreadCounts.get(`${r.app.id}:${r.account.id}`)
+                    : undefined
+                }
                 onTileContextMenu={(r, x, y) => openTileMenu(r, x, y)}
               />
             )}
@@ -3469,6 +3500,7 @@ function AppShell() {
                               key={account.id}
                               account={account}
                               app={app}
+                              unread={unreadCounts.get(`${app.id}:${account.id}`)}
                               onOpen={() => void handleOpenAccount(app, account)}
                               onOpenPrivate={() =>
                                 void handleOpenAccount(app, account, true, true)

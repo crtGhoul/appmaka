@@ -679,6 +679,48 @@ input[type="color"] {
   width: 44px;
   height: 44px;
   flex: 0 0 auto;
+  position: relative;
+}
+
+/* v0.15.0: unread badge — brand gradient, white text, quiet by default
+   (drawn only when a trusted count exists). */
+.tile-badge {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 19px;
+  text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.account-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.account-unread-badge {
+  flex: 0 0 auto;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 19px;
+  text-align: center;
 }
 
 .tile-icon .app-icon {
