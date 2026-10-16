@@ -154,6 +154,22 @@ pub struct WindowState {
     inner: Mutex<HashMap<String, TrackedWindow>>,
 }
 
+impl WindowState {
+    /// v0.15.0: does any tracked window belong to this account? Used by
+    /// process attribution (procattr) so it never attributes browser
+    /// processes to an account with nothing open.
+    pub(crate) fn has_account_window(&self, app_id: &str, account_id: &str) -> bool {
+        self.inner
+            .lock()
+            .map(|tracked| {
+                tracked
+                    .values()
+                    .any(|t| t.app_id == app_id && t.account_id == account_id)
+            })
+            .unwrap_or(false)
+    }
+}
+
 /// Maximum simultaneously-open account windows. Opening one more closes the
 /// least-recently-used idle window first (never the focused one), bounding
 /// worst-case webview RAM without any timers or configuration.
@@ -389,6 +405,10 @@ pub fn open_account_placed(
             }
         });
     }
+    // v0.15.0: per-account RAM attribution — snapshot descendants before
+    // the build so the browser process spawned for this data directory
+    // can be claimed for the account.
+    let pids_before = crate::procattr::descendant_pids();
     let window = builder.build().map_err(|e| {
         let msg = format!("could not open account window: {e}");
         // v0.11.0: recorded for Copy diagnostics. The launcher shows the
@@ -402,6 +422,12 @@ pub fn open_account_placed(
         );
         msg
     })?;
+    crate::procattr::capture_new_processes(
+        app.clone(),
+        app_id.to_string(),
+        account_id.to_string(),
+        pids_before,
+    );
     // v0.9.6: on Windows keep the DWM drop shadow on the frameless window
     // and attach our caption strip. On other platforms the caption calls
     // are no-ops.
@@ -479,6 +505,9 @@ pub fn open_account_placed(
                             if let Some(dir) = t.private_dir {
                                 delete_private_session_dir(&dir);
                             }
+                            // v0.15.0: X-button close — same attribution
+                            // cleanup as the command path (idempotent).
+                            crate::procattr::prune(&track_app, &t.app_id, &t.account_id);
                         }
                     }
                 }
@@ -1880,6 +1909,9 @@ pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIn
                 if let Some(dir) = t.private_dir {
                     delete_private_session_dir(&dir);
                 }
+                // v0.15.0: drop per-account process attribution once the
+                // account's last window is gone.
+                crate::procattr::prune(app, &t.app_id, &t.account_id);
             }
         }
     }

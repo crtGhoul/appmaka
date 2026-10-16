@@ -237,6 +237,14 @@ export interface OpenAccountWindow {
   unread?: number | null;
 }
 
+/** v0.15.0: one account's attributed RSS, from `account_memory`. */
+export interface AccountMemory {
+  appId: string;
+  accountId: string;
+  /** Attributed browser + descendant processes, KiB. */
+  rssKb: number;
+}
+
 /** v0.10.0: one open tabbed window, from `list_tabbed_windows`. */
 export interface TabSummary {
   appId: string;

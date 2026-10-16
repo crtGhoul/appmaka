@@ -3,6 +3,7 @@
 mod adblock;
 mod badges;
 mod clipboard;
+mod procattr;
 mod custom_programs;
 mod dictation;
 mod downloads;
@@ -1031,6 +1032,8 @@ fn main() {
 
             app.manage(store);
             app.manage(WindowState::default());
+            // v0.15.0: per-account process attribution for the RAM tiles.
+            app.manage(procattr::ProcessAttribution::default());
             app.manage(PreviewState::default());
             // Tabbed app windows (v0.10.0): live group bookkeeping.
             app.manage(tabs::TabState::default());
@@ -1311,6 +1314,8 @@ fn main() {
             // v0.9.11: "Add to applications" for popup windows.
             popup_add::popup_add_to_applications,
             windows::memory_snapshot,
+            // v0.15.0: per-account RSS for the RAM tiles.
+            procattr::account_memory,
             windows::forget_login,
             // v0.9.9: "Don't close this window" pin commands
             pin::set_window_pinned,

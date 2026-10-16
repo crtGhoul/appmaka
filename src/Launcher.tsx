@@ -223,6 +223,15 @@ export function sortLauncherItems<T extends { id: string }>(
 }
 
 /**
+ * v0.15.0: kibibytes to a rounded "412 MB" label for the RAM tiles.
+ * Matches the dashboard's rounding; tiles skip the dashboard's "about"
+ * because these numbers are attributed per account, not even-split.
+ */
+export function formatMb(kb: number): string {
+  return `${Math.round(Math.max(0, kb) / 1024)} MB`;
+}
+
+/**
  * Record a successful launch for usage ranking. Fire-and-forget: usage
  * stats must never break or delay opening something. Call with the tagged
  * item id ("app:<id>" / "account:<id>" / "program:<id>").
@@ -444,6 +453,7 @@ export function IconGrid({
   renderIcon,
   pinnedIds,
   badgeFor,
+  ramFor,
   onTileContextMenu,
 }: {
   items: SearchResult[];
@@ -455,6 +465,8 @@ export function IconGrid({
   pinnedIds?: ReadonlySet<string>;
   /** Unread count per result (v0.15.0). Returning undefined draws no badge. Optional. */
   badgeFor?: (r: SearchResult) => number | undefined;
+  /** Attributed RAM in KiB per result (v0.15.0). Undefined draws no line. Optional. */
+  ramFor?: (r: SearchResult) => number | undefined;
   /** Right-click on a tile. Receives the result and the cursor position. Optional. */
   onTileContextMenu?: (r: SearchResult, x: number, y: number) => void;
 }) {
@@ -500,6 +512,14 @@ export function IconGrid({
           {(r.kind === "account" || r.kind === "routine") && (
             <span className="tile-sub">{r.context}</span>
           )}
+          {(() => {
+            const kb = ramFor?.(r);
+            return kb != null && kb > 0 ? (
+              <span className="tile-ram" title="Memory used by this account's pages">
+                {formatMb(kb)}
+              </span>
+            ) : null;
+          })()}
         </button>
       ))}
     </div>

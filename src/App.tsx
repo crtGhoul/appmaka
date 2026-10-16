@@ -35,6 +35,7 @@ import {
   ContextMenuGuard,
   EDIT_APP_EVENT,
   GRID_COLUMNS,
+  formatMb,
   IconGrid,
   LauncherCommandRows,
   LauncherSettingsPanel,
@@ -57,6 +58,7 @@ import type { LauncherCommandRowsHandle, SearchResult } from "./Launcher";
 import type {
   Account,
   AddAppOutcome,
+  AccountMemory,
   AppSettings,
   LauncherSettings,
   NativeProgram,
@@ -451,6 +453,7 @@ function AccountRow({
   account,
   app,
   unread,
+  ramKb,
   onOpen,
   onOpenPrivate,
   onFillLogin,
@@ -465,6 +468,8 @@ function AccountRow({
   app: WebApp;
   /** v0.15.0: unread count for the badge; undefined draws none. */
   unread?: number;
+  /** v0.15.0: attributed RAM in KiB; undefined draws no line. */
+  ramKb?: number;
   onOpen: () => void;
   onOpenPrivate: () => void;
   onFillLogin: () => void;
@@ -496,7 +501,18 @@ function AccountRow({
             </span>
           )}
         </span>
-        <span className="account-opened">{openedLabel(account.last_opened)}</span>
+        <span className="account-opened">
+          {openedLabel(account.last_opened)}
+          {ramKb != null && ramKb > 0 && (
+            <span
+              className="account-ram"
+              title="Memory used by this account's open window"
+            >
+              {" · "}
+              {formatMb(ramKb)}
+            </span>
+          )}
+        </span>
         {account.popup_policy && (
           <span
             className="popup-badge"
@@ -2216,11 +2232,23 @@ function AppShell() {
   const [unreadCounts, setUnreadCounts] = useState<Map<string, number>>(
     new Map()
   );
+  // v0.15.0: per-account RAM keyed `${appId}:${accountId}`. The scan can
+  // stall on some PCs, so it races a timeout and never delays the poll.
+  const [accountRam, setAccountRam] = useState<Map<string, number>>(new Map());
   const refreshWindowPins = useCallback(async () => {
     try {
-      const wins = await invoke<OpenAccountWindow[]>(
-        "list_open_account_windows"
+      const ramTimeout = new Promise<AccountMemory[]>((resolve) =>
+        setTimeout(() => resolve([]), 5000)
       );
+      const [wins, ram] = await Promise.all([
+        invoke<OpenAccountWindow[]>("list_open_account_windows"),
+        Promise.race([
+          invoke<AccountMemory[]>("account_memory").catch(
+            (): AccountMemory[] => []
+          ),
+          ramTimeout,
+        ]),
+      ]);
       setOpenLabels(new Set(wins.map((w) => w.label)));
       setPinnedLabels(
         new Set(wins.filter((w) => w.pinned).map((w) => w.label))
@@ -2232,6 +2260,13 @@ function AppShell() {
         }
       }
       setUnreadCounts(unread);
+      const ramMap = new Map<string, number>();
+      for (const m of ram) {
+        if (m.rssKb > 0) {
+          ramMap.set(`${m.appId}:${m.accountId}`, m.rssKb);
+        }
+      }
+      setAccountRam(ramMap);
     } catch {
       /* older backend without the command; the menu entry stays hidden */
     }
@@ -3309,6 +3344,11 @@ function AppShell() {
                     ? unreadCounts.get(`${r.app.id}:${r.account.id}`)
                     : undefined
                 }
+                ramFor={(r) =>
+                  r.kind === "account"
+                    ? accountRam.get(`${r.app.id}:${r.account.id}`)
+                    : undefined
+                }
                 onTileContextMenu={(r, x, y) => openTileMenu(r, x, y)}
               />
             )}
@@ -3501,6 +3541,7 @@ function AppShell() {
                               account={account}
                               app={app}
                               unread={unreadCounts.get(`${app.id}:${account.id}`)}
+                              ramKb={accountRam.get(`${app.id}:${account.id}`)}
                               onOpen={() => void handleOpenAccount(app, account)}
                               onOpenPrivate={() =>
                                 void handleOpenAccount(app, account, true, true)

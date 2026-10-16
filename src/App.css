@@ -723,6 +723,17 @@ input[type="color"] {
   text-align: center;
 }
 
+/* v0.15.0: per-account RAM under the tile, and inline in Library rows. */
+.tile-ram {
+  font-size: 11px;
+  color: #5b5e66;
+  white-space: nowrap;
+}
+
+.account-ram {
+  color: #5b5e66;
+}
+
 .tile-icon .app-icon {
   width: 44px;
   height: 44px;
