@@ -283,7 +283,19 @@ fn run_flow(app: &AppHandle, url: &str, mode: &str) {
     // FRESH dir for the new app — that invariant is what the test watches.
     let session_dir = std::env::temp_dir().join("appmaka-e2e-popup-session");
     let _ = std::fs::create_dir_all(&session_dir);
-    crate::windows::spawn_popup_window(app, &parsed, "E2E Test", &session_dir);
+    let ctx = crate::windows::PopupContext {
+        app: app.clone(),
+        app_id: "e2e".to_string(),
+        account_id: "e2e".to_string(),
+        app_name: "E2E Test".to_string(),
+        app_url: parsed.to_string(),
+        session_dir: session_dir.clone(),
+        popup_policy: "allow".to_string(),
+        popup_allowlist: Vec::new(),
+        parent_label: String::new(),
+        chain_allowed: false,
+    };
+    crate::windows::spawn_popup_window(&ctx, &parsed);
     eprintln!("[e2e] popup requested for {url}");
     // Let the window build and the navigation settle.
     std::thread::sleep(std::time::Duration::from_secs(10));

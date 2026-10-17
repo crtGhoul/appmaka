@@ -341,6 +341,7 @@ pub fn open_account_placed(
             popup_policy,
             popup_allowlist: web_app.settings.popup_allowlist.clone(),
             parent_label: label.clone(),
+            chain_allowed: false,
         }))
         // In-app download manager (v0.7.0): downloads stay in the account
         // window's own session instead of kicking out to the system browser.
@@ -1302,6 +1303,16 @@ pub(crate) struct PopupContext {
     /// can be placed over its opener (v0.13.15). Empty when unknown —
     /// placement falls back to screen-center.
     pub(crate) parent_label: String,
+    /// True when this context's window is itself an allowed popup:
+    /// popups IT opens are chain-trusted and skip the root app's
+    /// policy/allowlist re-check. Sign-in and checkout chains hop
+    /// hosts per step (accounts → consent → captcha → IdP), and
+    /// re-judging each hop against the first app's allowlist killed
+    /// hop 2+ intermittently (his "pop ups dont open pop ups" report,
+    /// 2026-10-17). The chain window already runs with the account's
+    /// session; letting it open its flow windows widens nothing.
+    /// Root contexts (account/tabbed/preview) always start false.
+    pub(crate) chain_allowed: bool,
 }
 
 /// Build the `on_new_window` handler for an account window.
@@ -1331,7 +1342,11 @@ pub(crate) fn make_popup_handler(
        + Send
        + 'static {
     move |url: url::Url, features| {
-        if popup_opens_plain(&ctx.popup_policy, global_popups_allowed(&ctx.app)) {
+        if popup_allowed_plain(
+            ctx.chain_allowed,
+            &ctx.popup_policy,
+            global_popups_allowed(&ctx.app),
+        ) {
             open_contained(&ctx, "popup", &url, &features)
         } else {
             // "block": only allowlisted hosts get a contained popup.
@@ -1387,16 +1402,8 @@ fn open_contained(
     #[cfg(not(windows))]
     let _ = features;
     match kind {
-        "oauth" => spawn_oauth_modal(
-            &ctx.app,
-            url,
-            &ctx.app_id,
-            &ctx.account_id,
-            &ctx.app_name,
-            &app_origin(&ctx.app_url),
-            &ctx.session_dir,
-        ),
-        _ => spawn_popup_window(&ctx.app, url, &ctx.app_name, &ctx.session_dir),
+        "oauth" => spawn_oauth_modal(ctx, url),
+        _ => spawn_popup_window(ctx, url),
     }
     tauri::webview::NewWindowResponse::Deny
 }
@@ -1434,6 +1441,9 @@ fn build_contained_window(
     h = h.clamp(240.0, 1200.0);
     let mut nested_ctx = ctx.clone();
     nested_ctx.parent_label = label.clone();
+    // This window exists because a popup was allowed; its own popups
+    // are the next hop of the same flow (chain trust).
+    nested_ctx.chain_allowed = true;
     let mut builder = WebviewWindowBuilder::new(&ctx.app, &label, WebviewUrl::External(url.clone()))
         .data_directory(ctx.session_dir.clone())
         .title(&title)
@@ -1542,6 +1552,13 @@ fn popup_opens_plain(policy: &str, global_allow: bool) -> bool {
     policy == "allow" || global_allow
 }
 
+/// Plain-popup decision for a new-window request, chain-aware: a
+/// window that is itself an allowed popup (chain_allowed) opens its
+/// popups plain without re-judging policy — see PopupContext.
+fn popup_allowed_plain(chain_allowed: bool, policy: &str, global_allow: bool) -> bool {
+    chain_allowed || popup_opens_plain(policy, global_allow)
+}
+
 /// `scheme://host[:port]` of the app's URL, for the modal auto-close check.
 /// Built from parsed parts so no quote characters can sneak in.
 fn app_origin(app_url: &str) -> String {
@@ -1562,28 +1579,24 @@ fn app_origin(app_url: &str) -> String {
 /// until the user closes it. (The old code routed "allow" popups through
 /// the OAuth modal, whose auto-close script killed same-origin popups
 /// within ~1.5 s — the "popups don't open even on Allow" bug.)
-pub(crate) fn spawn_popup_window(app: &AppHandle, url: &url::Url, app_name: &str, session_dir: &Path) {
-    let title = format!("{app_name} — popup");
-    spawn_contained_window(app, "popup", url, &title, session_dir, None, "popup");
+pub(crate) fn spawn_popup_window(ctx: &PopupContext, url: &url::Url) {
+    let title = format!("{} — popup", ctx.app_name);
+    let mut nested_ctx = ctx.clone();
+    nested_ctx.chain_allowed = true;
+    spawn_contained_window("popup", url, &title, None, "popup", nested_ctx);
 }
 
 /// Open an allowlisted popup as a small modal bound to the SAME session
 /// directory, so an OAuth login lands in the right account's cookie jar.
 /// The modal self-closes (best-effort) when navigation returns to the app's
 /// origin; the user can always close it by hand.
-fn spawn_oauth_modal(
-    app: &AppHandle,
-    url: &url::Url,
-    app_id: &str,
-    account_id: &str,
-    app_name: &str,
-    home_origin: &str,
-    session_dir: &Path,
-) {
-    let autoclose = oauth_autoclose_script(home_origin);
-    let title = format!("{app_name} — sign-in");
-    let log_ctx = format!("{app_id}/{account_id}");
-    spawn_contained_window(app, "oauth", url, &title, session_dir, Some(autoclose), &log_ctx);
+fn spawn_oauth_modal(ctx: &PopupContext, url: &url::Url) {
+    let autoclose = oauth_autoclose_script(&app_origin(&ctx.app_url));
+    let title = format!("{} — sign-in", ctx.app_name);
+    let log_ctx = format!("{}/{}", ctx.app_id, ctx.account_id);
+    let mut nested_ctx = ctx.clone();
+    nested_ctx.chain_allowed = true;
+    spawn_contained_window("oauth", url, &title, Some(autoclose), &log_ctx, nested_ctx);
 }
 
 /// Shared contained-window builder for popups and OAuth modals.
@@ -1593,19 +1606,22 @@ fn spawn_oauth_modal(
 /// IPC (`window.__TAURI__`) is ever injected into them — they cannot invoke
 /// backend commands. The only scripts ever injected are our own static
 /// snippets: the JSON-escaped OAuth auto-close script and the custom
-/// cursor (the same one account windows get). Nested popups inside a
-/// contained window are denied outright, preventing popup loops.
+/// cursor (the same one account windows get). Nested popups get the
+/// standard policy handler with chain trust (popup_ctx) — this path
+/// used to hard-deny them, which broke multi-hop sign-in chains
+/// whenever it was the path taken.
 fn spawn_contained_window(
-    app: &AppHandle,
     label_prefix: &str,
     url: &url::Url,
     title: &str,
-    session_dir: &Path,
     initialization_script: Option<String>,
     log_ctx: &str,
+    popup_ctx: PopupContext,
 ) {
     let n = OAUTH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let label = format!("{label_prefix}-{n}");
+    let mut popup_ctx = popup_ctx;
+    popup_ctx.parent_label = label.clone();
     // The window MUST be built on a dedicated thread, never on the calling
     // (WebView2 popup) thread and never via run_on_main_thread: on Windows,
     // WebviewWindowBuilder::build() deadlocks in a synchronous context
@@ -1616,9 +1632,9 @@ fn spawn_contained_window(
     // the same pattern works: build() marshals creation onto the GTK main
     // loop from any thread. Everything the thread touches is cloned up
     // front ('static).
-    let window_app = app.clone();
+    let window_app = popup_ctx.app.clone();
     let url = url.clone();
-    let session_dir = session_dir.to_path_buf();
+    let session_dir = popup_ctx.session_dir.clone();
     let title = title.to_string();
     let log_ctx = log_ctx.to_string();
     let label_prefix = label_prefix.to_string();
@@ -1633,10 +1649,9 @@ fn spawn_contained_window(
             .data_directory(session_dir.clone())
             .title(&title)
             .inner_size(640.0, 720.0)
-            // Nested popups inside the contained window are denied outright:
-            // an OAuth flow that needs a second popup is rare, and this
-            // prevents modal loops.
-            .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+            // Nested popups: same policy handler as every other
+            // window, chain-trusted (this window is an allowed popup).
+            .on_new_window(make_popup_handler(popup_ctx))
             // Popup downloads go through the same in-app manager as every
             // other window (v0.9.8): without this they silently bypassed
             // the download folder, the history, and Mark of the Web.
@@ -2855,6 +2870,19 @@ mod tests {
         // Block without the override stays blocked (allowlist path).
         assert!(!popup_opens_plain("block", false));
         assert!(!popup_opens_plain("", false));
+    }
+
+    #[test]
+    fn popup_chain_trust_matrix() {
+        // Inside an allowed popup chain, hop 2+ opens plain even under
+        // a block policy with no global override — the chain was
+        // already vetted at hop 1 (his "pop ups dont open pop ups").
+        assert!(popup_allowed_plain(true, "block", false));
+        assert!(popup_allowed_plain(true, "", false));
+        // Root windows are unchanged: no trust, policy decides.
+        assert!(popup_allowed_plain(false, "allow", false));
+        assert!(popup_allowed_plain(false, "block", true));
+        assert!(!popup_allowed_plain(false, "block", false));
     }
 
     #[test]

@@ -422,6 +422,7 @@ fn resolve_tab_page(
                     // Set for real in build_tabbed_window, which knows the
                     // group window's label; empty until then.
                     parent_label: String::new(),
+                    chain_allowed: false,
                 }),
                 adblock_css: adblock.cosmetic_css_for(&web_app.url),
                 session_dir,

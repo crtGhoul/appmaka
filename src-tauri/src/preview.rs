@@ -184,6 +184,7 @@ pub fn start_preview(
             popup_policy: "allow".to_string(),
             popup_allowlist: Vec::new(),
             parent_label: site_window_label(&id),
+            chain_allowed: false,
         }))
         .on_document_title_changed(move |_window, title: String| {
             let title = title.trim().to_string();
