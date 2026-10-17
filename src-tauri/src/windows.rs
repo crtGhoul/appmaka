@@ -781,8 +781,12 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
         r#"(function () {{
   try {{
     var STYLE = {style_json};
+    // Identity includes the color (v0.16.1): a color-only change used
+    // to hit the same-style guard below and silently no-op in open
+    // windows. IDENT is what the guard and destroy() compare.
+    var IDENT = STYLE + "|" + {color_hex_json};
     if (window.__appmakaCursor) {{
-      if (window.__appmakaCursor.style === STYLE) return;
+      if (window.__appmakaCursor.style === IDENT) return;
       try {{ window.__appmakaCursor.destroy(); }} catch (e) {{}}
     }}
     // Inject cursor:none as early as possible. initialization_script runs
@@ -928,11 +932,11 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       if (obs) obs.disconnect();
       var junk = document.querySelectorAll("[data-appmaka=cursor],[data-appmaka=cursor-dot]");
       for (var i = 0; i < junk.length; i++) junk[i].remove();
-      if (window.__appmakaCursor && window.__appmakaCursor.style === STYLE) {{
+      if (window.__appmakaCursor && window.__appmakaCursor.style === IDENT) {{
         window.__appmakaCursor = null;
       }}
     }}
-    window.__appmakaCursor = {{ style: STYLE, destroy: destroy }};
+    window.__appmakaCursor = {{ style: IDENT, destroy: destroy }};
   }} catch(e) {{}}
 }})();"#,
         dots = dots,
@@ -940,6 +944,7 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
         style_json = serde_json::to_string(style).unwrap_or_default(),
         color_hex = hex,
         color_rgb = rgb,
+        color_hex_json = serde_json::to_string(hex).unwrap_or_default(),
     )
 }
 
@@ -2743,6 +2748,11 @@ mod tests {
         assert!(rose.contains("#fb7185"));
         assert!(rose.contains("251,113,133"));
         assert!(!rose.contains("#8b5cf6"));
+        // v0.16.1: the controller identity includes the color, so a
+        // color-only live change reinstalls instead of no-oping on the
+        // same-style guard.
+        assert!(rose.contains("=== IDENT"));
+        assert!(rose.contains("\"#fb7185\""));
         // Rainbow recolors its own dots in JS, hues present.
         assert!(cursor_chrome_js("rainbow", "#8b5cf6", "139,92,246").contains("hsl("));
     }
