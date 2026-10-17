@@ -1,4 +1,4 @@
-# AGENTS.md — AppMaka (AppForge)
+# AGENTS.md — AppMaka
 
 Binding conventions for any agent working in this project. This file governs
 *how* work is done; product decisions live in chat history and release notes.

@@ -1,4 +1,4 @@
-# AppMaka (working title)
+# AppMaka
 
 Turn any website into a desktop web app. Add a site by name + URL, and it
 opens in its own dedicated window — no browser tabs, no address bar clutter.
@@ -59,12 +59,17 @@ your web apps, accounts, and installed programs, and hit Enter.
   itself (`apps.json.corrupt-<timestamp>.bak`) and replaced with a fresh
   empty library.
 - **No credential handling** — you sign in directly on each site's own page
-  inside its app window. AppMaka never sees, stores, or transmits passwords.
+  inside its app window. If you choose Save on an account, that sign-in is
+  stored by the OS credential manager (Windows Credential Manager / Secret
+  Service), never in AppMaka's own files, and fills only on the same domain.
+- **Clipboard history is local and literal** — it records everything you
+  copy, including passwords, in AppMaka's data folder on this PC. It is
+  never sent anywhere; clear it any time in Settings → Clipboard.
 
 ## Project layout
 
 ```
-appforge/
+appmaka/
   src/                 React + TypeScript frontend (Vite)
     App.tsx            Spotlight overlay + library UI (views, quick-add, app grid)
     Launcher.tsx       Search, results list, launcher settings panel
@@ -81,6 +86,15 @@ appforge/
 ```
 
 ## Run it
+
+On Linux, install the system packages Tauri needs first (this is the same
+list CI installs):
+
+```sh
+sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget \
+  file libxdo-dev libssl-dev libayatana-appindicator3-dev libasound2-dev \
+  librsvg2-dev
+```
 
 ```sh
 npm install
@@ -104,11 +118,6 @@ cd src-tauri && AR_x86_64_pc_windows_msvc="$PWD/../msvc-ar-wrapper.sh" RC=x86_64
 1. **Microsoft Store apps** — the program scan covers classic Win32 `.exe`
    programs; UWP/Store apps (e.g. installed via the Microsoft Store) aren't
    listed yet.
-2. **Windows installer via CI** — a private GitHub repo with a Windows CI
-   job producing a downloadable installer (decided; repo + workflow land
-   after this build).
-3. **Auto-update** — checking for and installing new versions.
-4. **Custom themes** — currently one quiet theme with an indigo accent.
 
 ## Notes
 

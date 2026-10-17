@@ -337,8 +337,10 @@ export function ClipboardSection() {
 
       <p className="muted small" style={{ marginTop: 12 }}>
         Clipboard history stays on this PC — text and screenshots are never
-        sent anywhere. Win+V is Windows' own clipboard (off by default, can
-        sync to your Microsoft account); this one is separate and stays here.
+        sent anywhere. It records everything you copy, including passwords,
+        so clear it here if you have copied something sensitive. Win+V is
+        Windows' own clipboard (off by default, can sync to your Microsoft
+        account); this one is separate and stays here.
       </p>
 
       <div style={{ marginTop: 20, borderTop: "1px solid var(--border, #e4e6ea)", paddingTop: 14 }}>

@@ -16,3 +16,15 @@ Thumbs.db
 
 # Runtime account session data (created at runtime, never committed)
 src-tauri/sessions/
+
+# Local data that must never be committed (the app writes these to the OS
+# app-data dir, not the repo — this guards against debug copies dropped
+# into the tree)
+.env
+*.ldb
+Cookies
+EBWebView/
+launcher.json
+launcher-settings.json
+web_apps.json
+apps.json
