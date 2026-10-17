@@ -789,9 +789,12 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       if (window.__appmakaCursor.style === IDENT) return;
       try {{ window.__appmakaCursor.destroy(); }} catch (e) {{}}
     }}
-    // Inject cursor:none as early as possible. initialization_script runs
-    // before <head> exists, so target <html> first and re-inject into
-    // <head> once available so page stylesheets can't override us.
+    // The cursor:none style. initialization_script runs before <head>
+    // exists, so target <html> first and re-inject into <head> once
+    // available so page stylesheets can't override us. The CALL is
+    // deferred until the dots exist (below): this style used to be
+    // injected first, and any failure after it left the native cursor
+    // hidden with no drawn replacement — no cursor at all.
     function injectStyle() {{
       if (document.querySelector("[data-appmaka=cursor]")) return;
       var s = document.createElement("style");
@@ -800,7 +803,12 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
         "*,*::before,*::after,html,body,:root{{cursor:none!important}}";
       (document.head || document.documentElement).appendChild(s);
     }}
-    injectStyle();
+    // Rollback helper: removes everything we injected so the native
+    // cursor comes back. Used by destroy() and by the failure path.
+    function removeChrome() {{
+      var junk = document.querySelectorAll("[data-appmaka=cursor],[data-appmaka=cursor-dot]");
+      for (var i = 0; i < junk.length; i++) junk[i].remove();
+    }}
     var obs = null;
     if (!document.head) {{
       obs = new MutationObserver(function() {{
@@ -846,6 +854,10 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       if (STYLE === "orbit") op = i === 0 ? 1 : 0.85;
       nodes.push({{ el: d, x: -100, y: -100, o: op }});
     }}
+
+    // Hide the native cursor only now that the drawn one exists:
+    // any failure above this line leaves the native cursor untouched.
+    injectStyle();
 
     var tx = -100, ty = -100, inside = false, dead = false, rafId = 0;
 
@@ -926,18 +938,34 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
     function destroy() {{
       dead = true;
       cancelAnimationFrame(rafId);
+      clearInterval(wd);
       document.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseenter", onEnter);
       document.removeEventListener("mouseleave", onLeave);
       if (obs) obs.disconnect();
-      var junk = document.querySelectorAll("[data-appmaka=cursor],[data-appmaka=cursor-dot]");
-      for (var i = 0; i < junk.length; i++) junk[i].remove();
+      removeChrome();
       if (window.__appmakaCursor && window.__appmakaCursor.style === IDENT) {{
         window.__appmakaCursor = null;
       }}
     }}
+    // Watchdog: pages and ad scripts sometimes remove foreign DOM.
+    // If our style vanished, put it back; if the dots vanished, tear
+    // down — restoring the native cursor — and let the next re-apply
+    // pass or navigation reinstall cleanly. Never sit cursor-less.
+    var wd = setInterval(function() {{
+      if (dead) return;
+      if (!document.querySelector("[data-appmaka=cursor-dot]")) {{ destroy(); return; }}
+      if (!document.querySelector("[data-appmaka=cursor]")) injectStyle();
+    }}, 2000);
     window.__appmakaCursor = {{ style: IDENT, destroy: destroy }};
-  }} catch(e) {{}}
+  }} catch(e) {{
+    // Fail visible: strip anything we managed to inject so the
+    // native cursor returns instead of leaving no cursor at all.
+    try {{
+      var junk = document.querySelectorAll("[data-appmaka=cursor],[data-appmaka=cursor-dot]");
+      for (var i = 0; i < junk.length; i++) junk[i].remove();
+    }} catch (e2) {{}}
+  }}
 }})();"#,
         dots = dots,
         shape_css_json = serde_json::to_string(&shape_css).unwrap_or_default(),
@@ -2779,6 +2807,26 @@ mod tests {
             assert!(js.contains("destroy"), "{style}");
             assert!(js.contains(&format!("\"{style}\"")), "{style}");
         }
+    }
+
+    #[test]
+    fn cursor_install_fails_visible_never_cursorless() {
+        // Robustness contract (his "sometimes I can't see my cursor"):
+        // the native cursor is hidden only AFTER the drawn dots exist,
+        // a failed install strips its own chrome in the catch, and a
+        // watchdog restores/tears down if the page removes our DOM.
+        let js = cursor_chrome_js("trail", "#8b5cf6", "139,92,246");
+        let dots_at = js.find("nodes.push").unwrap();
+        let hide_at = js.find("Hide the native cursor only now").unwrap();
+        assert!(hide_at > dots_at, "native cursor hidden before dots exist");
+        let catch_at = js.find("catch(e)").unwrap();
+        assert!(
+            js[catch_at..].contains("data-appmaka=cursor-dot"),
+            "catch path must strip injected chrome"
+        );
+        assert!(js.contains("setInterval"), "watchdog missing");
+        assert!(js.contains("clearInterval"), "destroy must stop the watchdog");
+        assert!(js.contains("removeChrome()"), "shared rollback helper missing");
     }
 
     #[test]
