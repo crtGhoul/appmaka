@@ -2171,6 +2171,29 @@ function AppShell() {
   const [apps, setApps] = useState<WebApp[]>([]);
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [platform, setPlatform] = useState<PlatformInfo | null>(null);
+  // v0.16.1: platform info is snapshotted once at mount, but the filter
+  // lists usually finish after that — re-poll while they load so the
+  // "still downloading" banner clears (or turns into the honest failed
+  // state) without an app restart. Bounded: ~2 minutes of polling.
+  const listsState = platform?.filter_lists_state;
+  useEffect(() => {
+    if (listsState !== "loading") return;
+    let tries = 0;
+    const id = window.setInterval(() => {
+      tries += 1;
+      if (tries > 40) {
+        window.clearInterval(id);
+        return;
+      }
+      invoke<PlatformInfo>("platform_info")
+        .then((p) => {
+          setPlatform(p);
+          if (p.filter_lists_state !== "loading") window.clearInterval(id);
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [listsState]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -3277,9 +3300,15 @@ function AppShell() {
           get popup blocking and cosmetic ad hiding.
         </div>
       )}
-      {platform && platform.network_adblock && !platform.filter_lists_loaded && (
+      {platform && platform.network_adblock && platform.filter_lists_state === "loading" && (
         <div className="banner banner-info" role="status">
           Ad filter lists are still downloading — blocking starts automatically when ready.
+        </div>
+      )}
+      {platform && platform.network_adblock && platform.filter_lists_state === "failed" && (
+        <div className="banner banner-info" role="status">
+          Ad filter lists couldn't be downloaded — ad blocking is off for now. AppMaka keeps
+          retrying in the background.
         </div>
       )}
     </>

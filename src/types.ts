@@ -69,6 +69,8 @@ export interface PlatformInfo {
   os: string;
   network_adblock: boolean;
   filter_lists_loaded: boolean;
+  /** Filter-list state for the banner (v0.16.1): still fetching, ready, or download failed. */
+  filter_lists_state: "loading" | "loaded" | "failed";
   filter_lists_updated_at: number | null;
 }
 

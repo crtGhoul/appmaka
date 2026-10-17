@@ -45,6 +45,10 @@ pub struct AdblockState {
     engine: Arc<RwLock<Option<Arc<Engine>>>>,
     loaded: Arc<RwLock<bool>>,
     updated_at: Arc<RwLock<Option<u64>>>,
+    /// True when the last refresh produced no engine at all (v0.16.1):
+    /// the honest "lists couldn't be downloaded" state the banner
+    /// shows, instead of claiming "still downloading" forever.
+    last_refresh_failed: Arc<RwLock<bool>>,
     cache_dir: PathBuf,
 }
 
@@ -61,6 +65,7 @@ impl AdblockState {
             engine: Arc::new(RwLock::new(None)),
             loaded: Arc::new(RwLock::new(false)),
             updated_at: Arc::new(RwLock::new(None)),
+            last_refresh_failed: Arc::new(RwLock::new(false)),
             cache_dir,
         })
     }
@@ -69,6 +74,19 @@ impl AdblockState {
         let loaded = self.loaded.read().map(|g| *g).unwrap_or(false);
         let updated_at = self.updated_at.read().ok().and_then(|g| *g);
         (loaded, updated_at)
+    }
+
+    /// Filter-list state for the UI: "loaded" once an engine exists,
+    /// "failed" when a refresh completed with nothing usable (blocking
+    /// is off; the loop keeps retrying), else "loading".
+    pub fn lists_state(&self) -> &'static str {
+        if self.loaded.read().map(|g| *g).unwrap_or(false) {
+            "loaded"
+        } else if self.last_refresh_failed.read().map(|g| *g).unwrap_or(false) {
+            "failed"
+        } else {
+            "loading"
+        }
     }
 
     /// Background loop: refresh now, then every few hours. Never panics out —
@@ -100,7 +118,16 @@ impl AdblockState {
             }
         }
         if lists.is_empty() {
-            return; // fail open: keep whatever engine we had (possibly none)
+            // Fail open: keep whatever engine we had (possibly none).
+            // With no engine at all, record the failure so the UI can
+            // say blocking is off instead of "still downloading".
+            let has_engine = self.engine.read().map(|g| g.is_some()).unwrap_or(false);
+            if !has_engine {
+                if let Ok(mut guard) = self.last_refresh_failed.write() {
+                    *guard = true;
+                }
+            }
+            return;
         }
         // Compiling the full lists takes ~1-3s; that's why this runs off the
         // UI thread. A fresh Engine replaces the old one atomically.
@@ -114,6 +141,9 @@ impl AdblockState {
         }
         if let Ok(mut guard) = self.loaded.write() {
             *guard = true;
+        }
+        if let Ok(mut guard) = self.last_refresh_failed.write() {
+            *guard = false;
         }
         if let Ok(mut guard) = self.updated_at.write() {
             *guard = Some(newest);

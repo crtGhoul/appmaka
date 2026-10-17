@@ -448,6 +448,8 @@ struct PlatformInfo {
     network_adblock: bool,
     filter_lists_loaded: bool,
     filter_lists_updated_at: Option<u64>,
+    /// "loading" | "loaded" | "failed" (v0.16.1) — the honest banner state.
+    filter_lists_state: String,
 }
 
 #[tauri::command]
@@ -458,6 +460,7 @@ fn platform_info(adblock: State<'_, AdblockState>) -> Result<PlatformInfo, Strin
         network_adblock: cfg!(windows),
         filter_lists_loaded,
         filter_lists_updated_at,
+        filter_lists_state: adblock.lists_state().to_string(),
     })
 }
 
