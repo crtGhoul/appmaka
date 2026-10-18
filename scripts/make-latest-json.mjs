@@ -74,9 +74,9 @@ function main() {
   }
   if (!/^\d+\.\d+\.\d+$/.test(version)) fail(`bad version "${version}" (want X.Y.Z)`);
 
-  const platforms = {};
-  for (const p of PLATFORMS) {
-    const assetName = p.asset(version);
+  // Full signature verification for one asset (assertions 2–4). Returns
+  // the verbatim sig text for manifest embedding.
+  function assertSig(assetName) {
     const { sig, path } = readSig(assetsDir, assetName);
 
     // Assertion 2: the manifest field must be byte-identical in length to
@@ -107,13 +107,27 @@ function main() {
           `(trusted comment mismatch) — refusing to publish`
       );
     }
+    return sig;
+  }
 
+  const platforms = {};
+  for (const p of PLATFORMS) {
+    const assetName = p.asset(version);
+    const sig = assertSig(assetName);
     platforms[p.key] = {
       signature: sig,
       url: `https://github.com/${REPO}/releases/download/v${version}/${assetName}`,
     };
     console.error(`ok: ${p.key} -> ${assetName} (sig ${sig.length} chars, verified)`);
   }
+
+  // The MSI update path (msi_update.rs) fetches the .msi and its .sig
+  // straight from the release — it never appears in this manifest, so
+  // validate its signature here too. A broken one would otherwise only
+  // surface as a failed install on a user's PC.
+  const msiName = `AppMaka_${version}_x64_en-US.msi`;
+  const msiSig = assertSig(msiName);
+  console.error(`ok: windows-msi -> ${msiName} (sig ${msiSig.length} chars, verified)`);
 
   const manifest = {
     version,

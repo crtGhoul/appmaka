@@ -51,7 +51,23 @@ fn classify_install_type(exe_path: &str) -> &'static str {
         // the prefix check works on every Windows path form.
         let s = exe_path.to_lowercase();
         let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        if s.starts_with(r"c:\program files\") || s.starts_with(r"c:\program files (x86)\") {
+        // Program Files isn't always on C: — a Windows install moved to
+        // another drive would be misclassified as NSIS and updated down
+        // the wrong path. Consult the environment, keep C: as fallback.
+        let mut roots = vec![
+            r"c:\program files\".to_string(),
+            r"c:\program files (x86)\".to_string(),
+        ];
+        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Ok(v) = std::env::var(var) {
+                let mut root = v.to_lowercase();
+                if !root.ends_with('\\') {
+                    root.push('\\');
+                }
+                roots.push(root);
+            }
+        }
+        if roots.iter().any(|r| s.starts_with(r.as_str())) {
             return "msi";
         }
     }
@@ -193,16 +209,27 @@ fn verify_msi_signature(
 
     // Only the verified trusted comment is usable from here on (same rule as
     // the plugin: the global signature covers it, and `verify` above checked
-    // that signature).
-    if let Some(signed) = signature
-        .trusted_comment()
-        .split('\t')
-        .find_map(|field| field.strip_prefix("version:"))
-    {
-        let same = signed.trim_start_matches('v') == version.trim_start_matches('v');
-        if !same {
-            return Err("the update failed its security check — nothing was installed.".to_string());
-        }
+    // that signature). Both fields are REQUIRED — fail closed if either is
+    // absent or wrong, so a signature minted for a different artifact of
+    // the same release can never be presented for this one.
+    let fail = || {
+        "the update failed its security check — nothing was installed.".to_string()
+    };
+    let fields: Vec<&str> = signature.trusted_comment().split('\t').collect();
+    let signed_version = fields
+        .iter()
+        .find_map(|f| f.strip_prefix("version:"))
+        .ok_or_else(fail)?;
+    if signed_version.trim_start_matches('v') != version.trim_start_matches('v') {
+        return Err(fail());
+    }
+    let expected_file = format!(
+        "AppMaka_{}_x64_en-US.msi",
+        version.trim_start_matches('v')
+    );
+    let signed_file = fields.iter().find_map(|f| f.strip_prefix("file:"));
+    if signed_file != Some(expected_file.as_str()) {
+        return Err(fail());
     }
     Ok(())
 }
