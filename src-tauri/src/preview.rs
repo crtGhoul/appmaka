@@ -221,6 +221,15 @@ pub fn start_preview(
             site_builder =
                 site_builder.initialization_script(windows::cosmetic_init_script(&css));
         }
+        // Converge the cursor to the saved style after each navigation:
+        // a preview opened before a cursor settings change would
+        // otherwise keep its build-time cursor for its whole life.
+        let nav_app = app.clone();
+        let nav_label = site_window_label(&id);
+        site_builder = site_builder.on_navigation(move |_nav_url: &url::Url| {
+            windows::schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
+            true
+        });
         let site = site_builder
             .build()
             .map_err(|e| format!("could not open preview window: {e}"))?;

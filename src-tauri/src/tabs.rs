@@ -96,6 +96,25 @@ fn new_group_id() -> String {
     format!("g{}-{}", std::process::id(), n)
 }
 
+/// The live window label of the tabbed group whose ACTIVE tab is the
+/// given account, if any. Vault autofill uses it: an account open as
+/// the active tab of a tabbed window fills there, not in a standalone
+/// window. Only the active tab counts — its page is the one the
+/// group's webview is actually showing.
+pub(crate) fn active_tab_window_label(
+    state: &TabState,
+    app_id: &str,
+    account_id: &str,
+) -> Option<String> {
+    let groups = state.inner.lock().ok()?;
+    groups.values().find_map(|g| {
+        g.tabs
+            .get(g.active)
+            .filter(|e| e.app_id == app_id && e.account_id == account_id)
+            .map(|_| g.label.clone())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Pure logic: unit-tested on every platform
 // ---------------------------------------------------------------------------
@@ -537,6 +556,17 @@ fn build_tabbed_window(
                     crate::windows::schedule_cursor_reapply(app.clone(), lbl.clone());
                 })
                 .ok();
+            true
+        });
+    }
+    // Non-Windows: no caption retint to re-run, but navigations must
+    // still converge the cursor to the saved style (see windows.rs).
+    #[cfg(not(windows))]
+    {
+        let nav_app = window_app.clone();
+        let nav_label = args.label.to_string();
+        builder = builder.on_navigation(move |_nav_url: &url::Url| {
+            crate::windows::schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
             true
         });
     }
@@ -1586,6 +1616,35 @@ fn close_strip_window(app: &AppHandle, group_id: &str) {
 mod tests {
     use super::*;
     use layout::*;
+
+    #[test]
+    fn active_tab_window_label_matches_only_the_active_tab() {
+        let entry = |app: &str, acct: &str| TabEntry {
+            app_id: app.to_string(),
+            account_id: acct.to_string(),
+            last_url: None,
+        };
+        let state = TabState::default();
+        state.inner.lock().unwrap().insert(
+            "g1".to_string(),
+            TabGroup {
+                id: "g1".to_string(),
+                label: "tabbed-g1-g0".to_string(),
+                tabs: vec![entry("app1", "acct1"), entry("app2", "acct2")],
+                active: 1,
+                generation: 0,
+                tint: None,
+            },
+        );
+        // The active tab resolves to the group's live window label.
+        assert_eq!(
+            active_tab_window_label(&state, "app2", "acct2"),
+            Some("tabbed-g1-g0".to_string())
+        );
+        // An inactive tab and an unknown account do not resolve.
+        assert_eq!(active_tab_window_label(&state, "app1", "acct1"), None);
+        assert_eq!(active_tab_window_label(&state, "app9", "acct9"), None);
+    }
 
     #[test]
     fn tab_key_classifier() {
