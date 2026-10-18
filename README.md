@@ -31,8 +31,10 @@ your web apps, accounts, and installed programs, and hit Enter.
   Show library, Rescan programs, and Quit. Closing the main window hides it to the tray
   instead of quitting (Quit lives in the tray menu).
 - **Run at startup** — optional; toggled in the Launcher settings panel.
-- **Web app icons** — taken from the site's own `/favicon.ico`; when that fails a generic
-  letter glyph is shown. Empty state is honest: "No apps yet."
+- **Web app icons** — taken from the site's own icon declarations (HTML
+  `<link rel="icon">`, apple-touch-icon, og:image), falling back to
+  `/favicon.ico`; when those fail a generic letter glyph is shown, and
+  you can upload a custom image instead. Empty state is honest: "No apps yet."
 - **Isolated accounts** — multiple signed-in accounts per site, each in its
   own storage partition (per-webview data directories on Windows/WebView2),
   so Account A and Account B never share cookies.
@@ -59,9 +61,10 @@ your web apps, accounts, and installed programs, and hit Enter.
   itself (`apps.json.corrupt-<timestamp>.bak`) and replaced with a fresh
   empty library.
 - **No credential handling** — you sign in directly on each site's own page
-  inside its app window. If you choose Save on an account, that sign-in is
+  inside its app window. If you choose Save on an account, the password is
   stored by the OS credential manager (Windows Credential Manager / Secret
-  Service), never in AppMaka's own files, and fills only on the same domain.
+  Service) and fills only on the same domain; AppMaka keeps only a small
+  index (site + username, never the password) in its data folder.
 - **Clipboard history is local and literal** — it records everything you
   copy, including passwords, in AppMaka's data folder on this PC. It is
   never sent anywhere; clear it any time in Settings → Clipboard.
