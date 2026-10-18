@@ -158,6 +158,10 @@ pub(crate) fn run_add(
         }
     }
 
+    // The launcher's grid is a mount-time snapshot: tell it to re-list
+    // so the promoted app appears immediately, not after a restart.
+    let _ = app.emit("appmaka:apps-changed", ());
+
     // Open as a proper page window (frameless + caption strip), then close
     // the popup: it has been promoted, and keeping both open would show
     // two windows on the same site. From an account window the user is

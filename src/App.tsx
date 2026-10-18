@@ -1978,18 +1978,15 @@ function UpdaterSection({
         const progress = total
           ? Math.min(99, Math.round((event.payload.downloaded / total) * 100))
           : null;
-        // v0.8.3: the backend exits into the installer the moment the
-        // download is complete and verified, so once the bytes add up the
-        // installer is effectively launched — say so instead of sticking
-        // at 99%. (The msi-update-launched event below is a backup; it may
-        // not arrive before the app exits.)
-        if (total !== null && event.payload.downloaded >= total) {
-          setStatus({ kind: "launched", version: update.version });
-        } else {
-          setStatus((prev) =>
-            prev.kind === "downloading" ? { ...prev, progress } : prev
-          );
-        }
+        // Not "launched" yet: at 100% of the .msi bytes the backend
+        // still has to download the signature file and verify it
+        // before anything launches — claiming "launched" here put a
+        // success message in front of a possible verification
+        // failure. The status flips on the msi-update-launched event
+        // or when install_msi_update resolves, never on bytes alone.
+        setStatus((prev) =>
+          prev.kind === "downloading" ? { ...prev, progress } : prev
+        );
       }
     );
     const unlistenLaunched = await listen("msi-update-launched", () => {
@@ -2041,7 +2038,7 @@ function UpdaterSection({
           {status.kind === "idle" && "Never checked this session."}
           {status.kind === "checking" && "Checking…"}
           {status.kind === "uptodate" && "You're up to date."}
-          {status.kind === "none" && "Couldn't reach the update server."}
+          {status.kind === "none" && "Couldn't check for updates right now."}
           {status.kind === "available" &&
             `Version ${status.version} is available.`}
           {status.kind === "downloading" &&
@@ -2490,6 +2487,25 @@ function AppShell() {
     listen("appmaka:notice", (e) => {
       const msg = (e.payload as { message?: string } | null)?.message;
       if (typeof msg === "string" && msg.length > 0) setNotice(msg);
+    })
+      .then((f) => {
+        off = f;
+      })
+      .catch(() => {});
+    return () => off?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A window promoted to an application (popup system menu,
+  // Ctrl+Shift+A, RAM dashboard) lands in the store behind this
+  // component's mount-time snapshot — re-list when the backend says
+  // the library changed so it appears without a restart.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    listen("appmaka:apps-changed", () => {
+      invoke<WebApp[]>("list_apps")
+        .then(setApps)
+        .catch(() => {});
     })
       .then((f) => {
         off = f;
