@@ -356,19 +356,34 @@ pub async fn run_routine(
         let mut tabs: Vec<crate::tabs::TabEntry> = Vec::new();
         let mut results: Vec<(String, Result<(), String>)> =
             Vec::with_capacity(routine.items.len());
+        // Snapshot for account validation: an account item whose app or
+        // account was deleted must count as failed, not opened.
+        let apps_snapshot = store.list().unwrap_or_default();
         for (i, item) in routine.items.iter().enumerate() {
-            if i > 0 {
+            // Pace only native program launches; account items just
+            // collect into a Vec here (the window opens once, below).
+            if i > 0 && item.kind == "program" {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
             let name = item_display_name(&store, &launcher, item);
             let outcome = match item.kind.as_str() {
                 "account" => {
-                    tabs.push(crate::tabs::TabEntry {
-                        app_id: item.app_id.clone(),
-                        account_id: item.account_id.clone().unwrap_or_default(),
-                        last_url: None,
-                    });
-                    Ok(())
+                    let account_id = item.account_id.clone().unwrap_or_default();
+                    let exists = apps_snapshot
+                        .iter()
+                        .find(|a| a.id == item.app_id)
+                        .map(|a| a.accounts.iter().any(|ac| ac.id == account_id))
+                        .unwrap_or(false);
+                    if exists {
+                        tabs.push(crate::tabs::TabEntry {
+                            app_id: item.app_id.clone(),
+                            account_id,
+                            last_url: None,
+                        });
+                        Ok(())
+                    } else {
+                        Err("that app or account no longer exists".to_string())
+                    }
                 }
                 "program" => {
                     let program_id = item.program_id.as_deref().unwrap_or("");
@@ -379,7 +394,9 @@ pub async fn run_routine(
             results.push((name, outcome));
         }
         if !tabs.is_empty() {
-            let info = crate::tabs::open_tabbed_window(
+            // The per-item results above are the summary's whole story:
+            // no extra "{N} tabs" row (it inflated the opened count).
+            let _info = crate::tabs::open_tabbed_window(
                 &app,
                 &store,
                 &adblock,
@@ -392,10 +409,6 @@ pub async fn run_routine(
                 },
             )
             .map_err(|e| format!("couldn't open the tabbed window: {e}"))?;
-            results.push((
-                format!("{} tabs", info.tabs.len()),
-                Ok(()),
-            ));
         }
         return Ok(summarize(&results));
     }

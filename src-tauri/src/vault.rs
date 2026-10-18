@@ -57,7 +57,12 @@ fn save_index(app: &AppHandle, index: &VaultIndex) -> Result<(), String> {
     let path = index_path(app)?;
     let data =
         serde_json::to_vec_pretty(index).map_err(|e| format!("could not encode vault index: {e}"))?;
-    fs::write(&path, data).map_err(|e| format!("could not write vault index: {e}"))
+    // Atomic like every other store in the app: a crash mid-write must
+    // not truncate the index (it would orphan every saved login's
+    // domain/username metadata).
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, data).map_err(|e| format!("could not write vault index: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("could not write vault index: {e}"))
 }
 
 /// The vault key for an account. app_id/account_id are our own random IDs
@@ -184,9 +189,20 @@ pub(crate) fn fill_login(
         .ok_or_else(|| "no saved login for this account".to_string())?;
 
     let label = format!("acct-{app_id}-{account_id}");
-    let window = app
-        .get_webview_window(&label)
-        .ok_or_else(|| "account window is not open".to_string())?;
+    let window = match app.get_webview_window(&label) {
+        Some(w) => w,
+        None => {
+            // The account may be open as the active tab of a tabbed
+            // window rather than a standalone window — fill there.
+            let tab_label = app
+                .try_state::<crate::tabs::TabState>()
+                .and_then(|s| crate::tabs::active_tab_window_label(&s, app_id, account_id));
+            match tab_label.and_then(|l| app.get_webview_window(&l)) {
+                Some(w) => w,
+                None => return Err("account window is not open".to_string()),
+            }
+        }
+    };
     let current_url = window
         .url()
         .map_err(|e| format!("could not read page URL: {e}"))?
@@ -212,7 +228,12 @@ pub(crate) fn fill_login(
     window
         .eval(&js)
         .map_err(|e| format!("could not fill the page: {e}"))?;
-    Ok(format!("filled login for {username} on {domain}"))
+    // eval cannot return the script's result in Tauri v2, so this must
+    // not claim the form filled — only that the login was sent to the
+    // page (the script no-ops when the page has no password field).
+    Ok(format!(
+        "sent the saved login for {username} to {domain} — if nothing filled, open the site's sign-in form first"
+    ))
 }
 
 /// Build the fill script. Username/password are JSON-encoded into the
