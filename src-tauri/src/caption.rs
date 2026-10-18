@@ -399,7 +399,21 @@ mod imp {
     static CHROME_CTL: OnceLock<(mpsc::Sender<ChromeCmd>, Wake)> = OnceLock::new();
 
     fn with_chrome<R>(f: impl FnOnce(&mut Chrome) -> Option<R>) -> Option<R> {
-        CHROME.with(|c| c.borrow_mut().as_mut().and_then(f))
+        // AGENTS.md Win32 Rule 2: try_borrow (skip on contention), never
+        // borrow — a re-entrant proc can reach this while a borrow is
+        // held across a Win32 call, and the old borrow_mut panicked
+        // (contained, but the echo was lost).
+        CHROME.with(|c| {
+            c.try_borrow_mut()
+                .ok()
+                .and_then(|mut g| g.as_mut().and_then(f))
+        })
+    }
+
+    /// Read-only twin of with_chrome for the command handler, whose
+    /// arms only clone handles out of the state. Same Rule 2 contract.
+    fn with_chrome_ro<R>(f: impl FnOnce(&Chrome) -> Option<R>) -> Option<R> {
+        CHROME.with(|c| c.try_borrow().ok().and_then(|g| g.as_ref().and_then(f)))
     }
 
     /// Minimize button: third slot from the right (Windows order:
@@ -1626,6 +1640,20 @@ mod imp {
                         Some(())
                     });
                 }
+                if follow.is_none() {
+                    // The follow closure's `?` path (GetWindowRect
+                    // failed) skips its own syncing reset — clear the
+                    // flag here so a transient failure can't wedge
+                    // caption sync for this window permanently. (When
+                    // the closure did run, it already cleared the flag
+                    // or the caption is gone; this is then a no-op.)
+                    with_chrome(|ch| {
+                        if let Some(cp) = ch.captions.get_mut(&plan.label) {
+                            cp.syncing = false;
+                        }
+                        Some(())
+                    });
+                }
             }
             Act::Shift { dx, dy } => {
                 let follow: Option<(HWND, i32, i32)> = with_chrome(|ch| {
@@ -2450,9 +2478,7 @@ mod imp {
                 // confirm, so it runs on a worker thread — never on the
                 // chrome thread's message pump.
                 if crate::tabs::is_tabbed_label(&label) {
-                    let app = CHROME.with(|c| {
-                        c.borrow().as_ref().map(|ch| ch.app.clone())
-                    });
+                    let app = with_chrome_ro(|ch| Some(ch.app.clone()));
                     if let Some(app) = app {
                         std::thread::Builder::new()
                             .name("appmaka-tab-gesture".to_string())
@@ -2462,10 +2488,8 @@ mod imp {
                             .ok();
                     }
                 } else {
-                    let ctx = CHROME.with(|c| {
-                        c.borrow().as_ref().map(|ch| {
-                            (ch.app.clone(), ch.app.get_webview_window(&label))
-                        })
+                    let ctx = with_chrome_ro(|ch| {
+                        Some((ch.app.clone(), ch.app.get_webview_window(&label)))
                     });
                     if let Some((app, Some(w))) = ctx {
                         if crate::pin::is_pinned(&app, &label) {
@@ -2484,11 +2508,9 @@ mod imp {
                 // Direction decided from live Win32 state under a short
                 // borrow; the Tauri call runs after it (same pattern as
                 // ClosePage's close above).
-                let ctx = CHROME.with(|c| {
-                    c.borrow().as_ref().and_then(|ch| {
-                        let cp = ch.captions.get(&label)?;
-                        Some((ch.app.clone(), owner_is_fullscreen(cp.owner)))
-                    })
+                let ctx = with_chrome_ro(|ch| {
+                    let cp = ch.captions.get(&label)?;
+                    Some((ch.app.clone(), owner_is_fullscreen(cp.owner)))
                 });
                 if let Some((app, is_fs)) = ctx {
                     if let Some(w) = app.get_webview_window(&label) {
@@ -2506,7 +2528,7 @@ mod imp {
                 // unhook/install helpers manage their own short borrows
                 // (no borrow is held while dispatching — same contract
                 // as the other arms).
-                let app = CHROME.with(|c| c.borrow().as_ref().map(|ch| ch.app.clone()));
+                let app = with_chrome_ro(|ch| Some(ch.app.clone()));
                 if let Some(app) = app {
                     if crate::launcher_settings::dictation_compat_enabled(&app) {
                         with_chrome(|ch| {
@@ -2585,9 +2607,7 @@ mod imp {
                 // Ctrl+Tab et al: resolve the target tab and switch on a
                 // worker thread (window building never on the chrome
                 // thread, and switch_tab may briefly block on locks).
-                let app = CHROME.with(|c| {
-                    c.borrow().as_ref().map(|ch| ch.app.clone())
-                });
+                let app = with_chrome_ro(|ch| Some(ch.app.clone()));
                 if let Some(app) = app {
                     std::thread::Builder::new()
                         .name("appmaka-tab-key".to_string())
