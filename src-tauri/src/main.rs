@@ -111,10 +111,34 @@ fn remove_app(
     id: String,
     store: State<'_, AppStore>,
 ) -> Result<(), String> {
+    // Deletion was already confirmed in the UI. Clear the pins on the
+    // app's windows first: the pin guard would otherwise pop a second
+    // "Keep open?" dialog, and if the user kept a window open the store
+    // delete below would still run — stranding a live window on a
+    // deleted app and a locked session directory.
+    let account_ids: Vec<String> = store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|a| a.id == id)
+        .map(|a| a.accounts.iter().map(|ac| ac.id.clone()).collect())
+        .unwrap_or_default();
+    for account_id in &account_ids {
+        crate::pin::set_pinned(
+            &app,
+            &windows::account_window_label(&id, account_id),
+            false,
+        );
+    }
     // Windows lock the session files while a webview is alive, so close the
     // app's windows before the store deletes their session directories.
     windows::close_account_windows(&app, &id);
-    store.remove_app(&id)
+    store.remove_app(&id)?;
+    // Saved logins go with the app — no orphaned vault credentials.
+    for account_id in &account_ids {
+        let _ = crate::vault::delete_credential(&app, &id, account_id);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -156,8 +180,17 @@ fn remove_account(
     account_id: String,
     store: State<'_, AppStore>,
 ) -> Result<(), String> {
+    // Same pin rule as remove_app: deletion was confirmed in the UI,
+    // so a pinned window must not survive its own account record.
+    crate::pin::set_pinned(
+        &app,
+        &windows::account_window_label(&app_id, &account_id),
+        false,
+    );
     windows::close_account_window(&app, &app_id, &account_id);
-    store.remove_account(&app_id, &account_id)
+    store.remove_account(&app_id, &account_id)?;
+    let _ = crate::vault::delete_credential(&app, &app_id, &account_id);
+    Ok(())
 }
 
 /// Rename an account (label only). Tauri exposes the snake_case params as

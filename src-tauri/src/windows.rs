@@ -371,6 +371,19 @@ pub fn open_account_placed(
             true
         });
     }
+    // Non-Windows has no caption tint to re-run, but the cursor
+    // convergence in that hook matters on every platform: a window
+    // built before a cursor settings change must not keep its old
+    // build-time cursor after the next navigation.
+    #[cfg(not(windows))]
+    {
+        let nav_app = app.clone();
+        let nav_label = label.clone();
+        builder = builder.on_navigation(move |_nav_url: &url::Url| {
+            schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
+            true
+        });
+    }
     // Cosmetic filtering: engine-generated hide selectors injected before
     // first paint. Skipped entirely when no engine is loaded (fail open).
     // The target=_blank shim is always injected: without it WebKitGTK drops
@@ -994,12 +1007,17 @@ pub(crate) fn cursor_live_apply_js(style: &str, hex: &str, rgb: &str) -> String 
     }
 }
 
-/// Which open windows carry the custom cursor: account windows, tabbed
-/// windows, and the search window — the same set that gets the script
-/// as an initialization script at build time. Popups never get it.
+/// Which open windows carry the custom cursor: the same set that gets
+/// the script as an initialization script at build time — account,
+/// tabbed, and search windows, plus contained popups/OAuth modals
+/// (v0.13.18) and preview site webviews. Settings changes broadcast
+/// only to these; anything else was built without the cursor.
 fn cursor_window_label(label: &str) -> bool {
     label.starts_with("acct-")
         || label.starts_with("tabbed-")
+        || label.starts_with("popup-")
+        || label.starts_with("oauth-")
+        || (label.starts_with("preview-") && label.ends_with("-site"))
         || label == crate::websearch::SEARCH_WINDOW_LABEL
 }
 
@@ -1185,7 +1203,12 @@ pub(crate) const NAV_KEYS_JS: &str = r#"(function () {
 /// color (v0.13.17). The base script is a const; the accent hex is
 /// swapped in per window build from the saved setting.
 pub(crate) fn shortcuts_overlay_js(app: &AppHandle) -> String {
-    let accent = crate::launcher_settings::load(app).accent;
+    // The settings live in managed state; the disk load is only a
+    // fallback for calls made before the state is registered.
+    let accent = app
+        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.accent.clone()))
+        .unwrap_or_else(|| crate::launcher_settings::load(app).accent);
     SHORTCUTS_OVERLAY_JS.replace("#a5b4fc", crate::launcher_settings::accent_text_hex(&accent))
 }
 
@@ -1478,7 +1501,10 @@ fn build_contained_window(
             let u = nav_url.clone();
             std::thread::Builder::new()
                 .name(format!("appmaka-popup-retint-{lbl}"))
-                .spawn(move || crate::popup_chrome::tint_popup_caption(&app, &lbl, &u))
+                .spawn(move || {
+                    crate::popup_chrome::tint_popup_caption(&app, &lbl, &u);
+                    schedule_cursor_reapply(app.clone(), lbl.clone());
+                })
                 .ok();
             true
         });
@@ -1494,12 +1520,16 @@ fn build_contained_window(
             Some(window)
         }
         Err(e) => {
+            // Log it, but no dialog: open_contained falls back to the
+            // spawned builder when this returns None, and that usually
+            // succeeds — a "could not open" dialog in front of a popup
+            // that did open is a false alarm.
             crate::errors::record(
                 &ctx.app,
                 "window-open",
                 &format!("Could not open the {kind} window."),
                 &format!("{kind} window failed for {}/{}: {e}", ctx.app_id, ctx.account_id),
-                true,
+                false,
             );
             None
         }
@@ -1682,7 +1712,10 @@ fn spawn_contained_window(
                     let u = nav_url.clone();
                     std::thread::Builder::new()
                         .name(format!("appmaka-popup-retint-{lbl}"))
-                        .spawn(move || crate::popup_chrome::tint_popup_caption(&app, &lbl, &u))
+                        .spawn(move || {
+                            crate::popup_chrome::tint_popup_caption(&app, &lbl, &u);
+                            schedule_cursor_reapply(app.clone(), lbl.clone());
+                        })
                         .ok();
                     true
                 });
@@ -2709,6 +2742,9 @@ pub fn forget_login(
     app_id: String,
     account_id: String,
 ) -> Result<(), String> {
+    // The user already confirmed forgetting: clear the pin so the pin
+    // guard can't keep the window open against the session wipe below.
+    crate::pin::set_pinned(&app, &account_window_label(&app_id, &account_id), false);
     close_account_window(&app, &app_id, &account_id);
     store.forget_account_session(&app_id, &account_id)
 }
@@ -2890,9 +2926,14 @@ mod tests {
         assert!(cursor_window_label("acct-app1-acct1"));
         assert!(cursor_window_label("tabbed-group1-g0"));
         assert!(cursor_window_label(crate::websearch::SEARCH_WINDOW_LABEL));
+        // v0.13.18 injected the cursor into contained windows and
+        // previews too — the broadcast set must match the built set.
+        assert!(cursor_window_label("popup-3"));
+        assert!(cursor_window_label("oauth-1"));
+        assert!(cursor_window_label("preview-abc-site"));
+        assert!(!cursor_window_label("preview-abc-header"));
         assert!(!cursor_window_label("main"));
-        assert!(!cursor_window_label("popup-3"));
-        assert!(!cursor_window_label("oauth-1"));
+        assert!(!cursor_window_label("clipboard"));
     }
 }
 
