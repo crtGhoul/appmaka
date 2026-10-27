@@ -336,6 +336,21 @@ pub fn open_account_placed(
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        // An open that returns Ok while nothing appears is worse than a
+        // loud failure: the user clicks again and again with no signal.
+        // A window that stays invisible after show/focus is one such
+        // case, so record it where the settings error list can show it.
+        // Err (visibility unknown) records nothing — only a definite
+        // "not visible" earns an entry.
+        if window.is_visible().map(|v| !v).unwrap_or(false) {
+            crate::errors::record(
+                app,
+                "window-open",
+                &format!("\"{}\" did not appear after focusing its window.", account.label),
+                &format!("label {label}: show/focus returned but is_visible is false"),
+                true,
+            );
+        }
         if let Some(p) = placement {
             apply_placement(&window, p);
         }
