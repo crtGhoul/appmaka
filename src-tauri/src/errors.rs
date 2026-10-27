@@ -13,9 +13,12 @@
 //! Every entry is sanitized before storage so copied diagnostics can never
 //! leak credential or session values. The launcher settings' "Copy
 //! diagnostics" action copies recent errors + version + OS for pasting
-//! straight into chat.
+//! straight into chat. The ring also persists to `<app_data>/errors.json`
+//! (v0.16.3): a crash no longer takes the evidence with it — relaunching
+//! restores the previous session's errors for copying.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -41,7 +44,7 @@ const SECRET_KEYS: &[&str] = &[
     "token",
 ];
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ErrorEntry {
     pub id: u64,
     pub unix_secs: u64,
@@ -55,6 +58,10 @@ pub struct ErrorEntry {
 pub struct ErrorLog {
     entries: VecDeque<ErrorEntry>,
     next_id: u64,
+    /// Where the log persists (`<app_data>/errors.json`), set by
+    /// `init_log`. None until then — early-startup errors stay
+    /// memory-only rather than failing.
+    path: Option<PathBuf>,
 }
 
 fn unix_secs() -> u64 {
@@ -62,6 +69,61 @@ fn unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Serialize the ring for disk: a plain JSON array, oldest first —
+/// the same order `entries` keeps in memory.
+fn serialize_entries(entries: &VecDeque<ErrorEntry>) -> String {
+    serde_json::to_string(&entries.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Parse a persisted log back. The file is user-writable, so it is
+/// never trusted: unparseable input yields an empty log, technical
+/// details are re-sanitized, and the ring cap keeps the newest CAP.
+fn parse_entries(text: &str) -> VecDeque<ErrorEntry> {
+    let mut parsed: Vec<ErrorEntry> = serde_json::from_str(text).unwrap_or_default();
+    for e in &mut parsed {
+        e.technical = sanitize(&e.technical);
+    }
+    if parsed.len() > CAP {
+        parsed.drain(..parsed.len() - CAP);
+    }
+    parsed.into()
+}
+
+/// Rewrite the persisted log (temp file + rename, the store.rs
+/// pattern, so a crash mid-write can't corrupt the previous copy).
+/// Best-effort: diagnostics must never fail the operation that was
+/// being recorded.
+fn persist(log: &ErrorLog) {
+    let Some(path) = &log.path else { return };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, serialize_entries(&log.entries)).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// Load the persisted log and remember its path so `record` keeps the
+/// file current. Called once from setup, after the log state is
+/// managed. This is what lets a tester relaunch after a crash and
+/// still copy the diagnostics that explain it (v0.16.3).
+pub fn init_log<R: Runtime>(app: AppHandle<R>) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let path = dir.join("errors.json");
+    let Some(state) = app.try_state::<Mutex<ErrorLog>>() else {
+        return;
+    };
+    let Ok(mut log) = state.lock() else { return };
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        log.entries = parse_entries(&text);
+        // record() pre-increments, so next_id is the last id used:
+        // restoring it to the max persisted id keeps ids monotonic.
+        log.next_id = log.entries.iter().map(|e| e.id).max().unwrap_or(0);
+    }
+    log.path = Some(path);
 }
 
 /// `2026-10-07 02:11:04 UTC` from unix seconds. Hand-rolled civil date
@@ -206,6 +268,7 @@ pub fn record<R: Runtime>(
         while log.entries.len() > CAP {
             log.entries.pop_front();
         }
+        persist(&log);
         e
     };
     if notify {
@@ -231,15 +294,21 @@ fn entry_text(e: &ErrorEntry) -> String {
     )
 }
 
+/// "windows (x86_64)" — OS plus architecture, the two facts a bug
+/// report from another machine most often turns out to hinge on.
+fn platform_label() -> String {
+    format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH)
+}
+
 /// Full diagnostics text: version + OS + every recent error, newest first.
 pub fn format_diagnostics(entries: &[ErrorEntry]) -> String {
     let mut out = format!(
         "AppMaka {} on {} — error report\n",
         env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS
+        platform_label()
     );
     if entries.is_empty() {
-        out.push_str("No errors recorded this session.\n");
+        out.push_str("No errors recorded.\n");
         return out;
     }
     for e in entries {
@@ -274,10 +343,21 @@ pub fn copy_error_details(app: AppHandle, id: u64) -> Result<(), String> {
     let text = format!(
         "AppMaka {} on {}\n\n{}",
         env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
+        platform_label(),
         entry_text(&entry)
     );
     write_clipboard(&app, &text)
+}
+
+/// JS: `invoke("record_frontend_error", { kind, message, technical })` —
+/// records a frontend-initiated failure (a tile click whose invoke
+/// returned an error) in the same sanitized ring the settings error
+/// list shows. Recorded only, never notified: the frontend already
+/// shows its own inline error for these, and a second dialog would
+/// double the noise.
+#[tauri::command]
+pub fn record_frontend_error(app: AppHandle, kind: String, message: String, technical: String) {
+    record(&app, &kind, &message, &technical, false);
 }
 
 /// JS: `invoke("copy_diagnostics")` — copies everything for pasting into
@@ -292,7 +372,11 @@ pub fn copy_diagnostics(app: AppHandle) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_diagnostics, format_unix_utc, sanitize, ErrorEntry};
+    use super::{
+        format_diagnostics, format_unix_utc, parse_entries, platform_label, sanitize,
+        serialize_entries, ErrorEntry, CAP,
+    };
+    use std::collections::VecDeque;
 
     #[test]
     fn utc_formatting_known_value() {
@@ -358,5 +442,53 @@ mod tests {
     fn diagnostics_empty_state() {
         let text = format_diagnostics(&[]);
         assert!(text.contains("No errors recorded"), "{text}");
+    }
+
+    #[test]
+    fn diagnostics_header_names_platform() {
+        let text = format_diagnostics(&[]);
+        assert!(text.contains(&platform_label()), "{text}");
+        assert!(text.contains(std::env::consts::ARCH), "{text}");
+    }
+
+    #[test]
+    fn persistence_roundtrip_preserves_entries() {
+        let entries: VecDeque<ErrorEntry> = vec![entry(1, "first"), entry(2, "second; x=1")]
+            .into_iter()
+            .collect();
+        let back = parse_entries(&serialize_entries(&entries));
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].id, 1);
+        assert_eq!(back[1].id, 2);
+        assert_eq!(back[1].technical, entries[1].technical);
+        assert_eq!(back[0].kind, "window-open");
+    }
+
+    #[test]
+    fn parse_entries_rejects_garbage() {
+        assert!(parse_entries("not json").is_empty());
+        assert!(parse_entries("").is_empty());
+        assert!(parse_entries("{}").is_empty());
+    }
+
+    #[test]
+    fn parse_entries_caps_to_newest() {
+        let many: VecDeque<ErrorEntry> =
+            (1..=(CAP as u64 + 5)).map(|i| entry(i, "x")).collect();
+        let back = parse_entries(&serialize_entries(&many));
+        assert_eq!(back.len(), CAP);
+        assert_eq!(back.front().map(|e| e.id), Some(6));
+        assert_eq!(back.back().map(|e| e.id), Some(CAP as u64 + 5));
+    }
+
+    #[test]
+    fn parse_entries_resanitizes_technical() {
+        // A hand-edited errors.json must not smuggle secrets back into
+        // copyable diagnostics.
+        let raw = r#"[{"id":1,"unix_secs":1,"kind":"k","message":"m","technical":"token=abc123"}]"#;
+        let back = parse_entries(raw);
+        assert_eq!(back.len(), 1);
+        assert!(back[0].technical.contains("token=[redacted]"), "{}", back[0].technical);
+        assert!(!back[0].technical.contains("abc123"), "{}", back[0].technical);
     }
 }
