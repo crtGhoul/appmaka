@@ -39,6 +39,10 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      },
       "wix": {
         "fragmentPaths": [
           "wix/close-app.wxs"
@@ -48,7 +52,7 @@
   },
   "identifier": "com.appforge.app",
   "productName": "AppMaka",
-  "version": "0.16.1",
+  "version": "0.18.1",
   "plugins": {
     "deep-link": {
       "desktop": {
@@ -59,8 +63,9 @@
     },
     "updater": {
       "active": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZDOEY5QzAzMjI1Q0M4QjkKUldTNXlGd2lBNXlQYkpHSCtNaDVSc2tXd094VmwrcGpNbVpZSlltZzBWQ2tidHoxWCtHMjlDNnkK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZERDQzQUU3RjAxQ0EwNDEKUldSQm9Cenc1enJVL1Jsbmw5RGllM0llNWdoc3VhT3dQZmpCL0VYVUNJRUpBYVJLL0tKWGF1NEoK",
       "endpoints": [
+        "https://codeberg.org/crtGhoul/appmaka/raw/branch/main/latest.json",
         "https://github.com/crtGhoul/appmaka/releases/latest/download/latest.json"
       ],
       "windows": {
