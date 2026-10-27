@@ -168,20 +168,22 @@ fn subclass_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
     let hwnd_raw = hwnd.0 as isize;
     // Phase 1 — decide under a short, non-blocking lock. Released before
     // every Win32 call below.
-    let (old_proc, fire_add, unsubclass) = match subclasses().try_lock() {
+    let (old_proc, fire_add, unsubclass, unsub_label) = match subclasses().try_lock() {
         Ok(map) => match map.get(&hwnd_raw) {
             Some(e) => {
                 let fire = msg == WM_SYSCOMMAND && (wparam.0 as u32) == IDM_ADD_TO_APPLICATIONS;
+                let unsub = msg == WM_NCDESTROY;
                 (
                     e.old_proc,
                     fire.then(|| (e.app.clone(), e.label.clone())),
-                    msg == WM_NCDESTROY,
+                    unsub,
+                    unsub.then(|| (e.app.clone(), e.label.clone())),
                 )
             }
-            None => (0, None, false),
+            None => (0, None, false, None),
         },
         // Lock contended: skip our handling entirely, just forward.
-        Err(_) => (0, None, false),
+        Err(_) => (0, None, false, None),
     };
 
     unsafe {
@@ -221,6 +223,21 @@ fn subclass_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             }
             if let Ok(mut map) = subclasses().try_lock() {
                 map.remove(&hwnd_raw);
+            }
+            // Close-lifecycle trace: the last close step for a popup's
+            // native chrome. If this never logs for a closed popup, the
+            // subclass (and its window) never tore down. File I/O goes
+            // on a detached thread — never file work on the proc.
+            if let Some((app, label)) = unsub_label {
+                let _ = std::thread::Builder::new()
+                    .name(format!("appmaka-popup-lifecycle-{label}"))
+                    .spawn(move || {
+                        crate::windows::log_popup_lifecycle(
+                            &app,
+                            &label,
+                            "wm-ncdestroy-subclass-removed",
+                        );
+                    });
             }
         }
         if old_proc != 0 {
