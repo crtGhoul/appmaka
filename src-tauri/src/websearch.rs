@@ -21,7 +21,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::adblock::AdblockState;
 use crate::launcher_settings::LauncherSettings;
-use crate::windows::{apply_placement, cosmetic_init_script, shortcuts_overlay_js, NAV_KEYS_JS, TARGET_BLANK_SHIM_JS, WindowPlacement};
+use crate::windows::{apply_placement, cosmetic_init_script, make_popup_handler, shortcuts_overlay_js, PopupContext, NAV_KEYS_JS, TARGET_BLANK_SHIM_JS, WindowPlacement};
 
 /// Fixed label: one search window at a time; a second search reuses it.
 pub const SEARCH_WINDOW_LABEL: &str = "websearch";
@@ -43,6 +43,92 @@ fn search_engine(app: &AppHandle) -> String {
     app.try_state::<Mutex<LauncherSettings>>()
         .and_then(|s| s.lock().ok().map(|s| s.search_engine.clone()))
         .unwrap_or_else(|| "duckduckgo".to_string())
+}
+
+/// Labels of contained popups currently open from the search window.
+/// They share the search data dir, so the on-close wipe must not run
+/// while any of them is alive. Populated on Windows, where the
+/// contained builder hands the built window back to the handler
+/// (NewWindowResponse::Create); on other platforms the spawned
+/// popups' labels never surface here and the wipe keeps its old
+/// best-effort behavior.
+static SEARCH_POPUPS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn search_popups_alive() -> bool {
+    // A poisoned lock reads as "alive": skipping a wipe is harmless,
+    // wiping under a live popup is not.
+    SEARCH_POPUPS
+        .lock()
+        .map(|labels| !labels.is_empty())
+        .unwrap_or(true)
+}
+
+/// Any contained popup (from any site) still open. Search popups share
+/// the search data dir, and fallback-spawned popups never land in
+/// SEARCH_POPUPS (only the Windows Create path registers), so the wipe
+/// must refuse while ANY popup is live — wiping under a live popup
+/// would delete the dir its WebView2 environment is still reading.
+/// Skipping is harmless: the next search-window close retries the wipe.
+fn any_popup_window_live(app: &AppHandle) -> bool {
+    app.webview_windows()
+        .keys()
+        .any(|l| l.starts_with("popup-") || l.starts_with("oauth-"))
+}
+
+#[cfg(windows)]
+fn register_search_popup(window: &tauri::WebviewWindow) {
+    let label = window.label().to_string();
+    if let Ok(mut labels) = SEARCH_POPUPS.lock() {
+        if !labels.contains(&label) {
+            labels.push(label.clone());
+        }
+    }
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed) {
+            if let Ok(mut labels) = SEARCH_POPUPS.lock() {
+                labels.retain(|l| l != &label);
+            }
+        }
+    });
+}
+
+/// The search window's popup handler (v0.18.0): contained popups, the
+/// same machinery account windows use. Until now every new-window
+/// request from a search page was denied outright — including the
+/// target=_blank clicks the shim converts to window.open — so result
+/// links that open windows silently did nothing (his "searching
+/// things up then I open a pop up" report). The context is synthetic
+/// (search is deliberately not an account): policy "allow", and the
+/// session dir is the ephemeral search data dir, so popups share the
+/// search session's cookies and the dir's wipe rules below.
+fn search_popup_handler(
+    app: &AppHandle,
+    data_dir: &Path,
+    page_url: &url::Url,
+) -> impl Fn(url::Url, tauri::webview::NewWindowFeatures) -> tauri::webview::NewWindowResponse<tauri::Wry>
+       + Send
+       + 'static {
+    let ctx = PopupContext {
+        app: app.clone(),
+        app_id: "web-search".to_string(),
+        account_id: String::new(),
+        app_name: "Search".to_string(),
+        app_url: page_url.to_string(),
+        session_dir: data_dir.to_path_buf(),
+        popup_policy: "allow".to_string(),
+        popup_allowlist: Vec::new(),
+        parent_label: SEARCH_WINDOW_LABEL.to_string(),
+        chain_allowed: false,
+    };
+    let inner = make_popup_handler(ctx);
+    move |url: url::Url, features| {
+        let response = inner(url, features);
+        #[cfg(windows)]
+        if let tauri::webview::NewWindowResponse::Create { window } = &response {
+            register_search_popup(window);
+        }
+        response
+    }
 }
 
 fn search_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -278,9 +364,10 @@ pub async fn open_web_search(app: AppHandle, query: String) -> Result<(), String
 }
 
 /// Build the contained search window on a dedicated thread. Mirrors
-/// `windows::spawn_contained_window`: external URL only, nested popups
-/// denied outright, in-app downloads, Alt+Left/Right nav, cosmetic ad
-/// hiding + (Windows) network blocking seeded from the app default (on).
+/// `windows::spawn_contained_window`: external URL only, contained
+/// popups via `search_popup_handler`, in-app downloads, Alt+Left/Right
+/// nav, cosmetic ad hiding + (Windows) network blocking seeded from
+/// the app default (on).
 fn build_search_window(
     app: &AppHandle,
     adblock: &AdblockState,
@@ -322,6 +409,13 @@ fn build_search_window(
     #[cfg(windows)]
     {
         builder = builder.decorations(false);
+        // The contained popups this window can now open share its
+        // data dir and are built WITH these arguments; WebView2
+        // refuses to create a webview whose environment options
+        // differ from the ones the folder was created with (the
+        // v0.16.5 popup outage), so the search window must carry
+        // them too.
+        builder = builder.additional_browser_args(crate::windows::WEBVIEW2_BROWSER_ARGS);
     }
     // v0.9.5: session restore builds the window at its saved geometry so
     // there is no visible jump; normal opens keep the classic centered
@@ -335,8 +429,9 @@ fn build_search_window(
         builder = builder.inner_size(1200.0, 800.0).center();
     }
     let mut builder = builder
-        // A search page's popups stay dead: same posture as OAuth modals.
-        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+        // Popups open contained, like account windows (v0.18.0) —
+        // see search_popup_handler for why they used to be denied.
+        .on_new_window(search_popup_handler(app, data_dir, url))
         // Downloads from a search page stay in-app (v0.7.0 manager) instead
         // of kicking out to the system browser.
         .on_download(crate::downloads::make_download_handler(app.clone()));
@@ -400,7 +495,10 @@ fn build_search_window(
                         let wipe_dir = wipe_dir.clone();
                         std::thread::spawn(move || {
                             std::thread::sleep(Duration::from_secs(5));
-                            if wipe_app.get_webview_window(SEARCH_WINDOW_LABEL).is_none() {
+                            if wipe_app.get_webview_window(SEARCH_WINDOW_LABEL).is_none()
+                                && !search_popups_alive()
+                                && !any_popup_window_live(&wipe_app)
+                            {
                                 let _ = std::fs::remove_dir_all(&wipe_dir);
                             }
                         });
