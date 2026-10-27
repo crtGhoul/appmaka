@@ -3283,7 +3283,16 @@ function AppShell() {
       );
       return true;
     } catch (err) {
-      setError(`Could not open "${account.label}". ${errMsg(err)}`);
+      const msg = `Could not open "${account.label}". ${errMsg(err)}`;
+      setError(msg);
+      // The inline error above vanishes when the launcher closes, so
+      // record it where the settings error history can show it later.
+      // Fire-and-forget: recording must never break the open flow.
+      void invoke("record_frontend_error", {
+        kind: "window-open",
+        message: msg,
+        technical: errMsg(err),
+      }).catch(() => {});
       return false;
     }
   }
