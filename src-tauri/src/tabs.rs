@@ -53,7 +53,11 @@ fn window_label(group_id: &str, generation: u64) -> String {
 
 /// One tab: an (app, account) pair. `last_url` is runtime-only (never
 /// persisted): the page the tab was showing when the user switched away,
-/// so switching back reopens where they left off.
+/// so switching back reopens where they left off. `page_title` /
+/// `page_title_seen` (v0.16.4) are runtime-only the same way: the live
+/// document title the title callback recorded while this tab was active,
+/// and whether its unread badge has been seen (switching away marks it
+/// seen, like focusing a standalone window clears its badge).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabEntry {
     #[serde(rename = "appId", default)]
@@ -62,6 +66,10 @@ pub struct TabEntry {
     pub account_id: String,
     #[serde(skip, default)]
     pub last_url: Option<String>,
+    #[serde(skip, default)]
+    pub page_title: String,
+    #[serde(skip, default)]
+    pub page_title_seen: bool,
 }
 
 impl TabEntry {
@@ -300,6 +308,21 @@ pub struct TabSummary {
     pub account_id: String,
     pub app_name: String,
     pub account_label: String,
+    /// v0.16.4: unread count from the tab's last live page title;
+    /// None renders no badge.
+    pub unread: Option<u32>,
+}
+
+/// A tab's badge count: parsed from its last live page title, suppressed
+/// once seen. A non-active tab's title cannot change (its webview does
+/// not exist), so this only ever reflects what arrived while it was
+/// active and unvisited since.
+fn tab_unread(entry: &TabEntry) -> Option<u32> {
+    if entry.page_title_seen {
+        None
+    } else {
+        crate::badges::parse_unread_count(&entry.page_title)
+    }
 }
 
 /// Full tab-group state, returned by the tab commands.
@@ -342,6 +365,7 @@ fn tab_summary(store: &AppStore, entry: &TabEntry) -> TabSummary {
         account_id: entry.account_id.clone(),
         app_name,
         account_label,
+        unread: tab_unread(entry),
     }
 }
 
@@ -487,12 +511,18 @@ fn build_tabbed_window(
     let page = resolve_tab_page(app, store, adblock, args.entry, args.group_id)?;
     let mut builder = WebviewWindowBuilder::new(app, args.label, WebviewUrl::External(page.url.clone()))
         .data_directory(page.session_dir.clone())
-        .title(&page.title);
+        .title(&page.title)
+        // v0.16.4: pre-paint background in the strips' dark default
+        // (#1b1b1b — caption.rs's unresolved tint, the Linux strip's
+        // body), so a tab (re)build never flashes the webview's default
+        // white before the page paints.
+        .background_color(tauri::webview::Color(22, 23, 27, 255));
     #[cfg(windows)]
     {
         // Frameless like account windows: the tab strip replaces the
         // native title bar (caption.rs paints the tabs).
         builder = builder.decorations(false);
+        builder = builder.additional_browser_args(crate::windows::WEBVIEW2_BROWSER_ARGS);
     }
     if let Some(g) = args.geometry {
         if g.maximized {
@@ -536,6 +566,11 @@ fn build_tabbed_window(
     if !cursor_js.is_empty() {
         builder = builder.initialization_script(cursor_js);
     }
+    // v0.18.0: Tampermonkey-Lite user scripts matched against this
+    // page's URL.
+    for js in crate::userscripts::user_scripts_init_scripts(&window_app, page.url.as_str()) {
+        builder = builder.initialization_script(js);
+    }
     // v0.10.0: re-tint the strip when the active tab navigates
     // (theme-color can change per page). Same pattern as the v0.9.11
     // popup retint: never block the navigation decision, detached thread.
@@ -570,9 +605,51 @@ fn build_tabbed_window(
             true
         });
     }
+    // v0.16.4: unread badges — track the live document.title like
+    // standalone windows do (windows.rs). The group has ONE live webview
+    // showing its ACTIVE tab, so the title lands on the active entry.
+    // The callback only locks TabState briefly and makes no window
+    // calls, so it is safe on whatever thread Tauri invokes it from.
+    {
+        let title_app = app.clone();
+        let title_label = args.label.to_string();
+        builder = builder.on_document_title_changed(move |_window, title: String| {
+            let Some(group_id) = group_id_from_label(&title_label) else {
+                return;
+            };
+            if let Some(tabstate) = title_app.try_state::<TabState>() {
+                if let Ok(mut state) = tabstate.inner.lock() {
+                    if let Some(group) = state.get_mut(group_id) {
+                        // A late event from a dying generation must not
+                        // stamp its title onto the tab the rebuild now
+                        // shows.
+                        if group.label == title_label {
+                            if let Some(entry) = group.tabs.get_mut(group.active) {
+                                entry.page_title = title;
+                                entry.page_title_seen = false;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+    // v0.16.4: per-account RAM attribution, the standalone pattern
+    // (windows.rs): snapshot descendants before the build so the browser
+    // process spawned for this tab's data directory can be claimed for
+    // its account after. The empty group has no account to claim.
+    let pids_before = crate::procattr::descendant_pids();
     let window = builder
         .build()
         .map_err(|e| format!("could not open tabbed window: {e}"))?;
+    if let Some(entry) = args.entry {
+        crate::procattr::capture_new_processes(
+            app.clone(),
+            entry.app_id.clone(),
+            entry.account_id.clone(),
+            pids_before,
+        );
+    }
     #[cfg(windows)]
     let _ = window.set_shadow(true);
     #[cfg(windows)]
@@ -594,6 +671,10 @@ fn build_tabbed_window(
                 reposition_strip_window(&ev_app, &ev_group);
             }
             WindowEvent::Focused(_focused) => {
+                #[cfg(windows)]
+                if let Some(w) = ev_app.get_webview_window(&ev_label) {
+                    crate::windows::set_window_memory_target_low(&w, !*_focused);
+                }
                 // Linux strip minimize-sync: a minimized page loses
                 // focus, so hide the strip only when the page reports
                 // itself minimized (plain focus loss keeps the strip).
@@ -857,17 +938,36 @@ fn switch_tab_inner(
         }
         None => (None, None),
     };
-    // Phase 3: remember where the old tab was. Best-effort: only if the
-    // group is still at the generation we committed.
-    if let Some(u) = last_url {
-        if let Ok(mut state) = tabstate.inner.lock() {
-            if let Some(group) = state.get_mut(group_id) {
-                if group.generation == plan.generation {
-                    if let Some(e) = group.tabs.get_mut(plan.old_active) {
-                        e.last_url = Some(u);
+    // Phase 3: remember where the old tab was, mark it visited, and drop
+    // its RAM attribution. Best-effort: only if the group is still at
+    // the generation we committed. Switching away counts as visiting
+    // (v0.16.4): the outgoing tab's unread badge clears, mirroring how
+    // focusing a standalone window clears its badge. The prune runs
+    // after the lock is released and BEFORE build_tabbed_window captures
+    // the incoming tab's processes below — procattr claims are
+    // first-come-first-served, so the outgoing claim must be gone
+    // first. A forced rebuild of the SAME tab switches away from
+    // nothing: skip both.
+    if plan.old_active != index {
+        let outgoing = {
+            let mut found = None;
+            if let Ok(mut state) = tabstate.inner.lock() {
+                if let Some(group) = state.get_mut(group_id) {
+                    if group.generation == plan.generation {
+                        if let Some(e) = group.tabs.get_mut(plan.old_active) {
+                            if let Some(u) = &last_url {
+                                e.last_url = Some(u.clone());
+                            }
+                            e.page_title_seen = true;
+                            found = Some((e.app_id.clone(), e.account_id.clone()));
+                        }
                     }
                 }
             }
+            found
+        };
+        if let Some((app_id, account_id)) = outgoing {
+            crate::procattr::prune(app, &app_id, &account_id);
         }
     }
     crate::caption::tint_log(
@@ -999,6 +1099,8 @@ pub fn add_tab(
             app_id: app_id.to_string(),
             account_id: account_id.to_string(),
             last_url: None,
+            page_title: String::new(),
+            page_title_seen: false,
         });
         (group.tabs.len() - 1, was_empty)
     };
@@ -1098,12 +1200,27 @@ pub fn close_tab(
 /// Destroyed handler no-ops — the group is already gone), close the Linux
 /// strip, drop the caption strip, and persist.
 pub fn close_group(app: &AppHandle, tabstate: &TabState, group_id: &str) {
-    let label = {
-        match tabstate.inner.lock() {
-            Ok(mut state) => state.remove(group_id).map(|g| g.label),
-            Err(_) => None,
-        }
+    let (label, active) = match tabstate.inner.lock() {
+        Ok(mut state) => match state.remove(group_id) {
+            Some(g) => {
+                let active = g
+                    .tabs
+                    .get(g.active)
+                    .map(|e| (e.app_id.clone(), e.account_id.clone()));
+                (Some(g.label), active)
+            }
+            None => (None, None),
+        },
+        Err(_) => (None, None),
     };
+    // v0.16.4: the group's live webview is going away; drop its
+    // account's RAM attribution here, because the window's Destroyed
+    // handler will find the group already gone and prune nothing.
+    // prune itself keeps the attribution if a standalone window for the
+    // same account is still open.
+    if let Some((app_id, account_id)) = active {
+        crate::procattr::prune(app, &app_id, &account_id);
+    }
     if let Some(label) = label {
         #[cfg(windows)]
         crate::caption::page_window_closed(&label);
@@ -1121,21 +1238,75 @@ pub fn close_group(app: &AppHandle, tabstate: &TabState, group_id: &str) {
 }
 
 /// User-intent close of a whole tabbed window (dashboard row, OS window
-/// close, last-tab closes from the strip X / Esc+LMB gesture): pinned
+/// close, strip X, last-tab close from the Esc+LMB gesture): pinned
 /// groups get the one native confirm, exactly like pinned account
-/// windows. Since v0.13.11 the strip X closes the active tab first and
-/// only reaches this when one tab remains.
+/// windows. Since v0.16.2 the strip X lands here directly — the user
+/// reversed the v0.13.11 "X closes the active tab" behavior because a
+/// window control that leaves the window standing feels broken.
 pub fn close_tabbed_window(app: &AppHandle, tabstate: &TabState, group_id: &str) -> Result<(), String> {
-    if !crate::pin::guard_close(app, &pin_key(group_id)) {
+    let key = pin_key(group_id);
+    // Same rule as close_tracked_window: never block the caller on the
+    // pin dialog. The strip's CloseRequested handler runs on the main
+    // thread (it already offloads here to a worker thread) and the
+    // dashboard command runs on an IPC thread; a blocking_show on
+    // either parks the caller while the dialog pumps its own loop.
+    // Pre-approved keys (batch close) and unpinned groups close at
+    // once; anything else defers to a helper-thread dialog, and
+    // approval closes the group — close_group owns strip + profile +
+    // session cleanup, so a plain window.close() would orphan them.
+    if crate::pin::is_shutting_down()
+        || !crate::pin::is_pinned(app, &key)
+        || crate::pin::take_confirmed(app, &key)
+    {
+        close_group(app, tabstate, group_id);
         return Ok(());
     }
-    close_group(app, tabstate, group_id);
+    ask_then_close_group(app, &key, group_id);
     Ok(())
 }
 
+/// Fire-and-forget pin confirm for a tabbed group, mirroring
+/// pin::ask_then_close's dedup + helper-thread dialog. A held Alt+F4
+/// never stacks dialogs; on approval the group closes via close_group.
+fn ask_then_close_group(app: &AppHandle, key: &str, group_id: &str) {
+    let fresh = app
+        .try_state::<crate::pin::PendingConfirms>()
+        .and_then(|p| p.0.lock().ok().map(|mut set| set.insert(key.to_string())))
+        .unwrap_or(false);
+    if !fresh {
+        return;
+    }
+    let app = app.clone();
+    let key = key.to_string();
+    let group_id = group_id.to_string();
+    let _ = std::thread::Builder::new()
+        .name(format!("appmaka-pin-confirm-{key}"))
+        .spawn(move || {
+            let approved =
+                crate::pin::show_pin_confirm(&app, "This window is pinned. Close it anyway?");
+            if let Some(p) = app.try_state::<crate::pin::PendingConfirms>() {
+                if let Ok(mut set) = p.0.lock() {
+                    set.remove(&key);
+                }
+            }
+            if !approved {
+                return;
+            }
+            if let Some(c) = app.try_state::<crate::pin::ConfirmedCloses>() {
+                if let Ok(mut set) = c.0.lock() {
+                    set.insert(key.clone());
+                }
+            }
+            if let Some(ts) = app.try_state::<TabState>() {
+                close_group(&app, &ts, &group_id);
+            }
+        });
+}
+
 /// Extract the group id from a generation-suffixed tabbed-window label
-/// (`tabbed-{group_id}-g{generation}`). Pure logic, unit-tested.
-#[cfg(windows)]
+/// (`tabbed-{group_id}-g{generation}`). Pure logic, unit-tested. Used on
+/// every platform since v0.16.4: the title callback resolves its group
+/// from the window label the same way the Windows strip paths do.
 fn group_id_from_label(label: &str) -> Option<&str> {
     let rest = label.strip_prefix("tabbed-")?;
     let (gid, gen) = rest.rsplit_once("-g")?;
@@ -1197,6 +1368,23 @@ pub fn gesture_close_active_tab(app: &AppHandle, label: &str) {
     }
 }
 
+/// Strip X button (v0.16.2): closes the WHOLE tabbed window for the
+/// strip's label, pin-aware via close_tabbed_window — the standard
+/// window-control contract. The Esc+LMB gesture keeps the tab-level
+/// semantics of gesture_close_active_tab above.
+///
+/// Worker-thread entry: close_tabbed_window may block on the pin
+/// confirm.
+#[cfg(windows)]
+pub fn close_window_for_label(app: &AppHandle, label: &str) {
+    let Some(tabstate) = app.try_state::<TabState>() else {
+        return;
+    };
+    if let Some(group_id) = group_id_for_label(app, label) {
+        let _ = close_tabbed_window(app, &tabstate, &group_id);
+    }
+}
+
 /// The X button / gesture closed the page window directly: drop the group
 /// (it no longer has a window), close the Linux strip, persist. Called
 /// from the page window's Destroyed handler.
@@ -1216,17 +1404,29 @@ pub fn on_tabbed_window_destroyed(app: &AppHandle, label: &str) {
     // blocking lock() here deadlocks the app ("Not Responding", 0% CPU).
     // Try the lock; if a worker holds it, defer the removal to a worker
     // thread that may block safely.
-    fn remove_group(app: &AppHandle, label: &str) -> Option<String> {
+    /// Remove the group owning `label`; returns its id and its ACTIVE
+    /// tab's account (the only one with live processes to prune).
+    fn remove_group(app: &AppHandle, label: &str) -> Option<(String, Option<(String, String)>)> {
         let ts = app.try_state::<TabState>()?;
         let mut state = ts.inner.try_lock().ok()?;
         let id = state
             .iter()
             .find(|(_, g)| g.label == label)
-            .map(|(id, _)| id.clone());
-        if let Some(ref id) = id {
-            state.remove(id);
+            .map(|(id, _)| id.clone())?;
+        let group = state.remove(&id)?;
+        let active = group
+            .tabs
+            .get(group.active)
+            .map(|e| (e.app_id.clone(), e.account_id.clone()));
+        Some((id, active))
+    }
+
+    /// v0.16.4: drop a dead group's RAM attribution. prune keeps it if a
+    /// standalone window for the same account is still open.
+    fn prune_active(app: &AppHandle, active: &Option<(String, String)>) {
+        if let Some((app_id, account_id)) = active {
+            crate::procattr::prune(app, app_id, account_id);
         }
-        id
     }
     fn finish_cleanup(app: &AppHandle, label: &str, id: &str) {
         #[cfg(windows)]
@@ -1242,7 +1442,8 @@ pub fn on_tabbed_window_destroyed(app: &AppHandle, label: &str) {
         crate::session::write_session(app);
     }
 
-    if let Some(id) = remove_group(app, label) {
+    if let Some((id, active)) = remove_group(app, label) {
+        prune_active(app, &active);
         finish_cleanup(app, label, &id);
     } else if app.try_state::<TabState>().is_some() {
         // The lock is held by a worker: do the removal off the main thread.
@@ -1253,22 +1454,22 @@ pub fn on_tabbed_window_destroyed(app: &AppHandle, label: &str) {
             .spawn(move || {
                 // Blocking lock is safe here: this is not the main thread,
                 // so it cannot deadlock against a main-thread Tauri call.
-                let id = app.try_state::<TabState>().and_then(|ts| {
-                    ts.inner
-                        .lock()
-                        .ok()
-                        .and_then(|mut state| {
-                            let id = state
-                                .iter()
-                                .find(|(_, g)| g.label == label)
-                                .map(|(id, _)| id.clone());
-                            if let Some(ref id) = id {
-                                state.remove(id);
-                            }
-                            id
-                        })
+                let removed = app.try_state::<TabState>().and_then(|ts| {
+                    ts.inner.lock().ok().and_then(|mut state| {
+                        let id = state
+                            .iter()
+                            .find(|(_, g)| g.label == label)
+                            .map(|(id, _)| id.clone())?;
+                        let group = state.remove(&id)?;
+                        let active = group
+                            .tabs
+                            .get(group.active)
+                            .map(|e| (e.app_id.clone(), e.account_id.clone()));
+                        Some((id, active))
+                    })
                 });
-                if let Some(id) = id {
+                if let Some((id, active)) = removed {
+                    prune_active(&app, &active);
                     finish_cleanup(&app, &label, &id);
                 }
             })
@@ -1623,6 +1824,8 @@ mod tests {
             app_id: app.to_string(),
             account_id: acct.to_string(),
             last_url: None,
+            page_title: String::new(),
+            page_title_seen: false,
         };
         let state = TabState::default();
         state.inner.lock().unwrap().insert(
@@ -1802,12 +2005,65 @@ mod tests {
         assert_eq!(e.app_id, "a1");
         assert_eq!(e.account_id, "c1");
         assert_eq!(e.last_url, None);
+        // Title state defaults to "nothing seen yet".
+        assert_eq!(e.page_title, "");
+        assert!(!e.page_title_seen);
         assert!(e.valid());
         let bad: TabEntry = serde_json::from_str(
             r#"{"appId": "", "accountId": "c1"}"#,
         )
         .unwrap();
         assert!(!bad.valid());
+    }
+
+    #[test]
+    fn tab_entry_title_state_is_never_persisted() {
+        // Runtime-only like last_url: a session write must not carry the
+        // title state, and a reload restarts it from the defaults.
+        let e = TabEntry {
+            app_id: "a1".to_string(),
+            account_id: "c1".to_string(),
+            last_url: Some("https://example.com/inbox".to_string()),
+            page_title: "(3) Inbox".to_string(),
+            page_title_seen: false,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(!json.contains("pageTitle"), "title leaked into JSON: {json}");
+        assert!(!json.contains("page_title"), "title leaked into JSON: {json}");
+        assert!(!json.contains("lastUrl"), "last_url leaked into JSON: {json}");
+        let back: TabEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.page_title, "");
+        assert!(!back.page_title_seen);
+        assert_eq!(back.last_url, None);
+    }
+
+    #[test]
+    fn tab_unread_badge_rules() {
+        let entry = |title: &str, seen: bool| TabEntry {
+            app_id: "a1".to_string(),
+            account_id: "c1".to_string(),
+            last_url: None,
+            page_title: title.to_string(),
+            page_title_seen: seen,
+        };
+        // A count in the live title badges while unvisited.
+        assert_eq!(tab_unread(&entry("(3) Inbox", false)), Some(3));
+        // Seen (switched away once) suppresses the badge.
+        assert_eq!(tab_unread(&entry("(3) Inbox", true)), None);
+        // No count in the title: no badge either way.
+        assert_eq!(tab_unread(&entry("Inbox", false)), None);
+        assert_eq!(tab_unread(&entry("", false)), None);
+    }
+
+    #[test]
+    fn group_id_from_label_parses_on_all_platforms() {
+        // The title callback resolves groups this way everywhere, not
+        // just on Windows where the strip paths use it.
+        assert_eq!(group_id_from_label("tabbed-g25932-1-g0"), Some("g25932-1"));
+        assert_eq!(group_id_from_label("tabbed-g25932-1-g6"), Some("g25932-1"));
+        assert_eq!(group_id_from_label("page-acct-1"), None);
+        assert_eq!(group_id_from_label("tabbed-g25932-1"), None);
+        assert_eq!(group_id_from_label("tabbed-g25932-1-gx"), None);
     }
 
     #[test]
@@ -1834,15 +2090,4 @@ mod tests {
         assert!(switch_needs_rebuild(2, 2, true));
     }
 
-    #[test]
-    #[cfg(windows)]
-    fn group_id_from_generation_label() {
-        // Current and older generations resolve to the group id.
-        assert_eq!(group_id_from_label("tabbed-g25932-1-g0"), Some("g25932-1"));
-        assert_eq!(group_id_from_label("tabbed-g25932-1-g6"), Some("g25932-1"));
-        // Not a tabbed label, or no numeric generation: no match.
-        assert_eq!(group_id_from_label("page-acct-1"), None);
-        assert_eq!(group_id_from_label("tabbed-g25932-1"), None);
-        assert_eq!(group_id_from_label("tabbed-g25932-1-gx"), None);
-    }
 }
