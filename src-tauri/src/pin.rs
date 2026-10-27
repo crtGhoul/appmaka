@@ -185,10 +185,13 @@ pub fn set_pinned(app: &AppHandle, label: &str, pinned: bool) {
     crate::session::write_session(app);
 }
 
-fn show_pin_confirm(app: &AppHandle, body: &str) -> bool {
+pub(crate) fn show_pin_confirm(app: &AppHandle, body: &str) -> bool {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-    // blocking_show must never run on the main thread; every caller here
-    // is a helper thread, a command thread, or the chrome thread.
+    // blocking_show must never run on the main thread, a window-proc,
+    // or during window-event dispatch. Its only callers are
+    // ask_then_close's helper thread (per-label confirm) and
+    // confirm_batch_close (one dialog for a batch close, on an async
+    // command thread — never the main thread).
     app.dialog()
         .message(body)
         .title("Pinned window")
@@ -241,32 +244,6 @@ pub fn ask_then_close(app: &AppHandle, label: &str) {
                 let _ = w.close();
             }
         });
-}
-
-/// Synchronous guard for programmatic User-intent closes. Returns true when
-/// the close may proceed. Blocks the caller's thread on the confirm — safe
-/// only on command or watcher threads, never the main thread and never a
-/// Win32 callback. Background (unattended) callers must not use this; they
-/// skip pinned windows silently instead.
-pub fn guard_close(app: &AppHandle, label: &str) -> bool {
-    if is_shutting_down() {
-        return true;
-    }
-    if !is_pinned(app, label) {
-        return true;
-    }
-    if take_confirmed(app, label) {
-        return true;
-    }
-    let approved = show_pin_confirm(app, "This window is pinned. Close it anyway?");
-    if approved {
-        if let Some(c) = app.try_state::<ConfirmedCloses>() {
-            if let Ok(mut set) = c.0.lock() {
-                set.insert(label.to_string());
-            }
-        }
-    }
-    approved
 }
 
 /// Batch confirm for close-all: one dialog for all pinned labels, returns
@@ -386,12 +363,14 @@ mod tests {
                 account_id: "acct1".to_string(),
                 rect: None,
                 pinned: true,
+                last_url: None,
             },
             SessionWindow::Account {
                 app_id: "app1".to_string(),
                 account_id: "acct2".to_string(),
                 rect: None,
                 pinned: false,
+                last_url: None,
             },
             SessionWindow::Search {
                 query: "q".to_string(),
