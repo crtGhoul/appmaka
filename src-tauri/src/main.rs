@@ -7,6 +7,7 @@ mod procattr;
 mod sleep;
 mod custom_programs;
 mod dictation;
+mod dock;
 mod downloads;
 mod favicon;
 mod favicon_parse;
@@ -21,9 +22,11 @@ mod page_title;
 mod pin;
 mod preview;
 mod routines;
+mod search_index;
 mod session;
 mod store;
 mod syscmd;
+mod userscripts;
 mod vault;
 mod websearch;
 mod windows;
@@ -386,6 +389,8 @@ async fn open_app_in_tabbed_window(
                 app_id,
                 account_id,
                 last_url: None,
+                page_title: String::new(),
+                page_title_seen: false,
             }],
             active: 0,
             placement: None,
@@ -446,10 +451,12 @@ async fn close_tab(
 }
 
 /// Close a whole tabbed window (dashboard row / strip X). Pinned groups
-/// get the one native confirm. Sync: closing never deadlocks.
+/// get the one native confirm. Async (v0.18.0): the confirm can block,
+/// and sync commands run on the main thread in Tauri 2 — see
+/// windows::close_all_account_windows.
 /// JS: `invoke("close_tabbed_window", { groupId })`
 #[tauri::command]
-fn close_tabbed_window(
+async fn close_tabbed_window(
     app: AppHandle,
     tabstate: State<'_, tabs::TabState>,
     group_id: String,
@@ -1023,6 +1030,9 @@ fn main() {
                                 crate::hotkeys::HotkeyKind::Dictation => {
                                     crate::dictation::toggle(app);
                                 }
+                                crate::hotkeys::HotkeyKind::Dock => {
+                                    crate::dock::toggle(app);
+                                }
                                 _ => {
                                     crate::hotkeys::emit_hotkey_fired(
                                         app,
@@ -1078,6 +1088,9 @@ fn main() {
             app.manage(tabs::TabState::default());
             // Copyable error dialogs (v0.11.0): recent-errors ring buffer.
             app.manage(Mutex::new(errors::ErrorLog::default()));
+            // Restore the persisted error log (v0.16.3) so a crash still
+            // leaves copyable diagnostics after a relaunch.
+            errors::init_log(app.handle().clone());
             // Session restore (v0.9.5): live search-window info for the
             // session file, plus the one-time "Ask me" offer flag.
             app.manage(session::SearchLiveState::default());
@@ -1191,6 +1204,8 @@ fn main() {
             // Built-in dictation (v0.14.0): state + saved global hotkey.
             app.manage(crate::dictation::load(app.handle()));
             crate::dictation::register_saved_hotkey(app.handle());
+            // Workspace dock (v0.17.0): saved global toggle hotkey.
+            crate::dock::register_saved_hotkey(app.handle());
             crate::clipboard::ensure_summon_registered(app.handle());
             crate::clipboard::start_watcher(app.handle().clone());
             // First program scan runs in the background; results land in the
@@ -1247,15 +1262,30 @@ fn main() {
                     })
                     .map_err(std::io::Error::other)?;
             }
+            // Workspace dock (v0.17.0): best-effort, after the launcher
+            // settings state exists. Off by default — the window is
+            // only built when the saved setting asks for it.
+            dock::apply_visibility(app.handle());
             Ok(())
         })
         // Closing the main window hides it to the tray; Quit is via the
         // tray menu. The launcher is always one hotkey away.
         .on_window_event(|window, event| {
             if window.label() == "main" {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        if let Some(w) = window.app_handle().get_webview_window("main") {
+                            crate::windows::set_window_memory_target_low(&w, true);
+                        }
+                    }
+                    tauri::WindowEvent::Focused(focused) => {
+                        if let Some(w) = window.app_handle().get_webview_window("main") {
+                            crate::windows::set_window_memory_target_low(&w, !*focused);
+                        }
+                    }
+                    _ => {}
                 }
             } else if window.label() == crate::clipboard::WINDOW_LABEL {
                 // The clipboard popup is reused across summons (rebuilds
@@ -1342,6 +1372,8 @@ fn main() {
             launcher_ext::set_monitor_mode,
             launcher_ext::set_seen_intro,
             launcher_ext::set_auto_update_check,
+            launcher_ext::set_auto_update_download,
+            launcher_ext::set_pending_update_version,
             custom_programs::add_custom_program,
             custom_programs::remove_custom_program,
             custom_programs::pick_executable,
@@ -1373,6 +1405,7 @@ fn main() {
             errors::get_recent_errors,
             errors::copy_error_details,
             errors::copy_diagnostics,
+            errors::record_frontend_error,
             // v0.7.0: back/forward navigation command (the visible floating
             // toolbar was removed in v0.8.4; Alt+Left/Right drive history
             // in-page, and this command stays registered for compatibility)
@@ -1421,6 +1454,20 @@ fn main() {
             launcher_settings::set_allow_popups_globally,
             // v0.8.0: hidden-programs collapse state (polish)
             launcher_settings::set_hidden_section_collapsed,
+            // v0.17.0: workspace dock
+            dock::set_dock_enabled,
+            dock::set_dock_edge,
+            dock::set_dock_hotkey,
+            dock::dock_hotkey_status,
+            dock::save_dock_profile,
+            dock::delete_dock_profile,
+            dock::apply_dock_profile,
+            search_index::load_search_index,
+            search_index::save_search_index,
+            userscripts::list_user_scripts,
+            userscripts::set_user_script_enabled,
+            userscripts::reload_user_scripts,
+            userscripts::get_userscripts_dir,
             // v0.8.0: centralized hotkey registry + per-command hotkeys
             hotkeys::list_cmdhotkeys,
             hotkeys::save_cmdhotkey,
@@ -1439,6 +1486,7 @@ fn main() {
             dictation::clear_dictation_transcripts,
             dictation::copy_dictation_transcript,
             dictation::set_dictation_model,
+            dictation::set_dictation_device,
             dictation::set_dictation_hold,
             dictation::set_dictation_hotkey,
             dictation::dictation_hotkey_status,
@@ -1459,9 +1507,11 @@ fn main() {
             // v0.9.12: clipboard pinning + "Pinned only" filter, persisted
             clipboard::set_clipboard_pinned,
             clipboard::set_clipboard_pinned_only,
-            // v0.8.2: MSI-aware self-update (install-type detection + MSI path)
+            // v0.8.2: MSI-aware self-update (install-type detection + MSI path);
+            // download/launch split so downloads can run in the background
             msi_update::get_install_type,
-            msi_update::install_msi_update,
+            msi_update::download_msi_update,
+            msi_update::launch_msi_update,
             // v0.8.0: workspaces
             workspaces::list_workspaces,
             workspaces::save_workspace,
