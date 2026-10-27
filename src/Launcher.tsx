@@ -20,6 +20,7 @@ import type {
   Routine,
   WebApp,
 } from "./types";
+import type { ErrorEntry } from "./ErrorDialog";
 
 function errMsg(err: unknown): string {
   return typeof err === "string" ? err : "Something went wrong.";
@@ -872,6 +873,109 @@ export function SearchBar({
       <span className="search-hint search-hint-sub" aria-hidden="true">
         = calculates · &gt; runs a system command · ? searches the web
       </span>
+    </div>
+  );
+}
+
+/**
+ * Settings error history: the backend's recent-errors ring (errors.rs)
+ * listed newest first, so a failed click leaves something to look at
+ * instead of a vanished inline error. Entries are sanitized server-side
+ * before storage, so the technical details are safe to display and copy.
+ */
+function ErrorHistorySection() {
+  const [entries, setEntries] = useState<ErrorEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      setEntries(await invoke<ErrorEntry[]>("get_recent_errors"));
+    } catch (err) {
+      setLoadError(errMsg(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function handleCopyOne(id: number) {
+    try {
+      await invoke("copy_error_details", { id });
+      setCopiedId(id);
+    } catch (err) {
+      setLoadError(errMsg(err));
+    }
+  }
+
+  return (
+    <div className="error-history">
+      <h3>Error history</h3>
+      <span className="help">
+        Recent errors recorded by the app, newest first. Use Copy
+        diagnostics above to copy everything at once.
+      </span>
+      <div className="inline-form">
+        <button type="button" onClick={() => void load()} disabled={loading}>
+          {loading ? "Loading…" : "Refresh"}
+        </button>
+        <span className="help">
+          {entries === null
+            ? ""
+            : `${entries.length} ${entries.length === 1 ? "error" : "errors"} recorded.`}
+        </span>
+      </div>
+      {loadError && (
+        <p className="form-error" role="alert">
+          {loadError}
+        </p>
+      )}
+      {entries !== null && entries.length === 0 && (
+        <p className="help">No errors recorded.</p>
+      )}
+      {entries !== null && entries.length > 0 && (
+        <ul className="error-history-list">
+          {entries.map((entry) => (
+            <li key={entry.id}>
+              <div className="error-history-head">
+                {/* Kinds are backend slugs; show them as plain words. */}
+                <strong>{entry.kind.replace(/[-_]+/g, " ")}</strong>
+                <span className="help">
+                  {new Date(entry.unix_secs * 1000).toLocaleString()}
+                </span>
+              </div>
+              <div>{entry.message}</div>
+              <div className="inline-form">
+                <button
+                  type="button"
+                  aria-expanded={expandedId === entry.id}
+                  onClick={() =>
+                    setExpandedId(expandedId === entry.id ? null : entry.id)
+                  }
+                >
+                  {expandedId === entry.id ? "Hide details" : "Details"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyOne(entry.id)}
+                >
+                  {copiedId === entry.id ? "Copied" : "Copy"}
+                </button>
+              </div>
+              {expandedId === entry.id && (
+                <pre className="error-history-technical">{entry.technical}</pre>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -1903,6 +2007,8 @@ export function LauncherSettingsPanel({
           it straight into chat when reporting a problem.
         </span>
       </div>
+
+      <ErrorHistorySection />
 
       {formError && (
         <p className="form-error" role="alert">
