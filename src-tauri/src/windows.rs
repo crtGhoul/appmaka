@@ -141,6 +141,11 @@ struct TrackedWindow {
     /// window is built on about:blank and navigates here on first focus,
     /// so a 10-window restore doesn't spawn 10 renderers at once.
     pending_url: Option<String>,
+    /// Last URL the webview was on (v0.16.4), captured at focus loss,
+    /// before suspend, and before close — the moments it is both fresh
+    /// and about to become unreadable. Persisted through session.json;
+    /// a reopen prefers it over the app's home URL.
+    last_url: Option<String>,
     /// Private/incognito window: uses an ephemeral session dir that is
     /// deleted on close; never written to session.json, never restored.
     is_private: bool,
@@ -153,9 +158,31 @@ struct TrackedWindow {
 #[derive(Default)]
 pub struct WindowState {
     inner: Mutex<HashMap<String, TrackedWindow>>,
+    /// Last-visited URLs seeded by session restore (v0.16.4), keyed by
+    /// window label. open_account_placed takes an entry one-shot as its
+    /// window opens; leftovers (a restore entry whose window never
+    /// opened) are inert — labels are per-account and the next restore
+    /// re-seeds fresh values.
+    restore_urls: Mutex<HashMap<String, String>>,
 }
 
 impl WindowState {
+    /// v0.16.4: seed the URLs a session restore saved, for
+    /// open_account_placed to consume as the windows open.
+    pub(crate) fn seed_restore_urls(&self, urls: HashMap<String, String>) {
+        if let Ok(mut guard) = self.restore_urls.lock() {
+            guard.extend(urls);
+        }
+    }
+
+    /// Take (one-shot) the restore-seeded URL for a window label.
+    pub(crate) fn take_restore_url(&self, label: &str) -> Option<String> {
+        self.restore_urls
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(label))
+    }
+
     /// v0.15.0: does any tracked window belong to this account? Used by
     /// process attribution (procattr) so it never attributes browser
     /// processes to an account with nothing open.
@@ -218,6 +245,52 @@ pub(crate) fn apply_placement(window: &WebviewWindow, p: WindowPlacement) {
     let _ = window.set_size(Size::Logical(LogicalSize::new(p.width, p.height)));
 }
 
+/// Pre-paint background for account windows: the app's dark-theme page
+/// canvas (#16171b — styles.css, `:root[data-theme="dark"]`). The webview
+/// paints this until the page's own first frame lands; without it,
+/// WebView2 and WebKitGTK both default to white, so every window open —
+/// and every wake from suspend — flashes white before content appears.
+const ACCOUNT_WINDOW_BACKGROUND: tauri::utils::config::Color =
+    tauri::utils::config::Color(0x16, 0x17, 0x1b, 0xff);
+
+/// The one set of extra Chromium arguments every WebView2 window in
+/// this app is created with (Windows only). WebView2 keys a browser
+/// process by user data folder and refuses to create a webview whose
+/// environment options differ from the ones already running for that
+/// folder (ERROR_INVALID_STATE), so every builder that opens a window
+/// on a session folder MUST pass the identical string — and a builder
+/// that omits the call does not get "no arguments": wry substitutes
+/// its own different default. v0.16.5 set these only on the account
+/// and tabbed builders, which broke every contained popup and OAuth
+/// window for an open account. The string lives in exactly one place
+/// now so the sets cannot drift apart again. It also carries wry's
+/// default feature disables explicitly (SmartScreen, the mini menu,
+/// the PDF UI): custom args REPLACE wry's defaults rather than adding
+/// to them, and v0.16.5 silently lost them on account windows. The
+/// 256 MB per-page heap cap from that draft is gone — with the
+/// low-memory target also pushing trims, heavy pages were being
+/// squeezed from two directions at once.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const WEBVIEW2_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,OptimizationHints,MediaRouter --enable-features=TrimOnMemoryPressure";
+
+/// The stored last-visited URL a fresh open of this account should land
+/// on, if one exists (v0.16.4). An in-progress session restore seeds
+/// its saved URLs in memory (taken one-shot — a later manual reopen
+/// must not inherit them); outside a restore, the session file is the
+/// source (it still holds the entry after a crash, before any restore
+/// ran). None means "nothing stored — use the app's home URL".
+fn stored_last_url(
+    app: &AppHandle,
+    winstate: &WindowState,
+    app_id: &str,
+    account_id: &str,
+    label: &str,
+) -> Option<String> {
+    winstate
+        .take_restore_url(label)
+        .or_else(|| crate::session::stored_account_last_url(app, app_id, account_id))
+}
+
 /// Open an account's window, or focus it if it is already open. The window is
 /// lazily created here — nothing exists until the user opens the account.
 pub fn open_account(
@@ -266,6 +339,10 @@ pub fn open_account_placed(
         if let Some(p) = placement {
             apply_placement(&window, p);
         }
+        // A restore may have seeded a last-visited URL for this window,
+        // but it is already open — drop the seed so a later close and
+        // reopen doesn't inherit a URL from before this session.
+        let _ = winstate.take_restore_url(&label);
         // Already open: nothing changed, but keep the session file fresh.
         crate::session::write_session(app);
         return Ok(());
@@ -297,27 +374,40 @@ pub fn open_account_placed(
         .popup_policy
         .clone()
         .unwrap_or_else(|| web_app.settings.popup_policy.clone());
+    // v0.16.4: reopen where the user left off. A stored last-visited
+    // URL (see stored_last_url) beats the app's home URL as the
+    // navigation target; a hand-edited session value that doesn't parse
+    // falls back to home rather than failing the open.
+    let target_url: url::Url = stored_last_url(app, winstate, app_id, account_id, &label)
+        .as_deref()
+        .and_then(|u| u.parse().ok())
+        .unwrap_or_else(|| page_url.clone());
     // Lazy restore (v0.13.2): build on about:blank and navigate on first
     // focus, so a 10-window session restore doesn't spawn 10 renderers at
     // once. The title still shows the app name; the page loads when the
-    // user first looks at it.
+    // user first looks at it. The deferred target is the stored last
+    // URL when there is one — restored windows land on their last page
+    // too, not just fresh opens.
     let (initial_url, pending_url) = if defer_navigation {
         (
             url::Url::parse("about:blank").expect("about:blank parses"),
-            Some(page_url.to_string()),
+            Some(target_url.to_string()),
         )
     } else {
-        (page_url.clone(), None)
+        (target_url.clone(), None)
     };
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(initial_url))
         .data_directory(session_dir.clone())
-        .title(&title);
+        .title(&title)
+        // No white flash before first paint (see the const).
+        .background_color(ACCOUNT_WINDOW_BACKGROUND);
     // v0.9.6 (Windows): frameless — the native title bar and its X go away,
     // replaced by our own slim caption strip (caption.rs). tao keeps border
     // resizing working on frameless windows. Linux keeps native decorations.
     #[cfg(windows)]
     {
         builder = builder.decorations(false);
+        builder = builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS);
     }
     // v0.9.0: tiled routines place the window at build time (no visible
     // jump); untiled opens keep the classic centered 1200x800.
@@ -398,6 +488,12 @@ pub fn open_account_placed(
     let cursor_js = saved_cursor_js(app);
     if !cursor_js.is_empty() {
         builder = builder.initialization_script(cursor_js);
+    }
+    // v0.18.0: Tampermonkey-Lite user scripts matched against the
+    // URL this window opens on (restored last URL, else the app's
+    // start URL).
+    for js in crate::userscripts::user_scripts_init_scripts(app, target_url.as_str()) {
+        builder = builder.initialization_script(js);
     }
     let css = adblock.cosmetic_css_for(&web_app.url);
     if !css.is_empty() {
@@ -480,6 +576,10 @@ pub fn open_account_placed(
                 page_title_seen: true,
                 suspended: false,
                 pending_url,
+                // The window opens (or will navigate, when deferred) to
+                // the target, so that is its last-known URL until a
+                // capture point refreshes it.
+                last_url: Some(target_url.to_string()),
                 is_private: private,
                 private_dir,
             },
@@ -493,19 +593,43 @@ pub fn open_account_placed(
     window.on_window_event(move |event| {
         match event {
             WindowEvent::Focused(focused) => {
-                touch_window(&track_app, &track_label, *focused);
-                // Lazy restore: first focus navigates the deferred URL.
                 if *focused {
+                    // Read the suspend flag BEFORE touch_window runs:
+                    // touch clears it on focus, and the badge decision
+                    // below needs the state the window was in when the
+                    // user arrived.
+                    let was_suspended = track_app
+                        .try_state::<WindowState>()
+                        .and_then(|s| {
+                            s.inner
+                                .lock()
+                                .ok()
+                                .and_then(|m| m.get(&track_label).map(|t| t.suspended))
+                        })
+                        .unwrap_or(false);
+                    touch_window(&track_app, &track_label, true);
+                    // Lazy restore: first focus navigates the deferred URL.
                     navigate_pending_url(&track_app, &track_label);
                     // v0.15.0: visiting the window clears its unread badge
-                    // until the next title change.
-                    if let Some(winstate) = track_app.try_state::<WindowState>() {
-                        if let Ok(mut tracked) = winstate.inner.lock() {
-                            if let Some(t) = tracked.get_mut(&track_label) {
-                                t.page_title_seen = true;
+                    // until the next title change — unless the window was
+                    // suspended (v0.16.4): the title and its count are
+                    // exactly what was there when it slept, so the user
+                    // hasn't seen any of it yet, and a frozen renderer
+                    // may never fire a fresh title event after wake to
+                    // correct a premature clear. The badge clears on
+                    // the next real title change, or on a later focus
+                    // while the window is awake.
+                    if focus_clears_badge(was_suspended) {
+                        if let Some(winstate) = track_app.try_state::<WindowState>() {
+                            if let Ok(mut tracked) = winstate.inner.lock() {
+                                if let Some(t) = tracked.get_mut(&track_label) {
+                                    t.page_title_seen = true;
+                                }
                             }
                         }
                     }
+                } else {
+                    touch_window(&track_app, &track_label, false);
                 }
             }
             WindowEvent::Destroyed => {
@@ -814,7 +938,13 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       var s = document.createElement("style");
       s.setAttribute("data-appmaka", "cursor");
       s.textContent =
-        "*,*::before,*::after,html,body,:root{{cursor:none!important}}";
+        "*,*::before,*::after,html,body,:root{{cursor:none!important}}" +
+        // Frame boxes keep the native cursor: over an embed the top
+        // document receives no mousemove at all, so suppressing the
+        // native cursor there leaves no visible pointer, and the
+        // drawn dot sits parked at the frame's edge. The iframe type
+        // selector outranks the universal rule above.
+        "iframe{{cursor:auto!important}}";
       (document.head || document.documentElement).appendChild(s);
     }}
     // Rollback helper: removes everything we injected so the native
@@ -831,49 +961,74 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       obs.observe(document.documentElement, {{ childList: true }});
     }}
 
+    // A live controller would have returned or destroyed itself at the
+    // guard above, so any cursor chrome still in the DOM here is
+    // orphaned (its controller global was lost) — sweep it, or the new
+    // install would draw a second cursor next to the corpse.
+    removeChrome();
+
     var N = {dots};
+    var tx = -100, ty = -100, inside = false, dead = false, rafId = 0;
     var nodes = [];
-    for (var i = 0; i < N; i++) {{
-      var d = document.createElement("div");
-      d.setAttribute("data-appmaka", "cursor-dot");
-      d.style.cssText =
-        "position:fixed;left:0;top:0;z-index:2147483647;" +
-        "pointer-events:none;will-change:transform;opacity:0;" +
-        {shape_css_json};
-      if (N > 1 && STYLE !== "ripple") {{
-        var f = 1 - i / N;
-        d.style.width = Math.max(3, Math.round(8 * f)) + "px";
-        d.style.height = d.style.width;
-        var m = -Math.max(3, Math.round(8 * f)) / 2;
-        d.style.margin = m + "px 0 0 " + m + "px";
-      }}
-      if (STYLE === "ripple" && i === 1) {{
-        // The ripple ring rides on the head and pulses outward in the
-        // frame loop; it starts as a plain ring the size of "ring".
+    // Factored out of the install flow: the watchdog rebuilds the
+    // dots once if a page strips them, and a rebuild must produce
+    // exactly what install produced.
+    function buildDots() {{
+      // Sweep partial remains first, or the rebuilt set stacks on
+      // top of the broken one and the count check never settles.
+      var stale = document.querySelectorAll("[data-appmaka=cursor-dot]");
+      for (var s = 0; s < stale.length; s++) stale[s].remove();
+      nodes = [];
+      for (var i = 0; i < N; i++) {{
+        var d = document.createElement("div");
+        d.setAttribute("data-appmaka", "cursor-dot");
         d.style.cssText =
           "position:fixed;left:0;top:0;z-index:2147483647;" +
-          "pointer-events:none;will-change:transform,opacity;opacity:0;" +
-          "width:26px;height:26px;margin:-13px 0 0 -13px;" +
-          "border:2px solid {color_hex};border-radius:50%;background:transparent;";
+          "pointer-events:none;will-change:transform;opacity:0;" +
+          {shape_css_json};
+        if (N > 1 && STYLE !== "ripple") {{
+          var f = 1 - i / N;
+          d.style.width = Math.max(3, Math.round(8 * f)) + "px";
+          d.style.height = d.style.width;
+          var m = -Math.max(3, Math.round(8 * f)) / 2;
+          d.style.margin = m + "px 0 0 " + m + "px";
+        }}
+        if (STYLE === "ripple" && i === 1) {{
+          // The ripple ring rides on the head and pulses outward in the
+          // frame loop; it starts as a plain ring the size of "ring".
+          d.style.cssText =
+            "position:fixed;left:0;top:0;z-index:2147483647;" +
+            "pointer-events:none;will-change:transform,opacity;opacity:0;" +
+            "width:26px;height:26px;margin:-13px 0 0 -13px;" +
+            "border:2px solid {color_hex};border-radius:50%;background:transparent;";
+        }}
+        if (STYLE === "rainbow") {{
+          // Each dot gets its own hue, head first (v0.16.0).
+          d.style.background = "hsl(" + Math.round(i * 360 / N) + ",90%,65%)";
+        }}
+        if (STYLE === "comet" && i === 0) {{
+          d.style.boxShadow = "0 0 10px 3px rgba({color_rgb},0.6)";
+        }}
+        document.documentElement.appendChild(d);
+        var op = N > 1 ? 0.9 * (1 - i / N) + 0.1 : 1;
+        if (STYLE === "orbit") op = i === 0 ? 1 : 0.85;
+        nodes.push({{ el: d, x: -100, y: -100, o: op }});
       }}
-      if (STYLE === "rainbow") {{
-        // Each dot gets its own hue, head first (v0.16.0).
-        d.style.background = "hsl(" + Math.round(i * 360 / N) + ",90%,65%)";
+      // A mid-session rebuild re-seats the dots at the last known
+      // pointer position instead of leaving them invisible at the
+      // off-screen start until the next leave/enter cycle.
+      if (inside) {{
+        for (var j = 0; j < nodes.length; j++) {{
+          nodes[j].x = tx; nodes[j].y = ty;
+          nodes[j].el.style.opacity = nodes[j].o;
+        }}
       }}
-      if (STYLE === "comet" && i === 0) {{
-        d.style.boxShadow = "0 0 10px 3px rgba({color_rgb},0.6)";
-      }}
-      document.documentElement.appendChild(d);
-      var op = N > 1 ? 0.9 * (1 - i / N) + 0.1 : 1;
-      if (STYLE === "orbit") op = i === 0 ? 1 : 0.85;
-      nodes.push({{ el: d, x: -100, y: -100, o: op }});
     }}
+    buildDots();
 
     // Hide the native cursor only now that the drawn one exists:
     // any failure above this line leaves the native cursor untouched.
     injectStyle();
-
-    var tx = -100, ty = -100, inside = false, dead = false, rafId = 0;
 
     function showAt(cx, cy) {{
       tx = cx; ty = cy;
@@ -899,22 +1054,27 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
     document.addEventListener("mousemove", onMove, {{ passive: true }});
     window.addEventListener("mouseenter", onEnter, {{ passive: true }});
     document.addEventListener("mouseleave", onLeave);
+    // The document can lose the pointer without a mouseleave (focus
+    // moves to another window or the native caption strip): without a
+    // second net the dots would sit frozen at their last position.
+    window.addEventListener("blur", onLeave);
 
     // One rAF loop: head snaps, followers lerp (trail effect).
     // transform-only — no layout, no paint beyond the dot elements.
+    // While the pointer is out the dots are invisible (onLeave zeroed
+    // their opacity), so the loop re-queues without writing anything:
+    // an idle page must not pay per-frame style writes.
     (function frame() {{
       if (dead) return;
+      if (!inside) {{ rafId = requestAnimationFrame(frame); return; }}
       var now = performance.now();
       var px = tx, py = ty;
       for (var i = 0; i < nodes.length; i++) {{
         var n = nodes[i];
         if (i === 0) {{
+          // The head sits exactly on the pointer: a wandering head
+          // (the old firefly behavior) lies about where a click lands.
           n.x = px; n.y = py;
-          if (STYLE === "firefly") {{
-            // The head itself wanders a few px around the pointer.
-            n.x += Math.sin(now / 130) * 3;
-            n.y += Math.cos(now / 170) * 3;
-          }}
         }}
         else if (STYLE === "orbit" || STYLE === "bubbles") {{
           // Orbit: one follower, fixed radius. Bubbles: each follower
@@ -956,6 +1116,7 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       document.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseenter", onEnter);
       document.removeEventListener("mouseleave", onLeave);
+      window.removeEventListener("blur", onLeave);
       if (obs) obs.disconnect();
       removeChrome();
       if (window.__appmakaCursor && window.__appmakaCursor.style === IDENT) {{
@@ -963,18 +1124,32 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       }}
     }}
     // Watchdog: pages and ad scripts sometimes remove foreign DOM.
-    // If our style vanished, put it back; if the dots vanished, tear
-    // down — restoring the native cursor — and let the next re-apply
-    // pass or navigation reinstall cleanly. Never sit cursor-less.
+    // If our style vanished, put it back. If dots are missing, the
+    // first bad tick rebuilds them once — a page that strips foreign
+    // nodes a single time (ad script, SPA bootstrap) shouldn't cost
+    // the drawn cursor for the whole session. A second bad tick
+    // means the page keeps stripping them: tear down to the native
+    // cursor rather than fight it forever. Never sit cursor-less.
+    var wdRepaired = false;
     var wd = setInterval(function() {{
       if (dead) return;
-      if (!document.querySelector("[data-appmaka=cursor-dot]")) {{ destroy(); return; }}
+      if (document.querySelectorAll("[data-appmaka=cursor-dot]").length !== N) {{
+        if (!wdRepaired) {{ wdRepaired = true; try {{ buildDots(); }} catch (e) {{ destroy(); }} return; }}
+        destroy(); return;
+      }}
+      wdRepaired = false;
       if (!document.querySelector("[data-appmaka=cursor]")) injectStyle();
     }}, 2000);
     window.__appmakaCursor = {{ style: IDENT, destroy: destroy }};
   }} catch(e) {{
     // Fail visible: strip anything we managed to inject so the
     // native cursor returns instead of leaving no cursor at all.
+    // Disconnect the head observer too: left armed, it would inject
+    // the cursor:none style when <head> appears, resurrecting a
+    // cursor-less page this catch just cleaned up. (`obs` is
+    // function-scoped, so it is safe to read here even when the
+    // failure happened before its assignment ran.)
+    try {{ if (obs) obs.disconnect(); }} catch (e3) {{}}
     try {{
       var junk = document.querySelectorAll("[data-appmaka=cursor],[data-appmaka=cursor-dot]");
       for (var i = 0; i < junk.length; i++) junk[i].remove();
@@ -1040,8 +1215,9 @@ pub(crate) fn apply_cursor_live(app: &AppHandle, style: &str) {
 /// this converges it to the saved style. Passes at widening delays,
 /// because an eval that lands before the new document commits is
 /// discarded with the old one — the same-style guard in the script
-/// makes a redundant pass a no-op. The third pass (v0.15.1) covers
-/// slow commits (VPN, consent interstitials). Called from the
+/// makes a redundant pass a no-op. Later passes cover slow commits
+/// (VPN, consent interstitials); the final 9s pass (v0.16.3) catches
+/// the slowest. Called from the
 /// navigation hooks and from the search window's reuse path (all
 /// platforms). Never blocks the caller: everything here runs on a
 /// detached thread.
@@ -1049,7 +1225,7 @@ pub(crate) fn schedule_cursor_reapply(app: AppHandle, label: String) {
     let _ = std::thread::Builder::new()
         .name("appmaka-cursor-reapply".to_string())
         .spawn(move || {
-            for delay_ms in [600, 2000, 4000] {
+            for delay_ms in [600, 2000, 4000, 9000] {
                 std::thread::sleep(Duration::from_millis(delay_ms));
                 let style = app
                     .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
@@ -1359,6 +1535,55 @@ pub(crate) struct PopupContext {
 /// must say so (frontend copy, coordinator-owned). The one exception is
 /// the global override (`allow_popups_globally` in launcher settings),
 /// which is read live on every request and applies immediately.
+/// Popup close-lifecycle trace: one line per close step, appended to
+/// app_data/popup-lifecycle.log (best-effort, capped) and echoed to
+/// stderr. The next zombie-renderer report can be matched against this
+/// file to see exactly which step never fired: created/spawned ->
+/// close-requested -> destroyed -> wm-ncdestroy-subclass-removed
+/// (Windows chrome only). eprintln alone is invisible on Windows GUI
+/// builds, hence the file.
+pub(crate) fn log_popup_lifecycle(app: &AppHandle, label: &str, step: &str) {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("{secs} {label} {step}\n");
+    eprintln!("[appmaka] popup-lifecycle {label} {step}");
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let path = dir.join("popup-lifecycle.log");
+    // Cap: truncate once over ~256 KiB so the trace can't grow unbounded.
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 262_144 {
+        let _ = std::fs::write(&path, "");
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Attach the close-lifecycle trace to a contained popup window.
+fn attach_popup_lifecycle_trace(app: &AppHandle, window: &tauri::WebviewWindow, label: &str) {
+    let log_app = app.clone();
+    let log_label = label.to_string();
+    window.on_window_event(move |event| {
+        match event {
+            tauri::WindowEvent::CloseRequested { .. } => {
+                log_popup_lifecycle(&log_app, &log_label, "close-requested");
+            }
+            tauri::WindowEvent::Destroyed => {
+                log_popup_lifecycle(&log_app, &log_label, "destroyed");
+            }
+            _ => {}
+        }
+    });
+}
+
 pub(crate) fn make_popup_handler(
     ctx: PopupContext,
 ) -> impl Fn(url::Url, tauri::webview::NewWindowFeatures) -> tauri::webview::NewWindowResponse<tauri::Wry>
@@ -1473,6 +1698,12 @@ fn build_contained_window(
         .inner_size(w, h)
         .on_new_window(make_popup_handler(nested_ctx))
         .on_download(crate::downloads::make_download_handler(ctx.app.clone()));
+    // Same session folder as the account/tabbed builders: the browser
+    // arguments must match theirs exactly (see WEBVIEW2_BROWSER_ARGS).
+    #[cfg(windows)]
+    {
+        builder = builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS);
+    }
     if kind == "oauth" {
         builder = builder.initialization_script(oauth_autoclose_script(&app_origin(&ctx.app_url)));
     }
@@ -1514,6 +1745,10 @@ fn build_contained_window(
             if kind == "popup" {
                 crate::popup_chrome::setup_popup_chrome(&ctx.app, &window, &label, url);
             }
+            // Close-lifecycle trace (see log_popup_lifecycle): a popup
+            // that never logs "destroyed" after its close is the zombie.
+            attach_popup_lifecycle_trace(&ctx.app, &window, &label);
+            log_popup_lifecycle(&ctx.app, &label, "created");
             // v0.13.18: page-requested fullscreen works in popups too.
             #[cfg(windows)]
             attach_fullscreen_sync(&window);
@@ -1686,6 +1921,13 @@ fn spawn_contained_window(
             // other window (v0.9.8): without this they silently bypassed
             // the download folder, the history, and Mark of the Web.
             .on_download(crate::downloads::make_download_handler(window_app.clone()));
+            // Same session folder as the account/tabbed builders: the
+            // browser arguments must match theirs exactly (see
+            // WEBVIEW2_BROWSER_ARGS).
+            #[cfg(windows)]
+            {
+                builder = builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS);
+            }
             // v0.13.18: open on the monitor the user is actually on.
             if let Some((x, y)) = cursor_centered_position(&window_app, 640.0, 720.0) {
                 builder = builder.position(x, y);
@@ -1722,6 +1964,9 @@ fn spawn_contained_window(
             }
             match builder.build() {
                 Ok(_window) => {
+                    // Close-lifecycle trace (see log_popup_lifecycle).
+                    attach_popup_lifecycle_trace(&window_app, &_window, &label);
+                    log_popup_lifecycle(&window_app, &label, "spawned");
                     // v0.13.18: page-requested fullscreen works in popups too.
                     #[cfg(windows)]
                     attach_fullscreen_sync(&_window);
@@ -1784,7 +2029,50 @@ fn navigate_pending_url(app: &AppHandle, label: &str) {
     }
 }
 
+/// Snapshot the webview's live URL into the tracked entry (v0.16.4).
+/// Runs at the moments the URL is both current and about to become
+/// unreadable — focus loss, before suspend, before close — and the
+/// value reaches disk on the next session write, so a reopen can
+/// return to the page instead of the app's home URL. about:blank is
+/// never stored: a lazily-restored window that was never focused has
+/// no page worth returning to, and its navigation target is already
+/// recorded in pending_url.
+fn capture_last_url(app: &AppHandle, label: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+    let Ok(url) = window.url() else {
+        return;
+    };
+    let url = url.to_string();
+    if url == "about:blank" {
+        return;
+    }
+    if let Some(winstate) = app.try_state::<WindowState>() {
+        if let Ok(mut tracked) = winstate.inner.lock() {
+            if let Some(t) = tracked.get_mut(label) {
+                t.last_url = Some(url);
+            }
+        }
+    }
+}
+
+/// Whether a focus event clears the window's unread badge (v0.16.4).
+/// A window that was suspended at focus time keeps its badge: its
+/// renderer was frozen, so its title may never change again after
+/// wake — clearing here could erase an unread count the user hasn't
+/// seen, permanently. Pure so the rule is unit-testable.
+fn focus_clears_badge(was_suspended: bool) -> bool {
+    !was_suspended
+}
+
 fn touch_window(app: &AppHandle, label: &str, focused: bool) {
+    if !focused {
+        // Last reliable read of the page before the user moves on;
+        // later state changes (suspend, close) may make it stale or
+        // unreadable.
+        capture_last_url(app, label);
+    }
     if let Some(winstate) = app.try_state::<WindowState>() {
         if let Ok(mut tracked) = winstate.inner.lock() {
             if let Some(t) = tracked.get_mut(label) {
@@ -1798,15 +2086,47 @@ fn touch_window(app: &AppHandle, label: &str, focused: bool) {
     #[cfg(windows)]
     if focused {
         resume_window(app, label);
+    } else if let Some(window) = app.get_webview_window(label) {
+        set_window_memory_target_low(&window, true);
     }
 }
+
+/// Set WebView2 memory target level to LOW (unfocused/idle) or NORMAL (focused).
+/// Signals Chromium to drop unused decode caches, run V8 GC, and release working set.
+#[cfg(windows)]
+pub(crate) fn set_window_memory_target_low(window: &WebviewWindow, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows_core::Interface;
+
+    let target = if low {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+    } else {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+    };
+
+    let _ = window.with_webview(move |platform| unsafe {
+        if let Ok(core) = platform.controller().CoreWebView2() {
+            if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
+                let _ = core19.SetMemoryUsageTargetLevel(target);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub(crate) fn set_window_memory_target_low(_window: &WebviewWindow, _low: bool) {}
 
 /// Restore the pre-suspend title and wake the renderer. WebView2 auto-resumes
 /// a suspended page when its controller becomes visible again; the explicit
 /// Resume() covers the case where visibility didn't flip.
 #[cfg(windows)]
 fn resume_window(app: &AppHandle, label: &str) {
-    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, ICoreWebView2_3, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
     use windows_core::Interface;
 
     let Some(window) = app.get_webview_window(label) else {
@@ -1825,12 +2145,19 @@ fn resume_window(app: &AppHandle, label: &str) {
         let _ = window.set_title(&title);
     }
     let _ = window.with_webview(|platform| unsafe {
-        let _ = platform.controller().SetIsVisible(true);
+        // Resume before showing (v0.16.4): a still-suspended controller
+        // made visible first presents its frozen — possibly blank —
+        // frame until Resume lands. Waking the renderer first lets the
+        // first frame the user sees be live content.
         if let Ok(core) = platform.controller().CoreWebView2() {
+            if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
+                let _ = core19.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL);
+            }
             if let Ok(core3) = core.cast::<ICoreWebView2_3>() {
                 let _ = core3.Resume();
             }
         }
+        let _ = platform.controller().SetIsVisible(true);
     });
 }
 
@@ -1985,6 +2312,9 @@ pub fn suspend_account_window(
 
 #[cfg(windows)]
 fn suspend_one(app: &AppHandle, label: &str, window: &WebviewWindow) {
+    // Record the page before the renderer freezes (v0.16.4): once
+    // TrySuspend lands, the URL is not readable again until wake.
+    capture_last_url(app, label);
     // WebView2 requires the controller to be hidden (IsVisible == false)
     // before TrySuspend succeeds (otherwise returns ERROR_INVALID_STATE).
     // Minimized, hidden, or already-hidden webviews are eligible.
@@ -1992,6 +2322,7 @@ fn suspend_one(app: &AppHandle, label: &str, window: &WebviewWindow) {
         || !window.is_visible().unwrap_or(true)
         || webview_hidden(window);
     if !can_suspend {
+        set_window_memory_target_low(window, true);
         return;
     }
     if try_suspend_webview(window) {
@@ -2081,6 +2412,10 @@ fn try_suspend_webview(window: &WebviewWindow) -> bool {
 use crate::pin::{CloseIntent, ClosePlan};
 
 pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIntent) {
+    // Final URL read while the webview still exists (v0.16.4). Runs
+    // before the pin plan on purpose: even a diverted or skipped close
+    // leaves the freshest value behind for the next session write.
+    capture_last_url(app, label);
     // v0.15.0: only automatic reclaims bank "Memory saved" — user closes
     // never count.
     let automatic = matches!(intent, CloseIntent::Background);
@@ -2095,7 +2430,18 @@ pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIn
         ClosePlan::Skip => return,
         ClosePlan::Proceed => {}
         ClosePlan::Confirm => {
-            if !crate::pin::guard_close(app, label) {
+            // Never block this thread on the confirm: blocking_show on
+            // a command/IPC thread, or during window-event dispatch,
+            // parks the caller while the dialog pumps its own loop —
+            // the main-thread freeze class from the v0.16.x reports.
+            // The helper thread in ask_then_close shows the dialog
+            // instead; on approval it records the label in
+            // ConfirmedCloses and closes the window, and the
+            // CloseRequested handler lets a confirmed label through
+            // while the Destroyed handler does the bookkeeping below.
+            // A pre-approved label (batch close) skips the dialog.
+            if !crate::pin::take_confirmed(app, label) {
+                crate::pin::ask_then_close(app, label);
                 return;
             }
         }
@@ -2142,10 +2488,13 @@ pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIn
 }
 
 /// Snapshot of tracked account windows that still have a live window, for
-/// session persistence (v0.9.5): (label, app_id, account_id, opened_at).
+/// session persistence (v0.9.5): (label, app_id, account_id, opened_at,
+/// last_url).
 /// Cross-checked against live windows so a stale tracked entry (window
 /// closed before its Destroyed handler ran) can never resurrect.
-pub(crate) fn live_tracked_accounts(app: &AppHandle) -> Vec<(String, String, String, u64)> {
+pub(crate) fn live_tracked_accounts(
+    app: &AppHandle,
+) -> Vec<(String, String, String, u64, Option<String>)> {
     let Some(winstate) = app.try_state::<WindowState>() else {
         return Vec::new();
     };
@@ -2164,6 +2513,7 @@ pub(crate) fn live_tracked_accounts(app: &AppHandle) -> Vec<(String, String, Str
                 t.app_id.clone(),
                 t.account_id.clone(),
                 t.opened_at,
+                t.last_url.clone(),
             )
         })
         .collect()
@@ -2369,21 +2719,32 @@ pub struct OpenAccountInfo {
     /// means no badge — either the title carries no count or the user
     /// has visited the window since the last title change.
     pub unread: Option<u32>,
+    /// v0.16.4: the webview is frozen in place via TrySuspend
+    /// (Windows-only). A suspended window keeps its DOM and scroll and
+    /// wakes on focus — unlike a closed ("sleeping") window, which is
+    /// destroyed and must reload. Exposed so the UI can stop
+    /// conflating the two states.
+    pub suspended: bool,
 }
 
 /// Close every open account window. Returns how many were closed. Sessions
 /// stay on disk, so reopening an account restores its login. Transient
 /// popup children ("popup-*"/"oauth-*") are closed too but not counted —
-/// leaving them open would defeat the RAM dashboard's "close all". Sync is
-/// fine: closing windows never deadlocks; only *creating* them is
-/// restricted.
+/// leaving them open would defeat the RAM dashboard's "close all".
+///
+/// Async on purpose (v0.18.0): the batch pin confirm below blocks on a
+/// native dialog whose show posts to the main-thread event loop, and
+/// Tauri 2 runs *sync* commands on the main thread — a pinned close-all
+/// could park the whole UI in that modal (the v0.13.1 strip deadlock,
+/// one layer up). As an async command this runs on a runtime worker
+/// thread, where blocking on the dialog is safe.
 ///
 /// Pinned windows (v0.9.9, "Don't close this window") get ONE batch confirm
 /// for the whole call, not one per window. "Keep open" (or dismiss) closes
 /// the unpinned windows and leaves the pinned ones alone.
 #[tauri::command]
 #[allow(dead_code)]
-pub fn close_all_account_windows(app: AppHandle) -> Result<usize, String> {
+pub async fn close_all_account_windows(app: AppHandle) -> Result<usize, String> {
     let labels: Vec<String> = match app.try_state::<WindowState>() {
         Some(winstate) => match winstate.inner.lock() {
             Ok(tracked) => tracked
@@ -2454,10 +2815,13 @@ pub(crate) fn close_label_allowed(label: &str) -> bool {
 /// the row key IS the window label. Pin handling reuses the standard
 /// User-intent flow: pinned windows get the one native confirm
 /// ("This window is pinned. Close it anyway?"), unpinned close at once.
-/// Sync command, same as close_all_account_windows: guard_close may block
-/// this thread on the confirm dialog, which is safe on command threads.
+/// Async so a deferred pin confirm never parks command dispatch:
+/// close_tracked_window routes Confirm through ask_then_close's helper
+/// thread instead of blocking on the dialog (sync commands run on the
+/// main thread in Tauri 2, and a dialog there would wait on its own
+/// event loop).
 #[tauri::command]
-pub fn close_open_window(app: AppHandle, label: String) -> Result<(), String> {
+pub async fn close_open_window(app: AppHandle, label: String) -> Result<(), String> {
     if !close_label_allowed(&label) {
         return Err(format!("not a closeable window: {label}"));
     }
@@ -2504,7 +2868,7 @@ pub fn list_open_account_windows(
     app: AppHandle,
     store: State<'_, AppStore>,
 ) -> Vec<OpenAccountInfo> {
-    let tracked: Vec<(String, String, String, String, bool)> = match app.try_state::<WindowState>() {
+    let tracked: Vec<(String, String, String, String, bool, bool)> = match app.try_state::<WindowState>() {
         Some(winstate) => match winstate.inner.lock() {
             Ok(map) => map
                 .iter()
@@ -2516,6 +2880,7 @@ pub fn list_open_account_windows(
                         t.account_id.clone(),
                         t.page_title.clone(),
                         t.page_title_seen,
+                        t.suspended,
                     )
                 })
                 .collect(),
@@ -2525,7 +2890,7 @@ pub fn list_open_account_windows(
     };
     tracked
         .into_iter()
-        .map(|(label, app_id, account_id, page_title, seen)| {
+        .map(|(label, app_id, account_id, page_title, seen, suspended)| {
             let (app_name, account_label) = store
                 .get(&app_id)
                 .ok()
@@ -2557,6 +2922,7 @@ pub fn list_open_account_windows(
                 } else {
                     crate::badges::parse_unread_count(&page_title)
                 },
+                suspended,
             }
         })
         // The search window has no tile, so the dashboard is its only
@@ -2583,6 +2949,8 @@ pub fn list_open_account_windows(
                             crate::websearch::SEARCH_WINDOW_LABEL,
                         ),
                         unread: None,
+                        // The search window is never TrySuspend-frozen.
+                        suspended: false,
                     }
                 }),
         )
@@ -2613,6 +2981,8 @@ pub fn list_open_account_windows(
                 focused: w.is_focused().unwrap_or(false),
                 pinned: false,
                 unread: None,
+                // Popups are never TrySuspend-frozen.
+                suspended: false,
             })
         }))
         .collect()
@@ -2774,6 +3144,17 @@ mod tests {
         assert!(!close_label_allowed("xpopup-3"));
     }
 
+    /// The v0.16.4 badge rule: focusing an awake window clears its
+    /// unread badge (the user is looking at it), but focusing a window
+    /// that was suspended must not — its frozen renderer may never
+    /// fire another title event, so a clear would erase an unseen
+    /// count for good.
+    #[test]
+    fn focus_clears_badge_only_when_window_was_awake() {
+        assert!(focus_clears_badge(false));
+        assert!(!focus_clears_badge(true));
+    }
+
     #[test]
     fn cursor_chrome_off_is_empty() {
         assert!(cursor_chrome_js("off", "#8b5cf6", "139,92,246").is_empty());
@@ -2804,6 +3185,62 @@ mod tests {
         assert!(cursor_chrome_js("comet", "#8b5cf6", "139,92,246").contains("var N = 6"));
         assert!(cursor_chrome_js("comet", "#8b5cf6", "139,92,246").contains("boxShadow"));
         assert!(cursor_chrome_js("pulse", "#8b5cf6", "139,92,246").contains("scale("));
+    }
+
+    #[test]
+    fn cursor_chrome_hardened_lifecycle() {
+        // v0.16.3 hardening, one assert per failure mode:
+        let js = cursor_chrome_js("trail", "#8b5cf6", "139,92,246");
+        // Orphaned chrome from a lost controller is swept before the new
+        // dots are created (definition + sweep + destroy = 3 calls).
+        assert!(js.matches("removeChrome()").count() >= 3, "{js}");
+        // Losing window focus hides the dots even when the document
+        // never fires mouseleave, and destroy unregisters the net.
+        assert!(js.contains("window.addEventListener(\"blur\", onLeave)"), "{js}");
+        assert!(js.contains("window.removeEventListener(\"blur\", onLeave)"), "{js}");
+        // The frame loop writes nothing while the pointer is out.
+        assert!(js.contains("if (!inside) { rafId = requestAnimationFrame(frame); return; }"), "{js}");
+        // The watchdog treats a partial trail as broken, not just total
+        // removal.
+        assert!(
+            js.contains("querySelectorAll(\"[data-appmaka=cursor-dot]\").length !== N"),
+            "{js}"
+        );
+    }
+
+    #[test]
+    fn cursor_chrome_iframe_and_watchdog_repair() {
+        // v0.16.5: frame boxes keep the native cursor (over an embed
+        // the top document is starved of mousemove, so suppressing it
+        // there leaves no visible pointer), and the watchdog rebuilds
+        // the dots once before tearing down to the native cursor.
+        let js = cursor_chrome_js("dot", "#8b5cf6", "139,92,246");
+        assert!(js.contains("iframe{cursor:auto!important}"), "{js}");
+        assert!(js.contains("function buildDots()"), "{js}");
+        assert!(js.contains("wdRepaired"), "{js}");
+        // v0.16.6: a throwing watchdog rebuild destroys immediately,
+        // and a failed install disarms the head observer. The
+        // disconnect appears three times: the observer's own
+        // fire-once callback, destroy(), and the install catch.
+        assert!(
+            js.contains("try { buildDots(); } catch (e) { destroy(); }"),
+            "{js}"
+        );
+        assert_eq!(js.matches("if (obs) obs.disconnect();").count(), 3, "{js}");
+    }
+
+    #[test]
+    fn webview2_browser_args_contract() {
+        // Custom args replace wry's defaults rather than adding to
+        // them, so the defaults ride along explicitly; and every
+        // builder on a session folder passes this one string (the
+        // v0.16.5 popup breakage was a second, different set).
+        assert!(WEBVIEW2_BROWSER_ARGS.contains("msSmartScreenProtection"));
+        assert!(WEBVIEW2_BROWSER_ARGS.contains("msWebOOUI"));
+        assert!(WEBVIEW2_BROWSER_ARGS.contains("msPdfOOUI"));
+        assert!(WEBVIEW2_BROWSER_ARGS.contains("TrimOnMemoryPressure"));
+        // The 256 MB heap cap was dropped in v0.16.6 (see the const).
+        assert!(!WEBVIEW2_BROWSER_ARGS.contains("max-old-space-size"));
     }
 
     #[test]
