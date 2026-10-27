@@ -1,11 +1,19 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { evaluateExpression, formatCalcResult } from "./calc";
 import { HotkeyCapture } from "./HotkeyCapture";
-import { fuzzyScore, rankQuickSwitch } from "./quickswitch";
+import {
+  buildFuzzyEntry,
+  fuzzyScore,
+  fuzzyScoreEntry,
+  rankQuickSwitch,
+  type FuzzyEntry,
+  type SearchCacheApp,
+} from "./quickswitch";
 import type {
   Account,
+  DockProfile,
   HotkeyStatus,
   LauncherSettings,
   NativeProgram,
@@ -304,6 +312,121 @@ export function browseAll(
 }
 
 /**
+ * v0.17.0: prebuilt fuzzy entries, memoized per source object. The
+ * index (lowercase text, word starts, acronym) is built once when an
+ * item's text changes — never per keystroke — so a search over
+ * thousands of programs scores against ready-made entries. The cache
+ * key is the exact text list, so a rename rebuilds just that item.
+ */
+const fuzzyEntryCache = new WeakMap<object, { key: string; entries: FuzzyEntry[] }>();
+
+function fuzzyEntriesFor(obj: object, texts: string[]): FuzzyEntry[] {
+  const key = texts.join("\n");
+  const hit = fuzzyEntryCache.get(obj);
+  if (hit && hit.key === key) return hit.entries;
+  const entries = texts.map(buildFuzzyEntry);
+  fuzzyEntryCache.set(obj, { key, entries });
+  return entries;
+}
+
+function bestFuzzyScore(queryLower: string, entries: FuzzyEntry[]): number {
+  let best = 0;
+  for (const e of entries) {
+    const s = fuzzyScoreEntry(queryLower, e);
+    if (s > best) best = s;
+  }
+  return best;
+}
+
+/**
+ * v0.18.0: the searchable texts `buildResults` asks entries for, per
+ * item kind. The persisted search-index cache (see quickswitch.ts)
+ * collects and primes through exactly these lists, so cached entries
+ * are keyed by — and verified against — the same texts live scoring
+ * would have built from.
+ */
+function searchTextsFor(
+  apps: WebApp[],
+  programs: NativeProgram[],
+  routines: Routine[]
+): Array<{ obj: object; taggedId: string; texts: string[] }> {
+  const out: Array<{ obj: object; taggedId: string; texts: string[] }> = [];
+  for (const app of apps) {
+    out.push({ obj: app, taggedId: `app:${app.id}`, texts: [app.name, hostOf(app.url)] });
+    for (const account of app.accounts) {
+      out.push({
+        obj: account,
+        taggedId: `account:${account.id}`,
+        texts: [account.label, `${account.label} ${app.name}`],
+      });
+    }
+  }
+  for (const program of programs) {
+    out.push({ obj: program, taggedId: `program:${program.id}`, texts: [program.name] });
+  }
+  for (const routine of routines) {
+    out.push({ obj: routine, taggedId: `routine:${routine.id}`, texts: [routine.name] });
+  }
+  return out;
+}
+
+/**
+ * v0.18.0: snapshot the session's fuzzy entries for the persisted
+ * search-index cache, keyed by tagged item id. Goes through
+ * `fuzzyEntriesFor`, so what's cached is byte-for-byte what this
+ * session scores with.
+ */
+export function collectSearchEntries(
+  apps: WebApp[],
+  programs: NativeProgram[],
+  routines: Routine[]
+): Record<string, FuzzyEntry[]> {
+  const out: Record<string, FuzzyEntry[]> = {};
+  for (const { obj, taggedId, texts } of searchTextsFor(apps, programs, routines)) {
+    out[taggedId] = fuzzyEntriesFor(obj, texts);
+  }
+  return out;
+}
+
+/**
+ * v0.18.0: warm the entry cache from a persisted snapshot. An item's
+ * cached entries are only adopted when they were built from exactly
+ * the texts the live item produces — a renamed program scores from
+ * fresh entries, never from a previous name's index.
+ */
+export function primeSearchEntries(
+  entriesById: Record<string, FuzzyEntry[]>,
+  apps: WebApp[],
+  programs: NativeProgram[],
+  routines: Routine[]
+): void {
+  for (const { obj, taggedId, texts } of searchTextsFor(apps, programs, routines)) {
+    const cached = entriesById[taggedId];
+    if (!cached || cached.length !== texts.length) continue;
+    let matches = true;
+    for (let i = 0; i < texts.length; i++) {
+      if (cached[i].text !== texts[i]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) {
+      fuzzyEntryCache.set(obj, { key: texts.join("\n"), entries: cached });
+    }
+  }
+}
+
+/** v0.18.0: the app descriptors the search-index cache fingerprints. */
+export function searchCacheAppDescriptors(apps: WebApp[]): SearchCacheApp[] {
+  return apps.map((a) => ({
+    id: a.id,
+    name: a.name,
+    url: a.url,
+    accounts: (a.accounts ?? []).map((ac) => ({ id: ac.id, label: ac.label })),
+  }));
+}
+
+/**
  * One ranked result list across accounts, web apps, and native programs.
  * Apps only appear as their own row when the query matches the app itself
  * (not just its accounts) — keeps the list short.
@@ -317,10 +440,11 @@ export function buildResults(
 ): SearchResult[] {
   const q = query.trim();
   if (!q) return [];
+  const ql = q.toLowerCase();
   const results: SearchResult[] = [];
 
   for (const app of apps) {
-    const appScore = Math.max(fuzzyScore(q, app.name), fuzzyScore(q, hostOf(app.url)));
+    const appScore = bestFuzzyScore(ql, fuzzyEntriesFor(app, [app.name, hostOf(app.url)]));
     if (appScore > 0) {
       results.push({
         kind: "app",
@@ -332,7 +456,10 @@ export function buildResults(
       });
     }
     for (const account of app.accounts) {
-      const score = Math.max(fuzzyScore(q, account.label), fuzzyScore(q, `${account.label} ${app.name}`));
+      const score = bestFuzzyScore(
+        ql,
+        fuzzyEntriesFor(account, [account.label, `${account.label} ${app.name}`])
+      );
       if (score > 0) {
         results.push({
           kind: "account",
@@ -350,7 +477,7 @@ export function buildResults(
   }
 
   for (const program of programs) {
-    const score = fuzzyScore(q, program.name);
+    const score = bestFuzzyScore(ql, fuzzyEntriesFor(program, [program.name]));
     if (score > 0) {
       results.push({
         kind: "program",
@@ -366,7 +493,7 @@ export function buildResults(
   // v0.8.0: routines match on their name. The tile shows the routine name
   // plus "Routine — Enter to run".
   for (const routine of routines) {
-    const score = fuzzyScore(q, routine.name);
+    const score = bestFuzzyScore(ql, fuzzyEntriesFor(routine, [routine.name]));
     if (score > 0) {
       results.push({
         kind: "routine",
@@ -402,7 +529,7 @@ export function buildResults(
     if (wid === null) continue;
     const ws = wsById.get(wid);
     if (!ws) continue;
-    const wScore = fuzzyScore(q, ws.name);
+    const wScore = bestFuzzyScore(ql, fuzzyEntriesFor(ws, [ws.name]));
     if (wScore > 0) {
       results.push({
         kind: "workspace",
@@ -434,13 +561,17 @@ export function IconGrid({
   badgeFor,
   ramFor,
   sleepingFor,
+  suspendedFor,
   onTileContextMenu,
+  numberHints,
 }: {
   items: SearchResult[];
   activeIndex: number;
   onHover: (i: number) => void;
   onActivate: (r: SearchResult) => void;
   renderIcon: (r: SearchResult) => React.ReactNode;
+  /** v0.17.0: show Alt+<number> quick-open hints on the first nine tiles (search mode). */
+  numberHints?: boolean;
   /** Tagged ids that show the small pin badge. Optional. */
   pinnedIds?: ReadonlySet<string>;
   /** Unread count per result (v0.15.0). Returning undefined draws no badge. Optional. */
@@ -449,6 +580,8 @@ export function IconGrid({
   ramFor?: (r: SearchResult) => number | undefined;
   /** Sleeping (auto-reclaimed) accounts (v0.15.0). Optional. */
   sleepingFor?: (r: SearchResult) => boolean;
+  /** Suspended (open but frozen, Windows-only) accounts (v0.16.4). Optional. */
+  suspendedFor?: (r: SearchResult) => boolean;
   /** Right-click on a tile. Receives the result and the cursor position. Optional. */
   onTileContextMenu?: (r: SearchResult, x: number, y: number) => void;
 }) {
@@ -461,6 +594,7 @@ export function IconGrid({
           role="option"
           aria-selected={i === activeIndex}
           className={`icon-tile${i === activeIndex ? " is-active" : ""}`}
+          style={{ animationDelay: `${Math.min(i, 10) * 14}ms` }}
           onMouseEnter={() => onHover(i)}
           onClick={() => onActivate(r)}
           onContextMenu={(e) => {
@@ -468,6 +602,11 @@ export function IconGrid({
             onTileContextMenu?.(r, e.clientX, e.clientY);
           }}
         >
+          {numberHints && i < 9 && (
+            <span className="tile-num" aria-hidden="true">
+              {i + 1}
+            </span>
+          )}
           {pinnedIds?.has(r.id) && (
             <span className="tile-pin" title="Pinned to top" aria-label="Pinned">
               <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -502,7 +641,14 @@ export function IconGrid({
               </span>
             ) : null;
           })()}
-          {sleepingFor?.(r) ? (
+          {/* A window is either open (possibly Suspended) or closed
+              (Sleeping), never both; the else-if keeps exactly one
+              label even if the two state polls ever disagreed. */}
+          {suspendedFor?.(r) ? (
+            <span className="tile-sleep" title="Open but frozen to save memory — opening it wakes it, without reloading">
+              Suspended
+            </span>
+          ) : sleepingFor?.(r) ? (
             <span className="tile-sleep" title="Closed automatically to save memory — reopening restores it">
               Sleeping
             </span>
@@ -533,7 +679,20 @@ export function QuickSwitchPalette({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const results = rankQuickSwitch(query, items);
+  // v0.17.0: the palette ranks through the same prebuilt entries as
+  // the launcher search. The items prop is stable while the palette
+  // is open (its query is local), so the map is built once per open.
+  const entryMap = useMemo(() => {
+    const m = new Map<SearchResult, FuzzyEntry[]>();
+    for (const it of items) {
+      m.set(it, [
+        buildFuzzyEntry(it.title),
+        ...(it.context ? [buildFuzzyEntry(`${it.title} ${it.context}`)] : []),
+      ]);
+    }
+    return m;
+  }, [items]);
+  const results = rankQuickSwitch(query, items, (it) => entryMap.get(it) ?? []);
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
@@ -541,6 +700,14 @@ export function QuickSwitchPalette({
     setActive(0);
   }, [query]);
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // v0.17.0: Alt+1..9 opens that row directly (e.code, so keyboard
+    // layouts that remap Alt+Digit characters still land).
+    if (e.altKey && /^Digit[1-9]$/.test(e.code)) {
+      e.preventDefault();
+      const r = results[Number(e.code.slice(5)) - 1];
+      if (r) onActivate(r);
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setActive((a) => Math.min(a + 1, results.length - 1));
@@ -590,6 +757,11 @@ export function QuickSwitchPalette({
                   <span className="palette-title">{r.title}</span>
                   {r.context ? (
                     <span className="palette-sub">{r.context}</span>
+                  ) : null}
+                  {query.trim() !== "" && i < 9 ? (
+                    <span className="palette-key" aria-hidden="true">
+                      Alt+{i + 1}
+                    </span>
                   ) : null}
                 </button>
               </li>
@@ -770,6 +942,23 @@ export function LauncherSettingsPanel({
   const [showSleepLabels, setShowSleepLabels] = useState(
     settings.show_sleep_labels ?? true
   );
+  // v0.17.0: workspace dock (pinned tiles floating on a screen edge).
+  const [dockEnabled, setDockEnabled] = useState(settings.dock_enabled ?? false);
+  const [dockEdge, setDockEdge] = useState(settings.dock_edge ?? "bottom");
+  const [dockHotkey, setDockHotkey] = useState(settings.dock_hotkey ?? "");
+  const [dockHotkeySaving, setDockHotkeySaving] = useState(false);
+  const [dockHotkeyError, setDockHotkeyError] = useState<string | null>(null);
+  // v0.18.0: dock profiles — saved pin + edge layouts. The select's
+  // value is the active profile ("" = none); picking one applies it.
+  const [dockProfiles, setDockProfiles] = useState<DockProfile[]>(
+    settings.dock_profiles ?? []
+  );
+  const [dockProfileSel, setDockProfileSel] = useState(
+    settings.dock_active_profile ?? ""
+  );
+  const [dockProfileName, setDockProfileName] = useState("");
+  const [dockProfileError, setDockProfileError] = useState<string | null>(null);
+  const [dockProfileSaving, setDockProfileSaving] = useState(false);
   // v0.13.0: open apps/accounts as tabbed windows.
   const [openAsTabbed, setOpenAsTabbed] = useState(
     settings.open_as_tabbed ?? false
@@ -979,6 +1168,124 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setLocal(saved ?? true);
+    }
+  }
+
+  // v0.17.0: the dock commands persist the setting and show/destroy
+  // the dock window on the backend; the event tells a live dock page to
+  // re-read its settings (edge + theme) without waiting for focus.
+  async function handleDockEnabled(next: boolean) {
+    setDockEnabled(next);
+    setFormError(null);
+    try {
+      onSaved(await invoke<LauncherSettings>("set_dock_enabled", { enabled: next }));
+      void emit("appmaka:dock-settings-changed");
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setDockEnabled(settings.dock_enabled ?? false);
+    }
+  }
+
+  // The dock hotkey saves on submit (like the summon hotkey above):
+  // set_dock_hotkey registers it and returns the live binding status,
+  // then settings are re-read so the saved string lands in panel state.
+  async function handleDockHotkeySave(e: React.FormEvent) {
+    e.preventDefault();
+    setDockHotkeySaving(true);
+    setFormError(null);
+    setDockHotkeyError(null);
+    try {
+      const status = await invoke<HotkeyStatus>("set_dock_hotkey", {
+        hotkey: dockHotkey.trim(),
+      });
+      onSaved(await invoke<LauncherSettings>("get_launcher_settings"));
+      if (dockHotkey.trim() !== "" && !status.registered) {
+        setDockHotkeyError(
+          status.error ?? "That hotkey couldn't be registered — another app may be using it."
+        );
+      }
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+    } finally {
+      setDockHotkeySaving(false);
+    }
+  }
+
+  async function handleDockEdge(next: string) {
+    setDockEdge(next);
+    setFormError(null);
+    try {
+      onSaved(await invoke<LauncherSettings>("set_dock_edge", { edge: next }));
+      void emit("appmaka:dock-settings-changed");
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setDockEdge(settings.dock_edge ?? "bottom");
+    }
+  }
+
+  // v0.18.0: picking a profile applies it — the backend swaps pins +
+  // edge and emits the events the dock listens to, so nothing is
+  // emitted from here. "" is the no-profile row, not an action.
+  async function handleApplyDockProfile(name: string) {
+    setDockProfileSel(name);
+    setFormError(null);
+    if (name === "") return;
+    try {
+      const updated = await invoke<LauncherSettings>("apply_dock_profile", { name });
+      onSaved(updated);
+      setDockProfiles(updated.dock_profiles ?? []);
+      setDockProfileSel(updated.dock_active_profile ?? "");
+      // Applying also moves the edge; keep the edge control honest.
+      setDockEdge(updated.dock_edge ?? "bottom");
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setDockProfileSel(settings.dock_active_profile ?? "");
+    }
+  }
+
+  async function handleSaveDockProfile(e: React.FormEvent) {
+    e.preventDefault();
+    setDockProfileSaving(true);
+    setDockProfileError(null);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("save_dock_profile", {
+        name: dockProfileName.trim(),
+      });
+      onSaved(updated);
+      setDockProfiles(updated.dock_profiles ?? []);
+      setDockProfileName("");
+    } catch (err) {
+      const msg = errMsg(err);
+      setDockProfileError(msg);
+      onError(msg);
+    } finally {
+      setDockProfileSaving(false);
+    }
+  }
+
+  // Delete acts on the profile the select currently names.
+  async function handleDeleteDockProfile() {
+    const name = dockProfileSel;
+    if (name === "") return;
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("delete_dock_profile", { name });
+      onSaved(updated);
+      setDockProfiles(updated.dock_profiles ?? []);
+      setDockProfileSel(updated.dock_active_profile ?? "");
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
     }
   }
 
@@ -1275,7 +1582,7 @@ export function LauncherSettingsPanel({
           <option value="blob">Blob (soft glow)</option>
           <option value="neon">Neon (bright glow)</option>
           <option value="ghost">Ghost (faint ring)</option>
-          <option value="firefly">Firefly (wandering glow)</option>
+          <option value="firefly">Firefly (glow)</option>
           <option value="snake">Snake (loose trail)</option>
           <option value="rainbow">Rainbow trail</option>
           <option value="bubbles">Bubbles (orbiting dots)</option>
@@ -1283,7 +1590,11 @@ export function LauncherSettingsPanel({
         <span className="help">
           Draws a lightweight pointer inside app windows. Useful if the
           system cursor ever goes invisible there. Applies right away,
-          including to windows already open.
+          including to windows already open. Drawn cursors cannot follow
+          the pointer inside cross-origin frames (embedded videos,
+          captchas, other sites&apos; pages) — the pointer parks where it
+          entered the frame. On pages full of embeds, Off (system
+          cursor) is the only fully reliable pointer.
         </span>
       </label>
 
@@ -1476,8 +1787,102 @@ export function LauncherSettingsPanel({
           }
           aria-label="Show sleeping labels on tiles"
         />
-        <span className="help">The Sleeping mark and the Memory saved total for auto-closed apps.</span>
+        <span className="help">The Sleeping and Suspended marks on tiles, and the Memory saved total for auto-closed apps.</span>
       </label>
+
+      <label className="inline-form">
+        <span>Workspace dock</span>
+        <input
+          type="checkbox"
+          checked={dockEnabled}
+          onChange={(e) => void handleDockEnabled(e.target.checked)}
+          aria-label="Show the workspace dock"
+        />
+        <span className="help">Your pinned tiles in a small bar floating on a screen edge, always on top. Turning it off closes the dock window completely, so it uses no memory while off.</span>
+      </label>
+
+      <label className="inline-form">
+        <span>Dock edge</span>
+        <select value={dockEdge} onChange={(e) => void handleDockEdge(e.target.value)}>
+          <option value="bottom">Bottom</option>
+          <option value="left">Left</option>
+          <option value="right">Right</option>
+        </select>
+        <span className="help">Which screen edge the dock sits on.</span>
+      </label>
+
+      <div className="inline-form">
+        <span>Dock profile</span>
+        <select
+          value={dockProfileSel}
+          onChange={(e) => void handleApplyDockProfile(e.target.value)}
+          aria-label="Dock profile"
+        >
+          <option value="">No profile</option>
+          {dockProfiles.map((p) => (
+            <option key={p.name} value={p.name}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => void handleDeleteDockProfile()}
+          disabled={dockProfileSel === ""}
+        >
+          Delete profile
+        </button>
+        <span className="help">A profile saves a set of pins and an edge. Picking one switches the dock to it. Changing pins or the edge by hand clears the profile.</span>
+      </div>
+
+      <form className="inline-form" onSubmit={(e) => void handleSaveDockProfile(e)}>
+        <label>
+          <span>Profile name</span>
+          <input
+            type="text"
+            value={dockProfileName}
+            onChange={(e) => setDockProfileName(e.target.value)}
+            aria-label="New dock profile name"
+            placeholder="Work"
+          />
+        </label>
+        <button type="submit" disabled={dockProfileSaving}>
+          {dockProfileSaving ? "Saving…" : "Save current as profile"}
+        </button>
+        <span className="help">
+          Saves the pins and edge you have now under this name.
+          {dockProfileError && (
+            <>
+              {" "}
+              <span className="error-text">{dockProfileError}</span>
+            </>
+          )}
+        </span>
+      </form>
+
+      <form className="inline-form" onSubmit={(e) => void handleDockHotkeySave(e)}>
+        <label>
+          <span>Dock hotkey</span>
+          <HotkeyCapture
+            value={dockHotkey}
+            onChange={setDockHotkey}
+            ariaLabel="Dock hotkey"
+            placeholder="None"
+          />
+        </label>
+        <button type="submit" disabled={dockHotkeySaving}>
+          {dockHotkeySaving ? "Saving…" : "Set hotkey"}
+        </button>
+        <span className="help">
+          Press it anywhere to show or hide the dock. Leave the field empty and set it to remove the hotkey.
+          {dockHotkeyError && (
+            <>
+              {" "}
+              <span className="error-text">{dockHotkeyError}</span>
+            </>
+          )}
+        </span>
+      </form>
 
       <div className="inline-form">
         <button type="button" onClick={() => void handleRescan()} disabled={rescanning}>
