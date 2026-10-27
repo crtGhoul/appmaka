@@ -1,15 +1,15 @@
 {
-  "version": "0.18.1",
-  "notes": "WebView2 process-leak fix: popup and tabbed closes off the main thread, search wipe guard, popup close tracing, firefly cursor fix, honest idle copy. Ships without the Windows live test at the user's direction.",
-  "pub_date": "2026-10-27T05:09:38Z",
+  "version": "0.18.2",
+  "notes": "Settings error history: failed app opens now recorded, invisible-window opens now logged, per-error Copy in settings. Ships without the Windows live test at the user's direction.",
+  "pub_date": "2026-10-27T20:39:49Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2N1NU5DVEFTMFRwd1ZLV3I5WUplZkVPbEhVN1FVZTE4ekRhc3o1WkhVd3pZV0JOU0F4WFRsOW1yTEs4bVdVanBaUkFzbmEyczRScDVDN1NObXR3NlFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMDc2NjE4CWZpbGU6QXBwTWFrYV8wLjE4LjFfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguMQpOTVN2QmRkUGdFbHV2MXJHbHZpQVNLNzRIMkJTa3R6V3BBZXFrc2lNV3A3S2RVZW1DYjBvb3NRa1ZZUWxDYkE5QlJrVG02V05NQm9KUEhSMjFZZ01Edz09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.1/AppMaka_0.18.1_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1RzNnRKR1loY0xVdVlEYkpOamFCRHMyZnEvRm1MWWovVS95T1NISFNONk1xejdIZkxCUGRnTTBuVjNwTWFuK2EybjJycjdVbUFIanlEVEx4RmY5SlFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTMyNTg5CWZpbGU6QXBwTWFrYV8wLjE4LjJfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguMgozT1VrWTVRNFROTDEwZUhLZUxYZWRGamRwN1NaUWpMdUVBZlBOcXFuNEYwMEo2ZWlMeWlMQmlzeVpaWUdOMUZXM2pXazFBdEQ0dTBqYTNob2VUZnNCZz09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.2/AppMaka_0.18.2_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2RJTUZvZlVNSXNUMHUycUJhbThzYjNZVGc4RjlsQkJPS01jVjVlV3E1T05JbFUyM3E5ZGE5bnc4d1FxZnQ1RWhJQlhJbW1aMy9QRldZY2Q1U01hVmdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMDc3NzcwCWZpbGU6QXBwTWFrYV8wLjE4LjFfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjEKRFdWTG44YVNHR2hXRmsyeE9xMnJ3V2E1MFFFWTNBTHRSb1JBRTNHVnMvQmVneUNoVE5ONnJvUzdqWFFlelh3R0g5Skp2bGtMWWFIT1MvbVJSNExDQmc9PQo=",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.1/AppMaka_0.18.1_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1ZqdHUvR0JOVkhDTHdvY0tzY0lUSkpVT0lQd3V4V2toMDY4YW9rdzFHdnNHTXB2WGoxajZYMFdqWG9UTmgrRkRhNkorb2VJZy85V1VaMm05bHZHMUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTMzNTY4CWZpbGU6QXBwTWFrYV8wLjE4LjJfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjIKbVlKNFFZVW9nMytmR3dGVWZLK1dTVkRpdDZTb1VndnZ1Y0kwdVhGUXNoeGg3RFU1czZmMEkrNDdzSUxjNkQweVpkell0clp5RnVRSXVIblBZdjE3REE9PQo=",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.2/AppMaka_0.18.2_amd64.AppImage"
     }
   }
 }
