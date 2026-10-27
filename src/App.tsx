@@ -24,6 +24,7 @@ import {
 } from "./downloads";
 import { RoutinesSection } from "./RoutinesSection";
 import { ClipboardSection } from "./ClipboardSection";
+import { UserScriptsSection } from "./UserScriptsSection";
 import WorkspacesSection from "./WorkspacesSection";
 import { filterAppsByWorkspace } from "./WorkspacesSection";
 import type { WorkspaceList } from "./WorkspacesSection";
@@ -48,7 +49,10 @@ import {
   WorkspaceTileIcon,
   browseAll,
   buildResults,
+  collectSearchEntries,
   matchLauncherCommand,
+  primeSearchEntries,
+  searchCacheAppDescriptors,
   recordLaunch,
   searchTag,
   resolveWorkspaceTargets,
@@ -56,6 +60,11 @@ import {
   useTileMenu,
 } from "./Launcher";
 import type { LauncherCommandRowsHandle, SearchResult } from "./Launcher";
+import {
+  buildSearchCachePayload,
+  parseSearchCachePayload,
+  type SearchCachePayload,
+} from "./quickswitch";
 import type {
   Account,
   AddAppOutcome,
@@ -70,6 +79,7 @@ import type {
   Routine,
   SessionRestoreOffer,
   SleepInfo,
+  TabbedWindowInfo,
   WebApp,
 } from "./types";
 
@@ -457,6 +467,7 @@ function AccountRow({
   unread,
   ramKb,
   sleeping,
+  suspended,
   onOpen,
   onManage,
   onRename,
@@ -469,6 +480,8 @@ function AccountRow({
   ramKb?: number;
   /** v0.15.0: closed by automatic reclaim; shows the Sleeping chip. */
   sleeping?: boolean;
+  /** v0.16.4: open but frozen (Windows-only); shows the Suspended chip. */
+  suspended?: boolean;
   onOpen: () => void;
   /** v0.15.0: open the per-account settings panel. */
   onManage: () => void;
@@ -494,7 +507,17 @@ function AccountRow({
               {unread > 99 ? "99+" : unread}
             </span>
           )}
-          {sleeping ? (
+          {/* A window is either open (possibly Suspended) or closed
+              (Sleeping), never both; the else-if keeps exactly one chip
+              even if the two state polls ever disagreed. */}
+          {suspended ? (
+            <span
+              className="account-sleep-chip"
+              title="Open but frozen to save memory — it wakes when you focus it, without reloading"
+            >
+              Suspended
+            </span>
+          ) : sleeping ? (
             <span
               className="account-sleep-chip"
               title="Closed automatically to save memory — reopening restores it"
@@ -1321,7 +1344,7 @@ function AppSettingsForm({
           value={suspendMinutes}
           onChange={(e) => setSuspendMinutes(e.target.value)}
         />
-        <span className="help">Idle account windows are suspended to save RAM. 0 = never suspend.</span>
+        <span className="help">Idle account windows are suspended to save RAM. On Windows, only minimized or hidden windows truly suspend; a visible window only gets a low-memory hint. The idle watcher covers account windows only, not tabbed windows or popups. 0 = never suspend.</span>
       </label>
       <label>
         <span>Close idle window after (minutes)</span>
@@ -1628,6 +1651,13 @@ function LauncherExtras({
     );
   }
 
+  function handleAutoUpdateDownload(enabled: boolean) {
+    void mutate(
+      () => invoke<LauncherSettings>("set_auto_update_download", { enabled }),
+      "Could not change update downloads"
+    );
+  }
+
   async function handleUnhide(programId: string) {
     setUnhiding(programId);
     try {
@@ -1707,7 +1737,19 @@ function LauncherExtras({
         <span>Check for updates automatically</span>
       </label>
       <span className="help">
-        Checks quietly in the background. Never downloads or restarts without you.
+        Checks quietly in the background. Installing never starts without you.
+      </span>
+
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={settings.auto_update_download}
+          onChange={(e) => handleAutoUpdateDownload(e.target.checked)}
+        />
+        <span>Download updates in the background</span>
+      </label>
+      <span className="help">
+        Updates download quietly when found. Installing still waits for you.
       </span>
 
       {hidden.length > 0 && (
@@ -1826,9 +1868,21 @@ type UpdateStatus =
   | { kind: "none" }
   | { kind: "available"; version: string }
   | { kind: "downloading"; version: string; progress: number | null }
+  | { kind: "downloaded"; version: string }
   | { kind: "ready"; version: string }
   | { kind: "launched"; version: string }
   | { kind: "failed"; message: string };
+
+/** Dotted-numeric compare: is `current` at least `target`? */
+function versionAtLeast(current: string, target: string): boolean {
+  const a = current.split(".").map((p) => parseInt(p, 10) || 0);
+  const b = target.split(".").map((p) => parseInt(p, 10) || 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return true;
+}
 
 /**
  * "AppMaka vX.Y.Z", read from the running binary at runtime — never
@@ -1851,20 +1905,32 @@ function VersionLine() {
 /**
  * Self-update UI. Manual "Check for updates" → download with progress →
  * installer handoff (never force-restarted). A failed check says
- * "Couldn't reach the update server." — never a silent "no updates" and
- * never an error popup. Download/install failures stay visible as a
+ * "Couldn't check for updates right now." — never a silent "no updates"
+ * and never an error popup. Download/install failures stay visible as a
  * plain-language message — never a silent return to the button.
  *
  * v0.8.2: on Windows the install type is detected at runtime. MSI installs
- * (Program Files) download the matching MSI, verify its signature, and hand
- * it to the Windows installer; everything else keeps the NSIS
- * downloadAndInstall flow. On Windows the post-download copy is
- * "Installer launched — follow its steps." (the restart button is Linux-only).
+ * (Program Files) download the matching MSI and verify its signature;
+ * everything else uses the plugin's NSIS flow. On Windows the
+ * post-download copy is "Installer launched — follow its steps." (the
+ * restart button is Linux-only).
+ *
+ * Background downloads: when automatic checks and background downloads
+ * are both on, a found update downloads right away and waits in a
+ * "downloaded" state — installing still takes a click. Manual checks
+ * follow the same rule. The plugin can't keep downloaded bytes across a
+ * quit, so a completed download persists only its version
+ * (`pending_update_version`); on the next launch the panel re-checks and
+ * re-downloads that version to land back on "downloaded". A failed
+ * background download falls back to "available" with the manual button —
+ * the user is never left stuck. The one deliberate exception to the
+ * background rule is the MSI path in manual mode: it downloads, then
+ * offers the install button — the installer never launches as a side
+ * effect of a download click.
  *
  * The automatic check also lives here: once on mount when `autoCheck` is
- * on, then every 24h (skipped while the window is hidden). A found update
- * lands in the same "available" state as a manual check — nothing is
- * silently swallowed. Auto-check failures show nothing at all.
+ * on, then every 24h (skipped while the window is hidden). Auto-check
+ * failures show nothing at all.
  */
 function UpdaterSection({
   autoCheck,
@@ -1874,67 +1940,83 @@ function UpdaterSection({
   isWindows: boolean;
 }) {
   const [status, setStatus] = useState<UpdateStatus>({ kind: "idle" });
+  // Windows only: whether the running install is MSI (per-machine). Only
+  // the button label reads it — the download paths re-detect at click
+  // time, like they always have.
+  const [isMsi, setIsMsi] = useState(false);
   const pending = useRef<Update | null>(null);
   const downloadedBytes = useRef(0);
   const totalBytes = useRef<number | null>(null);
   const autoRan = useRef(false);
+  // The update settings, read once on mount (the toggles live in
+  // Launcher settings; changing them applies the next time this panel
+  // mounts).
+  const autoDownload = useRef(true);
+  const pendingRecord = useRef<string | null>(null);
+  const settingsReady = useRef<Promise<void> | null>(null);
+  // The version `pending.current` has actually downloaded this session.
+  // install() only works on the Update object that downloaded, so a
+  // re-check that offers the same version must not swap the object out.
+  const downloadedVersion = useRef<string | null>(null);
+  // A download (background or manual) owns the status while it runs; a
+  // check that lands mid-download must not start a second one over it.
+  const downloadInFlight = useRef(false);
 
-  async function adoptFoundUpdate() {
+  function loadUpdateSettings(): Promise<void> {
+    if (!settingsReady.current) {
+      settingsReady.current = (async () => {
+        try {
+          const s = await invoke<LauncherSettings>("get_launcher_settings");
+          autoDownload.current = s.auto_update_download;
+          pendingRecord.current = s.pending_update_version;
+        } catch {
+          /* built-in defaults stand */
+        }
+        if (isWindows) {
+          try {
+            setIsMsi((await invoke<string>("get_install_type")) === "msi");
+          } catch {
+            /* the NSIS label is the safe default */
+          }
+        }
+      })();
+    }
+    return settingsReady.current;
+  }
+
+  async function savePendingRecord(version: string) {
+    pendingRecord.current = version;
     try {
-      const update = await check({ timeout: 30_000 });
-      if (update) {
-        pending.current = update;
-        setStatus({ kind: "available", version: update.version });
-      }
+      await invoke("set_pending_update_version", { version });
     } catch {
-      /* auto-check failures stay silent */
+      /* the in-session flow still works; only the cross-quit note is lost */
     }
   }
 
-  useEffect(() => {
-    if (!autoCheck) return;
-    // Once per session: StrictMode double-mounts in dev, so guard with a ref.
-    if (!autoRan.current) {
-      autoRan.current = true;
-      void adoptFoundUpdate();
-    }
-    const id = window.setInterval(() => {
-      if (isAppHidden()) return;
-      void adoptFoundUpdate();
-    }, 24 * 60 * 60 * 1000);
-    return () => window.clearInterval(id);
-  }, [autoCheck]);
-
-  async function handleCheck() {
-    setStatus({ kind: "checking" });
-    pending.current = null;
+  async function clearPendingRecord() {
+    pendingRecord.current = null;
     try {
-      const update = await check({ timeout: 30_000 });
-      if (!update) {
-        setStatus({ kind: "uptodate" });
-      } else {
-        pending.current = update;
-        setStatus({ kind: "available", version: update.version });
-      }
+      await invoke("set_pending_update_version", { version: null });
     } catch {
-      setStatus({ kind: "none" });
+      /* a stale note only costs one re-check next launch */
     }
   }
 
-  async function handleDownload() {
-    const update = pending.current;
-    if (!update) return;
+  /**
+   * Download `update` without installing it and land on "downloaded".
+   * Shared by the background rule and the manual MSI path.
+   */
+  async function downloadOnly(update: Update) {
+    downloadInFlight.current = true;
     downloadedBytes.current = 0;
     totalBytes.current = null;
     setStatus({ kind: "downloading", version: update.version, progress: null });
     try {
-      // v0.8.2: MSI-installed copies must get the MSI, not the NSIS setup.exe
-      // that latest.json points at — otherwise the update never takes.
       const installType = await invoke<string>("get_install_type");
       if (installType === "msi" && isWindows) {
-        await handleMsiDownload(update);
+        await downloadMsi(update);
       } else {
-        await update.downloadAndInstall((event) => {
+        await update.download((event) => {
           if (event.event === "Started") {
             totalBytes.current = event.data.contentLength ?? null;
           } else if (event.event === "Progress") {
@@ -1949,20 +2031,201 @@ function UpdaterSection({
           }
         });
       }
+    } finally {
+      downloadInFlight.current = false;
+    }
+    await savePendingRecord(update.version);
+    downloadedVersion.current = update.version;
+    setStatus({ kind: "downloaded", version: update.version });
+  }
+
+  /**
+   * One check for every caller (mount, 24h interval, quit-restore,
+   * manual button). A found update follows the one rule: with automatic
+   * checks and background downloads both on, it downloads right away;
+   * otherwise it waits in "available" for the button.
+   */
+  async function runCheck(manual: boolean) {
+    await loadUpdateSettings();
+    if (manual) setStatus({ kind: "checking" });
+    try {
+      const update = await check({ timeout: 30_000 });
+      if (!update) {
+        if (manual) setStatus({ kind: "uptodate" });
+        // A check that succeeds and offers nothing retires the note:
+        // the recorded version was installed another way or pulled.
+        if (pendingRecord.current) void clearPendingRecord();
+        return;
+      }
+      if (downloadInFlight.current) return;
+      if (downloadedVersion.current === update.version && pending.current) {
+        // Already downloaded this session by the object in `pending` —
+        // keep that object (install() needs it) and just re-show the state.
+        setStatus({ kind: "downloaded", version: update.version });
+        return;
+      }
+      pending.current = update;
+      if (autoCheck && autoDownload.current) {
+        try {
+          await downloadOnly(update);
+        } catch {
+          // Never leave the user stuck: the manual button takes over.
+          setStatus({ kind: "available", version: update.version });
+        }
+      } else {
+        setStatus({ kind: "available", version: update.version });
+      }
+    } catch {
+      // Manual checks say so; automatic ones stay silent.
+      if (manual) setStatus({ kind: "none" });
+    }
+  }
+
+  useEffect(() => {
+    if (!autoCheck) return;
+    // Once per session: StrictMode double-mounts in dev, so guard with a ref.
+    if (!autoRan.current) {
+      autoRan.current = true;
+      void runCheck(false);
+    }
+    const id = window.setInterval(() => {
+      if (isAppHidden()) return;
+      void runCheck(false);
+    }, 24 * 60 * 60 * 1000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoCheck]);
+
+  // Quit-restore: a previous session downloaded an update but never
+  // installed it. Only the version note survived, so verify the note
+  // against the running version, then let a normal check re-download it.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      await loadUpdateSettings();
+      if (!alive) return;
+      const recorded = pendingRecord.current;
+      if (!recorded) return;
+      try {
+        const current = await getVersion();
+        if (!alive) return;
+        if (versionAtLeast(current, recorded)) {
+          await clearPendingRecord();
+          return;
+        }
+      } catch {
+        return; // can't compare — leave the note for the next check
+      }
+      // Take the session's initial-check slot so the auto-check effect
+      // doesn't stack a second check on top of this one (it only matters
+      // when autoCheck is off — otherwise that effect already ran it).
+      if (!autoRan.current) {
+        autoRan.current = true;
+        await runCheck(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleDownload() {
+    const update = pending.current;
+    if (!update || downloadInFlight.current) return;
+    downloadInFlight.current = true;
+    downloadedBytes.current = 0;
+    totalBytes.current = null;
+    setStatus({ kind: "downloading", version: update.version, progress: null });
+    try {
+      // v0.8.2: MSI-installed copies must get the MSI, not the NSIS setup.exe
+      // that latest.json points at — otherwise the update never takes.
+      const installType = await invoke<string>("get_install_type");
+      if (installType === "msi" && isWindows) {
+        // Two steps on purpose: download and verify now, launch from the
+        // install button — never as a side effect of this click.
+        await downloadMsi(update);
+        await savePendingRecord(update.version);
+        downloadedVersion.current = update.version;
+        setStatus({ kind: "downloaded", version: update.version });
+        return;
+      }
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          totalBytes.current = event.data.contentLength ?? null;
+        } else if (event.event === "Progress") {
+          downloadedBytes.current += event.data.chunkLength;
+          const total = totalBytes.current;
+          const progress = total
+            ? Math.min(99, Math.round((downloadedBytes.current / total) * 100))
+            : null;
+          setStatus((prev) =>
+            prev.kind === "downloading" ? { ...prev, progress } : prev
+          );
+        }
+      });
       setStatus({ kind: "ready", version: update.version });
     } catch (e) {
       // Plain-language, and it stays visible — never a silent return to the
       // "Download & install" button.
       setStatus({ kind: "failed", message: plainUpdateError(e) });
+    } finally {
+      downloadInFlight.current = false;
+    }
+  }
+
+  async function handleInstallDownloaded() {
+    if (status.kind !== "downloaded") return;
+    const version = status.version;
+    const update = pending.current;
+    // Installing retires the note even though the app is about to exit:
+    // if the install is cancelled in the wizard, the next launch simply
+    // offers the update again.
+    downloadedVersion.current = null;
+    await clearPendingRecord();
+    try {
+      const installType = await invoke<string>("get_install_type");
+      if (installType === "msi" && isWindows) {
+        // The backend exits the app after launching the installer, so the
+        // invoke may never resolve — the launched event is the backup
+        // signal, same as the old fused flow had.
+        const unlistenLaunched = await listen("msi-update-launched", () => {
+          setStatus({ kind: "launched", version });
+        });
+        try {
+          await invoke("launch_msi_update");
+          setStatus({ kind: "launched", version });
+        } finally {
+          unlistenLaunched();
+        }
+        return;
+      }
+      if (!update) {
+        setStatus({
+          kind: "failed",
+          message: "The downloaded update was lost — check for updates again.",
+        });
+        return;
+      }
+      await update.install();
+      if (isWindows) {
+        setStatus({ kind: "launched", version });
+      } else {
+        // Linux: install() swaps the files; relaunch runs the new build.
+        await relaunch();
+      }
+    } catch (e) {
+      setStatus({ kind: "failed", message: plainUpdateError(e) });
     }
   }
 
   /**
-   * v0.8.2 MSI path: download the matching MSI (derived from the NSIS URL in
-   * latest.json), verify its signature, and hand it to the Windows installer.
-   * The backend emits progress events and exits into the installer wizard.
+   * v0.8.2 MSI path, download half: download the matching MSI (derived
+   * from the NSIS URL in latest.json) and verify its signature. The
+   * verified file waits in app-data; `launch_msi_update` is the separate
+   * install step. Emits progress events while downloading.
    */
-  async function handleMsiDownload(update: Update) {
+  async function downloadMsi(update: Update) {
     const platforms = (update.rawJson as { platforms?: Record<string, { url?: string }> })
       .platforms;
     const nsisUrl = platforms?.["windows-x86_64"]?.url;
@@ -1978,28 +2241,18 @@ function UpdaterSection({
         const progress = total
           ? Math.min(99, Math.round((event.payload.downloaded / total) * 100))
           : null;
-        // Not "launched" yet: at 100% of the .msi bytes the backend
-        // still has to download the signature file and verify it
-        // before anything launches — claiming "launched" here put a
-        // success message in front of a possible verification
-        // failure. The status flips on the msi-update-launched event
-        // or when install_msi_update resolves, never on bytes alone.
         setStatus((prev) =>
           prev.kind === "downloading" ? { ...prev, progress } : prev
         );
       }
     );
-    const unlistenLaunched = await listen("msi-update-launched", () => {
-      setStatus({ kind: "launched", version: update.version });
-    });
     try {
-      // The backend exits the app after launching the installer, so this
-      // only returns when something went wrong (thrown as a plain message).
-      await invoke("install_msi_update", { nsisUrl, version: update.version });
-      setStatus({ kind: "launched", version: update.version });
+      await invoke<string>("download_msi_update", {
+        nsisUrl,
+        version: update.version,
+      });
     } finally {
       unlistenProgress();
-      unlistenLaunched();
     }
   }
 
@@ -2031,7 +2284,7 @@ function UpdaterSection({
   return (
     <div className="updater">
       <div className="updater-row">
-        <button onClick={() => void handleCheck()} disabled={busy}>
+        <button onClick={() => void runCheck(true)} disabled={busy}>
           {status.kind === "checking" ? "Checking…" : "Check for updates"}
         </button>
         <span className="muted small" role="status">
@@ -2045,6 +2298,8 @@ function UpdaterSection({
             (status.progress === null
               ? `Downloading ${status.version}…`
               : `Downloading ${status.version}… ${status.progress}%`)}
+          {status.kind === "downloaded" &&
+            `Version ${status.version} is downloaded.`}
           {status.kind === "ready" &&
             (isWindows
               ? "Installer launched — follow its steps."
@@ -2056,7 +2311,9 @@ function UpdaterSection({
       {status.kind === "available" && (
         <div>
           <button onClick={() => void handleDownload()}>
-            Download &amp; install {status.version}
+            {isMsi
+              ? `Download ${status.version}`
+              : `Download & install ${status.version}`}
           </button>
         </div>
       )}
@@ -2075,6 +2332,13 @@ function UpdaterSection({
           />
         </div>
       )}
+      {status.kind === "downloaded" && (
+        <div>
+          <button onClick={() => void handleInstallDownloaded()}>
+            Restart &amp; install {status.version}
+          </button>
+        </div>
+      )}
       {status.kind === "ready" && !isWindows && (
         <div>
           <button onClick={() => void handleRestart()}>
@@ -2083,7 +2347,8 @@ function UpdaterSection({
         </div>
       )}
       <p className="muted small">
-        Updates never download or restart on their own — you stay in charge.
+        When background downloads are on, a found update downloads on its
+        own. Installing and restarting always wait for your click.
       </p>
     </div>
   );
@@ -2357,12 +2622,17 @@ function AppShell() {
   // v0.15.0: sleeping accounts (idle auto-close / LRU cap) keyed the same
   // way, with their last attributed RAM for the "Memory saved" total.
   const [sleeping, setSleeping] = useState<Map<string, number>>(new Map());
+  // v0.16.4: open-but-frozen windows (Windows-only), keyed the same way.
+  // Disjoint from `sleeping` by construction: an account's window is
+  // either open (possibly suspended) or closed by reclaim (sleeping) —
+  // never both at once.
+  const [suspendedKeys, setSuspendedKeys] = useState<Set<string>>(new Set());
   const refreshWindowPins = useCallback(async () => {
     try {
       const ramTimeout = new Promise<AccountMemory[]>((resolve) =>
         setTimeout(() => resolve([]), 5000)
       );
-      const [wins, ram, sleep] = await Promise.all([
+      const [wins, ram, sleep, tabbed] = await Promise.all([
         invoke<OpenAccountWindow[]>("list_open_account_windows"),
         Promise.race([
           invoke<AccountMemory[]>("account_memory").catch(
@@ -2371,6 +2641,9 @@ function AppShell() {
           ramTimeout,
         ]),
         invoke<SleepInfo[]>("sleep_state").catch((): SleepInfo[] => []),
+        invoke<TabbedWindowInfo[]>("list_tabbed_windows").catch(
+          (): TabbedWindowInfo[] => []
+        ),
       ]);
       setOpenLabels(new Set(wins.map((w) => w.label)));
       setPinnedLabels(
@@ -2382,7 +2655,24 @@ function AppShell() {
           unread.set(`${w.appId}:${w.accountId}`, w.unread);
         }
       }
+      // Tabbed tabs fill in counts no standalone window reported; a
+      // standalone window's count for the same account wins.
+      for (const g of tabbed) {
+        for (const t of g.tabs) {
+          const key = `${t.appId}:${t.accountId}`;
+          if (t.unread != null && !unread.has(key)) {
+            unread.set(key, t.unread);
+          }
+        }
+      }
       setUnreadCounts(unread);
+      setSuspendedKeys(
+        new Set(
+          wins
+            .filter((w) => w.suspended)
+            .map((w) => `${w.appId}:${w.accountId}`)
+        )
+      );
       const ramMap = new Map<string, number>();
       for (const m of ram) {
         if (m.rssKb > 0) {
@@ -2522,6 +2812,26 @@ function AppShell() {
   const [adding, setAdding] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  // v0.18.0: the persisted search-index snapshot (quickswitch.ts),
+  // shared by the cache-load effect and load() below — whichever
+  // lands second primes the fuzzy entries, so both race orders end
+  // warm. Refs, because the priming targets are state-owned objects.
+  const searchCacheRef = useRef<SearchCachePayload | null>(null);
+  const liveLoadedRef = useRef(false);
+  const lastCacheFingerprintRef = useRef<string | null>(null);
+  const appsRef = useRef<WebApp[]>([]);
+  useEffect(() => {
+    appsRef.current = apps;
+  }, [apps]);
+  const programsRef = useRef<NativeProgram[]>([]);
+  useEffect(() => {
+    programsRef.current = programs;
+  }, [programs]);
+  const routinesRef = useRef<Routine[]>([]);
+  useEffect(() => {
+    routinesRef.current = routines;
+  }, [routines]);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -2534,11 +2844,30 @@ function AppShell() {
           invoke<LauncherSettings>("get_launcher_settings"),
           invoke<Routine[]>("list_routines"),
         ]);
-      setApps(list.map((a) => ({ ...a, accounts: a.accounts ?? [], settings: a.settings ?? DEFAULT_SETTINGS })));
+      const normalizedApps = list.map((a) => ({ ...a, accounts: a.accounts ?? [], settings: a.settings ?? DEFAULT_SETTINGS }));
+      setApps(normalizedApps);
       setPlatform(info);
-      setPrograms(progList);
+      // v0.18.0: an empty live list means the backend scan hasn't
+      // landed yet — keep the cache seed until it does (the refetch
+      // below and the programs-scanned listener replace it later).
+      const effectivePrograms =
+        progList.length > 0 || !searchCacheRef.current
+          ? progList
+          : searchCacheRef.current.programs;
+      setPrograms(effectivePrograms);
       setLauncherSettings(launchSettings);
       setRoutines(routineList);
+      // v0.18.0: the cache beat live data here — warm the fuzzy-entry
+      // cache from it (entries re-verified per item before use).
+      if (searchCacheRef.current) {
+        primeSearchEntries(
+          searchCacheRef.current.entries,
+          normalizedApps,
+          effectivePrograms,
+          routineList
+        );
+      }
+      liveLoadedRef.current = true;
       // Backfill logos for apps added before icon caching existed (or where
       // the fetch failed last time). Best-effort, in the background.
       for (const a of list) {
@@ -2551,9 +2880,60 @@ function AppShell() {
     }
   }, []);
 
+  // v0.18.0: seed search from the persisted index before live data
+  // lands. The backend's startup program scan can take seconds; the
+  // cache makes the previous session's program list — and its
+  // prebuilt fuzzy entries — searchable immediately. An unusable
+  // cache parses to null and this is exactly the pre-cache cold
+  // start; no error is ever shown for it.
+  useEffect(() => {
+    invoke<string | null>("load_search_index")
+      .then((raw) => {
+        if (!raw) return;
+        const cache = parseSearchCachePayload(raw);
+        if (!cache) return;
+        searchCacheRef.current = cache;
+        lastCacheFingerprintRef.current = cache.fingerprint;
+        // Only fill a still-empty list: live data that already
+        // landed is fresher and wins.
+        setPrograms((prev) => (prev.length > 0 ? prev : cache.programs));
+        primeSearchEntries(
+          cache.entries,
+          appsRef.current,
+          programsRef.current.length > 0 ? programsRef.current : cache.programs,
+          routinesRef.current
+        );
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  // v0.18.0: stale-while-revalidate's write half — refresh the cache
+  // whenever the live lists change (first load, rescans, library
+  // edits). The fingerprint gate keeps routine state churn (icon
+  // backfills, usage bumps) from rewriting megabytes of identical
+  // JSON, and an empty program list never overwrites a good snapshot
+  // (it means the backend scan hasn't landed yet).
+  useEffect(() => {
+    if (!liveLoadedRef.current) return;
+    if (programs.length === 0) return;
+    const payload = buildSearchCachePayload(
+      searchCacheAppDescriptors(apps),
+      programs,
+      routines.map((r) => ({ id: r.id, name: r.name })),
+      collectSearchEntries(apps, programs, routines),
+      Date.now()
+    );
+    if (payload.fingerprint === lastCacheFingerprintRef.current) return;
+    lastCacheFingerprintRef.current = payload.fingerprint;
+    invoke("save_search_index", { contents: JSON.stringify(payload) }).catch(
+      () => {}
+    );
+  }, [apps, programs, routines]);
 
   // The program scan runs in the background at startup; pick up its results
   // a few seconds later so search finds everything.
@@ -3253,6 +3633,14 @@ function AppShell() {
   }
 
   function onSearchKeyDown(e: React.KeyboardEvent) {
+    // v0.17.0: Alt+1..9 opens that result directly — the number hints
+    // on the tiles name the same chord (e.code: layout-proof digits).
+    if (e.altKey && /^Digit[1-9]$/.test(e.code)) {
+      e.preventDefault();
+      const r = items[Number(e.code.slice(5)) - 1];
+      if (r) void activateResult(r);
+      return;
+    }
     const last = items.length - 1;
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -3519,6 +3907,7 @@ function AppShell() {
             ) : (
               <IconGrid
                 items={items}
+                numberHints={query.trim() !== ""}
                 activeIndex={activeIndex}
                 onHover={setActiveIndex}
                 onActivate={(r) => void activateResult(r)}
@@ -3538,6 +3927,12 @@ function AppShell() {
                   (launcherSettings?.show_sleep_labels ?? true) &&
                   r.kind === "account"
                     ? sleeping.has(`${r.app.id}:${r.account.id}`)
+                    : false
+                }
+                suspendedFor={(r) =>
+                  (launcherSettings?.show_sleep_labels ?? true) &&
+                  r.kind === "account"
+                    ? suspendedKeys.has(`${r.app.id}:${r.account.id}`)
                     : false
                 }
                 onTileContextMenu={(r, x, y) => openTileMenu(r, x, y)}
@@ -3761,6 +4156,10 @@ function AppShell() {
                                 (launcherSettings?.show_sleep_labels ?? true) &&
                                 sleeping.has(`${app.id}:${account.id}`)
                               }
+                              suspended={
+                                (launcherSettings?.show_sleep_labels ?? true) &&
+                                suspendedKeys.has(`${app.id}:${account.id}`)
+                              }
                               onOpen={() => void handleOpenAccount(app, account)}
                               onManage={() => setPanelAccount({ app, account })}
                               onRename={(label) => void handleRenameAccount(app, account, label)}
@@ -3918,6 +4317,18 @@ function AppShell() {
           Keep a searchable history of everything you copy, on this PC only.
         </p>
         <ClipboardSection />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>User scripts</h2>
+        </div>
+        <p className="muted small">
+          Your own small scripts, run on the pages you choose — a
+          Tampermonkey-style header says which sites each one touches.
+          Scripts using risky constructs are listed but never run.
+        </p>
+        <UserScriptsSection />
       </section>
 
       <section className="panel">
