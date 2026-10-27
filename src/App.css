@@ -167,6 +167,9 @@ button:disabled {
   color: #8f1d1d;
 }
 
+/* Inline error inside a help line (dock hotkey registration failures). */
+.error-text { color: #c92a2a; }
+
 .form-actions {
   margin-top: 4px;
 }
@@ -666,10 +669,19 @@ input[type="color"] {
 
 @media (prefers-reduced-motion: reduce) {
   .folder-panel,
-  .icon-tile {
+  .palette,
+  .icon-tile,
+  .tile-badge,
+  .account-unread-badge,
+  .settings-form,
+  .card-body {
     animation: none;
   }
-  .icon-tile {
+  .icon-tile,
+  button,
+  .app-card,
+  .account-row,
+  .palette-row {
     transition: none;
   }
 }
@@ -836,6 +848,7 @@ input[type="color"] {
 }
 
 .palette {
+  animation: panel-in 140ms ease-out;
   width: min(520px, 90vw);
   max-height: 60vh;
   display: flex;
@@ -891,6 +904,20 @@ input[type="color"] {
 .palette-row.is-active {
   background: rgba(var(--accent-mid-rgb), 0.38);
 }
+
+/* v0.17.0: the Alt+<number> quick-open chord on palette rows, shown
+   while a query is typed (mirrors the tile number in the grid). */
+.palette-key {
+  flex: none;
+  margin-left: auto;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.palette-sub + .palette-key { margin-left: 8px; }
 
 .palette-icon {
   display: flex;
@@ -1132,6 +1159,53 @@ input[type="color"] {
   flex-direction: column;
   gap: 14px;
   margin-top: 12px;
+}
+
+/* Settings error history: plain list, no new colors. */
+.launcher-settings .error-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.launcher-settings .error-history h3 {
+  margin: 8px 0 0;
+  font-size: 15px;
+}
+
+.launcher-settings .error-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.launcher-settings .error-history-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #d4d7dc;
+}
+
+.launcher-settings .error-history-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.launcher-settings .error-history-technical {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #d4d7dc;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: #5b5e66;
 }
 
 /* Edit-app dialog: fixed overlay + centered card, quiet like the rest. */
@@ -1806,4 +1880,113 @@ input[type="color"] {
 .accent-swatch.is-active {
   border-color: #fff;
   box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* --- v0.16.5 polish: micro-transitions and quiet depth -------------
+   Small feel pass, no layout changes: state changes ease instead of
+   snapping, cards get a whisper of depth, keyboard focus becomes
+   visible everywhere (buttons had no focus style at all), and text
+   selection follows the saved accent. Transform/opacity/color only —
+   nothing here can jank over the launcher's backdrop blur. */
+
+button,
+.palette-row {
+  transition: background-color 120ms ease, border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.add-form input,
+.inline-form input,
+.settings-form input,
+.settings-form select,
+.settings-form textarea,
+.quick-add-form input,
+.search-input {
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.add-form input:focus,
+.inline-form input:focus,
+.settings-form input:focus,
+.settings-form select:focus,
+.settings-form textarea:focus,
+.quick-add-form input:focus,
+.search-input:focus {
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.15);
+}
+
+button:focus-visible,
+.palette-row:focus-visible,
+.icon-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: rgba(var(--accent-rgb), 0.28);
+}
+
+.panel {
+  box-shadow: 0 1px 3px rgba(15, 17, 21, 0.05);
+}
+
+.app-card,
+.account-row {
+  transition: border-color 140ms ease, box-shadow 140ms ease,
+    background-color 140ms ease;
+}
+
+.app-card:hover {
+  border-color: #d6d9de;
+  box-shadow: 0 3px 12px rgba(15, 17, 21, 0.07);
+}
+
+.account-row:hover {
+  border-color: #dde0e4;
+}
+
+:root[data-theme="dark"] .panel {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-theme="dark"] .app-card:hover {
+  border-color: #45484f;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.4);
+}
+
+:root[data-theme="dark"] .account-row:hover {
+  border-color: #45484f;
+}
+
+/* Unread badges pop in softly instead of blinking into existence. */
+.tile-badge,
+.account-unread-badge {
+  animation: badge-in 160ms ease-out;
+}
+
+@keyframes badge-in {
+  from {
+    transform: scale(0.55);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Expanding a card or opening a settings form fades in, matching the
+   launcher panel's entrance language. Opacity only. */
+.settings-form,
+.card-body {
+  animation: fade-in 140ms ease-out;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
