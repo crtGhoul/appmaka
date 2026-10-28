@@ -653,17 +653,30 @@ pub fn open_account_placed(
                 // tolerate staleness, but the session must not resurrect a
                 // window the user closed — and persist the session. Private
                 // windows get their ephemeral dir deleted here too.
-                if let Some(winstate) = track_app.try_state::<WindowState>() {
-                    if let Ok(mut tracked) = winstate.inner.lock() {
-                        if let Some(t) = tracked.remove(&track_label) {
-                            if let Some(dir) = t.private_dir {
-                                delete_private_session_dir(&dir);
-                            }
-                            // v0.15.0: X-button close — same attribution
-                            // cleanup as the command path (idempotent).
-                            crate::procattr::prune(&track_app, &t.app_id, &t.account_id);
+                //
+                // v0.18.3: take the entry under the lock, then DROP the
+                // guard before calling prune. prune() queries
+                // has_account_window(), which locks this same
+                // WindowState mutex — calling it under the guard
+                // self-deadlocks the thread (std Mutex is not reentrant)
+                // and froze the whole app on every account-window close.
+                let removed =
+                    if let Some(winstate) = track_app.try_state::<WindowState>() {
+                        if let Ok(mut tracked) = winstate.inner.lock() {
+                            tracked.remove(&track_label)
+                        } else {
+                            None
                         }
+                    } else {
+                        None
+                    };
+                if let Some(t) = removed {
+                    if let Some(dir) = t.private_dir {
+                        delete_private_session_dir(&dir);
                     }
+                    // v0.15.0: X-button close — same attribution
+                    // cleanup as the command path (idempotent).
+                    crate::procattr::prune(&track_app, &t.app_id, &t.account_id);
                 }
                 crate::session::write_session(&track_app);
                 // v0.9.6: the caption strip dies with its window (no-op
@@ -2464,25 +2477,35 @@ pub(crate) fn close_tracked_window(app: &AppHandle, label: &str, intent: CloseIn
     if let Some(window) = app.get_webview_window(label) {
         let _ = window.close();
     }
-    if let Some(winstate) = app.try_state::<WindowState>() {
+    // v0.18.3: take the entry under the lock, then DROP the guard
+    // before pruning. prune() queries has_account_window(), which
+    // locks this same WindowState mutex — calling it under the guard
+    // self-deadlocks the thread (std Mutex is not reentrant) and
+    // froze the whole app on every account-window close.
+    let removed = if let Some(winstate) = app.try_state::<WindowState>() {
         if let Ok(mut tracked) = winstate.inner.lock() {
-            // Take the entry so a private window's ephemeral dir can be
-            // deleted below; normal windows have nothing to clean.
-            if let Some(t) = tracked.remove(label) {
-                if let Some(dir) = t.private_dir {
-                    delete_private_session_dir(&dir);
-                }
-                // v0.15.0: an automatic reclaim banks the last attributed
-                // RAM as saved (attribution is still present here — prune
-                // runs after). User closes never count.
-                if automatic && label.starts_with("acct-") {
-                    crate::sleep::record_sleep(app, &t.app_id, &t.account_id);
-                }
-                // v0.15.0: drop per-account process attribution once the
-                // account's last window is gone.
-                crate::procattr::prune(app, &t.app_id, &t.account_id);
-            }
+            tracked.remove(label)
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    // Take the entry so a private window's ephemeral dir can be
+    // deleted below; normal windows have nothing to clean.
+    if let Some(t) = removed {
+        if let Some(dir) = t.private_dir {
+            delete_private_session_dir(&dir);
+        }
+        // v0.15.0: an automatic reclaim banks the last attributed
+        // RAM as saved (attribution is still present here — prune
+        // runs after). User closes never count.
+        if automatic && label.starts_with("acct-") {
+            crate::sleep::record_sleep(app, &t.app_id, &t.account_id);
+        }
+        // v0.15.0: drop per-account process attribution once the
+        // account's last window is gone.
+        crate::procattr::prune(app, &t.app_id, &t.account_id);
     }
     // The open set changed: persist the session. (The window's own
     // Destroyed handler will fire later and rewrite it again — harmless.)
