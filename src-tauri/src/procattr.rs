@@ -112,10 +112,7 @@ pub fn capture_new_processes(
             }
             // The window may have closed while we polled; don't attribute
             // processes to an account with nothing open.
-            let still_open = app
-                .try_state::<crate::windows::WindowState>()
-                .map(|ws| ws.has_account_window(&app_id, &account_id))
-                .unwrap_or(false);
+            let still_open = account_still_open(&app, &app_id, &account_id);
             if !still_open {
                 return;
             }
@@ -136,14 +133,34 @@ pub fn capture_new_processes(
         });
 }
 
-/// Drop an account's attribution once none of its windows remain tracked.
-/// Idempotent — safe to call from both the close command and the
-/// window-destroyed handler.
-pub fn prune(app: &tauri::AppHandle, app_id: &str, account_id: &str) {
-    let still_open = app
+/// Whether the account still has a live window: a standalone window in
+/// WindowState, or the active tab of a tabbed group in TabState. The
+/// tabbed half matters — tabbed accounts never enter WindowState, so a
+/// standalone-only check would silently drop their attribution.
+fn account_still_open(app: &tauri::AppHandle, app_id: &str, account_id: &str) -> bool {
+    let standalone = app
         .try_state::<crate::windows::WindowState>()
         .map(|ws| ws.has_account_window(app_id, account_id))
         .unwrap_or(false);
+    if standalone {
+        return true;
+    }
+    app.try_state::<crate::tabs::TabState>()
+        .and_then(|ts| crate::tabs::active_tab_window_label(&ts, app_id, account_id))
+        .is_some()
+}
+
+/// Drop an account's attribution once none of its windows remain tracked.
+/// Idempotent — safe to call from both the close command and the
+/// window-destroyed handler.
+///
+/// v0.18.3 contract: NEVER call this while holding the WindowState
+/// mutex. It queries has_account_window(), which locks that same mutex;
+/// a caller holding the guard self-deadlocks (std Mutex is not
+/// reentrant) — that was the account-window close freeze. Callers must
+/// remove the entry, drop the guard, and only then prune.
+pub fn prune(app: &tauri::AppHandle, app_id: &str, account_id: &str) {
+    let still_open = account_still_open(app, app_id, account_id);
     if still_open {
         return;
     }
