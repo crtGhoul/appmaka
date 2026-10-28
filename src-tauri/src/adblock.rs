@@ -6,13 +6,18 @@
 //! single request errors, the request is allowed through. Blocking ads is a
 //! feature; breaking pages is a bug.
 //!
-//! Two layers:
+//! Three layers:
 //! - Network blocking (Windows only): a `WebResourceRequested` hook on each
 //!   WebView2 answers 403 to requests the engine flags. See
 //!   `attach_network_blocking`.
 //! - Cosmetic filtering (all platforms): engine-generated `display:none`
 //!   selectors injected as an initialization script, so ad placeholders that
 //!   arrive inline with first-party content are hidden.
+//! - Scriptlets (all platforms, v0.18.4): the `+js(...)` rules from the
+//!   uBlock lists, executed by AppMaka-owned implementations (see
+//!   `adblock/scriptlets.rs`) injected as an initialization script. This
+//!   is the layer that reaches video ads served from the same domains as
+//!   the videos themselves, which network rules cannot separate.
 
 use adblock::engine::Engine;
 use adblock::lists::{FilterSet, ParseOptions};
@@ -24,8 +29,28 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
+// The DoH layer is consulted only by the Windows request hook, so
+// it compiles there and under `test` (its suite runs on every
+// platform); a Linux release build doesn't carry it at all.
+#[cfg(any(windows, test))]
+mod doh;
+/// AppMaka-owned scriptlet implementations (v0.18.4). Unconditional:
+/// scriptlet injection runs on every platform, unlike network blocking.
+mod scriptlets;
+
 const EASYLIST_URL: &str = "https://easylist.to/easylist/easylist.txt";
 const EASYPRIVACY_URL: &str = "https://easylist.to/easylist/easyprivacy.txt";
+/// uBlock filters (v0.18.4): the lists carrying the `+js(...)` scriptlet
+/// rules, including the YouTube/YouTube Music video-ad rules. Fetched at
+/// runtime like EasyList; the trusted bit is granted only to these lists.
+const UBLOCK_FILTERS_URL: &str =
+    "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt";
+const UBLOCK_PRIVACY_URL: &str =
+    "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy.txt";
+const UBLOCK_UNBREAK_URL: &str =
+    "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/unbreak.txt";
+const UBLOCK_QUICK_FIXES_URL: &str =
+    "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/quick-fixes.txt";
 /// Reuse cached lists younger than this; otherwise re-download.
 const LIST_MAX_AGE: Duration = Duration::from_secs(48 * 3600);
 /// How often the background thread re-checks the lists.
@@ -50,6 +75,11 @@ pub struct AdblockState {
     /// shows, instead of claiming "still downloading" forever.
     last_refresh_failed: Arc<RwLock<bool>>,
     cache_dir: PathBuf,
+    /// v0.18.0: DoH sinkhole evidence for hosts the list engine
+    /// doesn't know (see adblock/doh.rs). Consulted only by the
+    /// Windows request hook, so the field exists only there.
+    #[cfg(windows)]
+    doh: Arc<doh::DohSinkhole>,
 }
 
 impl AdblockState {
@@ -67,6 +97,8 @@ impl AdblockState {
             updated_at: Arc::new(RwLock::new(None)),
             last_refresh_failed: Arc::new(RwLock::new(false)),
             cache_dir,
+            #[cfg(windows)]
+            doh: Arc::new(doh::DohSinkhole::new(dir.join("doh-verdicts.json"), true)),
         })
     }
 
@@ -99,18 +131,28 @@ impl AdblockState {
     }
 
     fn refresh_once(&self) {
-        let mut lists: Vec<String> = Vec::new();
+        let mut lists: Vec<(String, ParseOptions)> = Vec::new();
         let mut newest = 0u64;
-        for (file, url) in [
-            ("easylist.txt", EASYLIST_URL),
-            ("easyprivacy.txt", EASYPRIVACY_URL),
+        // The uBlock lists are the only ones parsed with the trusted bit,
+        // so only they can invoke the `trusted-*` scriptlets.
+        let trusted_opts = ParseOptions {
+            permissions: scriptlets::TRUSTED,
+            ..Default::default()
+        };
+        for (file, url, opts) in [
+            ("easylist.txt", EASYLIST_URL, ParseOptions::default()),
+            ("easyprivacy.txt", EASYPRIVACY_URL, ParseOptions::default()),
+            ("ub-filters.txt", UBLOCK_FILTERS_URL, trusted_opts),
+            ("ub-privacy.txt", UBLOCK_PRIVACY_URL, trusted_opts),
+            ("ub-unbreak.txt", UBLOCK_UNBREAK_URL, trusted_opts),
+            ("ub-quick-fixes.txt", UBLOCK_QUICK_FIXES_URL, trusted_opts),
         ] {
             match self.load_or_fetch(file, url) {
                 Ok((text, fetched_at)) => {
                     // Skip empty downloads so a truncated fetch can't wipe
                     // out blocking for every other list.
                     if !text.trim().is_empty() {
-                        lists.push(text);
+                        lists.push((text, opts));
                         newest = newest.max(fetched_at);
                     }
                 }
@@ -132,10 +174,14 @@ impl AdblockState {
         // Compiling the full lists takes ~1-3s; that's why this runs off the
         // UI thread. A fresh Engine replaces the old one atomically.
         let mut set = FilterSet::new(false);
-        for text in lists {
-            set.add_filter_list(text, ParseOptions::default());
+        for (text, opts) in lists {
+            set.add_filter_list(text, opts);
         }
-        let engine = Arc::new(Engine::new_with_filter_set(set));
+        let mut engine = Engine::new_with_filter_set(set);
+        // Scriptlet code is supplied here, not fetched: the engine matches
+        // the `+js(...)` rules against these owned implementations.
+        engine.use_resources(scriptlets::resources());
+        let engine = Arc::new(engine);
         if let Ok(mut guard) = self.engine.write() {
             *guard = Some(engine);
         }
@@ -190,11 +236,37 @@ impl AdblockState {
             Ok(r) => r,
             Err(_) => return false,
         };
-        engine.check_network_request(&request).should_block()
+        if engine.check_network_request(&request).should_block() {
+            return true;
+        }
+        // Second layer (v0.18.0): DNS evidence for hosts the list
+        // engine doesn't know — the CNAME-cloaked trackers. Cached
+        // verdicts only; an unknown host is queued for the resolver
+        // thread and allowed this time, so the COM handler never
+        // waits on the network (see adblock/doh.rs).
+        let host = url::Url::parse(url)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .and_then(|u| u.host_str().map(str::to_owned));
+        match host {
+            Some(host) => doh::check_host(&self.doh, &host),
+            None => false,
+        }
     }
 
     /// Engine-generated `display:none` selectors for a page, as one CSS
     /// string. Empty when no engine is loaded (fail open => no hiding).
+    /// Engine-assembled scriptlet code for a page: the shared helper
+    /// definitions plus one guarded call per matching `+js(...)` rule.
+    /// Empty when no engine is loaded or no rule matches (fail open).
+    pub fn scriptlet_js_for(&self, page_url: &str) -> String {
+        let engine = match self.engine.read().ok().and_then(|g| g.clone()) {
+            Some(e) => e,
+            None => return String::new(),
+        };
+        engine.url_cosmetic_resources(page_url).injected_script
+    }
+
     pub fn cosmetic_css_for(&self, page_url: &str) -> String {
         let engine = match self.engine.read().ok().and_then(|g| g.clone()) {
             Some(e) => e,
