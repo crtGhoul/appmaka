@@ -514,6 +514,13 @@ pub fn open_account_placed(
     if !css.is_empty() {
         builder = builder.initialization_script(cosmetic_init_script(&css));
     }
+    // v0.18.4: scriptlets matched against the URL this window opens on.
+    // The engine output is already one guarded script (helpers plus one
+    // try/catch call per matching rule), so it injects as-is.
+    let scriptlets = adblock.scriptlet_js_for(&web_app.url);
+    if !scriptlets.is_empty() {
+        builder = builder.initialization_script(scriptlets);
+    }
     // v0.15.0: unread badges — track the live document.title per window.
     // The callback only touches the state mutex (no Win32 calls), so it
     // is safe on whatever thread Tauri invokes it from.
