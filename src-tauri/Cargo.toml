@@ -94,7 +94,7 @@ default = ["custom-protocol"]
 
 [package]
 authors = ["AppMaka"]
-version = "0.18.2"
+version = "0.18.3"
 edition = "2021"
 name = "appmaka"
 
