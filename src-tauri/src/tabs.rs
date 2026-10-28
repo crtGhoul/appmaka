@@ -423,6 +423,7 @@ struct TabPage {
     title: String,
     popup: Option<crate::windows::PopupContext>,
     adblock_css: String,
+    adblock_scriptlet: String,
 }
 
 fn resolve_tab_page(
@@ -468,6 +469,7 @@ fn resolve_tab_page(
                     chain_allowed: false,
                 }),
                 adblock_css: adblock.cosmetic_css_for(&web_app.url),
+                adblock_scriptlet: adblock.scriptlet_js_for(&web_app.url),
                 session_dir,
             })
         }
@@ -485,6 +487,7 @@ fn resolve_tab_page(
                 title: "Tabbed window".to_string(),
                 popup: None,
                 adblock_css: String::new(),
+                adblock_scriptlet: String::new(),
                 session_dir: dir,
             })
         }
@@ -560,6 +563,10 @@ fn build_tabbed_window(
         .initialization_script(crate::windows::shortcuts_overlay_js(&window_app));
     if !page.adblock_css.is_empty() {
         builder = builder.initialization_script(crate::windows::cosmetic_init_script(&page.adblock_css));
+    }
+    // v0.18.4: scriptlets, same source as account windows.
+    if !page.adblock_scriptlet.is_empty() {
+        builder = builder.initialization_script(page.adblock_scriptlet.clone());
     }
     // v0.12.0: custom page cursor in tabbed windows.
     let cursor_js = crate::windows::saved_cursor_js(&window_app);
