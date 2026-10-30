@@ -174,7 +174,7 @@ fn scan_scripts(dir: &Path, disabled: &HashSet<String>) -> Vec<(UserScriptSummar
             source,
         ));
     }
-    out.sort_by(|a, b| a.0.name.to_lowercase().cmp(&b.0.name.to_lowercase()));
+    out.sort_by_key(|a| a.0.name.to_lowercase());
     out
 }
 
