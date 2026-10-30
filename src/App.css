@@ -607,7 +607,8 @@ input[type="color"] {
   min-width: 0;
   padding: 10px 4px 8px;
   background: transparent;
-  border: none;
+  /* v0.18.5: crisp glass border on launcher tiles. */
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   cursor: pointer;
   color: #f2f3f5;
@@ -752,6 +753,90 @@ input[type="color"] {
   font-size: 11px;
   color: #5b5e66;
   white-space: nowrap;
+}
+
+/* v0.18.5: Now Playing pill — the one animated tile element, and the
+   animation IS the state (audio is playing right now). Subtle glow
+   pulse, quiet colors, no layout shift: it sits in the tile's flow. */
+.tile-now-playing {
+  font-size: 11px;
+  color: #d8d2f0;
+  background: rgba(var(--accent-mid-rgb), 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: now-playing-glow 2.4s ease-in-out infinite;
+}
+
+@keyframes now-playing-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 rgba(var(--accent-mid-rgb), 0);
+  }
+  50% {
+    box-shadow: 0 0 10px rgba(var(--accent-mid-rgb), 0.45);
+  }
+}
+
+/* v0.18.5: small state badges for open windows (Awake, Adblock on). */
+.tile-state-badge {
+  font-size: 11px;
+  color: #9aa0ab;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+/* v0.18.5: hover actions on open tiles — hidden until the tile is
+   hovered or focused, so quiet tiles stay quiet. */
+.tile-quick-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.icon-tile:hover .tile-quick-actions,
+.icon-tile:focus-within .tile-quick-actions {
+  opacity: 1;
+}
+
+.tile-quick-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: #c9ccd4;
+  cursor: pointer;
+}
+
+.tile-quick-action:hover,
+.tile-quick-action:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  outline: none;
+}
+
+.tile-quick-action svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+
+/* v0.18.5: Now Playing marker in the Ctrl+K palette rows. */
+.palette-now-playing {
+  font-size: 11px;
+  color: #d8d2f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .account-sleep-chip {
@@ -1657,7 +1742,8 @@ input[type="color"] {
 :root[data-theme="dark"] .account-row,
 :root[data-theme="dark"] .hidden-row {
   background: #232529;
-  border-color: #34373e;
+  /* v0.18.5: crisp glass border on library cards. */
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 :root[data-theme="dark"] .subtitle,
@@ -1734,6 +1820,7 @@ input[type="color"] {
 
 :root[data-theme="light"] .icon-tile {
   color: #1d1f24;
+  border-color: rgba(0, 0, 0, 0.08);
 }
 
 :root[data-theme="light"] .icon-tile:hover {
