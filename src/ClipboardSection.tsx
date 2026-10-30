@@ -75,9 +75,14 @@ export function ClipboardSection() {
 
   useEffect(() => {
     void refreshDict();
-    const un = listen("dictation-state", () => void refreshDict());
+    let off: (() => void) | undefined;
+    listen("dictation-state", () => void refreshDict())
+      .then((u) => {
+        off = u;
+      })
+      .catch(() => {});
     return () => {
-      void un.then((u) => u());
+      off?.();
     };
   }, [refreshDict]);
 

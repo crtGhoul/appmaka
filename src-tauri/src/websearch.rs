@@ -166,14 +166,12 @@ pub fn open_search_window_placed(
     let page_url = build_search_url(&search_engine(app), query)?;
 
     if let Some(window) = app.get_webview_window(SEARCH_WINDOW_LABEL) {
-        // Reuse: unminimize + show first (Windows can't focus a minimized
-        // window with set_focus alone), retitle, then navigate.
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
         if let Some(p) = placement {
             apply_placement(&window, p);
         }
+        // Reuse: unminimize + clamp to a visible monitor + show + focus,
+        // retitle, then navigate.
+        crate::windows::ensure_on_visible_monitor(app, &window);
         let js = format!(
             "window.location.href={};",
             serde_json::to_string(page_url.as_str()).unwrap_or_default()
@@ -462,6 +460,7 @@ fn build_search_window(
     let adblock_flag = Arc::new(AtomicBool::new(true));
     match builder.build() {
         Ok(window) => {
+            crate::windows::ensure_on_visible_monitor(app, &window);
             #[cfg(windows)]
             crate::adblock::attach_network_blocking(&window, adblock, adblock_flag, url.as_str().to_string());
             #[cfg(windows)]

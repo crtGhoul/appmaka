@@ -143,9 +143,12 @@ export function DownloadsProvider({
       ) {
         setLastCompleted({ id: entry.id, filename: entry.filename });
       }
-    }).then((fn) => {
-      unlisten = fn;
-    });
+      }).then(
+        (fn) => {
+          unlisten = fn;
+        },
+        () => {}
+      );
     return () => {
       unlisten?.();
     };

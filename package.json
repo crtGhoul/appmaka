@@ -19,10 +19,10 @@
   "private": true,
   "scripts": {
     "build": "tsc && vite build",
-    "dev": "vite",
+    "dev": "vite --host 0.0.0.0 --port 3000",
     "preview": "vite preview",
     "tauri": "tauri"
   },
   "type": "module",
-  "version": "0.18.5"
+  "version": "0.18.6"
 }

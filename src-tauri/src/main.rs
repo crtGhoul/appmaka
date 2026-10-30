@@ -728,12 +728,25 @@ async fn preview_add(
 /// to switch to it.
 fn show_library_view(app: &AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        windows::ensure_on_visible_monitor(app, &w);
         w.show().map_err(|e| e.to_string())?;
         w.set_focus().map_err(|e| e.to_string())?;
         app.emit("appmaka:show-library", ())
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Tray / Re-summon Recovery (v0.18.6): when a second `AppMaka.exe` instance
+/// is launched while one is already running in Task Manager, force the
+/// existing instance to `unminimize()`, clamp to the primary monitor,
+/// `show()`, and `set_focus()`.
+fn summon_main_window_from_second_instance(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        windows::ensure_on_primary_monitor(app, &w);
+        let _ = app.emit("appmaka:show-launcher", ());
+    }
 }
 
 #[tauri::command]
@@ -868,12 +881,18 @@ fn set_panel_opacity(app: AppHandle, opacity: f32) -> Result<LauncherSettings, S
 fn toggle_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let visible = w.is_visible().unwrap_or(false);
-        if visible {
+        let minimized = w.is_minimized().unwrap_or(false);
+        let on_screen = windows::is_window_on_visible_monitor(app, &w);
+        // On Windows, a minimized window (-32000, -32000) or an off-screen
+        // window still reports is_visible() == true (`WS_VISIBLE` remains set
+        // when `WS_MINIMIZE` is active). Treat minimized or off-screen as
+        // needing to be summoned onto a visible monitor rather than hidden.
+        if visible && !minimized && on_screen {
             let _ = w.hide();
         } else {
+            let _ = w.unminimize();
             position_on_target_monitor(app, &w);
-            let _ = w.show();
-            let _ = w.set_focus();
+            windows::ensure_on_visible_monitor(app, &w);
             let _ = app.emit("appmaka:show-launcher", ());
         }
     }
@@ -881,6 +900,7 @@ fn toggle_main_window(app: &AppHandle) {
 
 fn position_on_target_monitor(app: &AppHandle, w: &tauri::WebviewWindow) {
     use tauri::{PhysicalPosition, Position};
+    let _ = w.unminimize();
     let cursor_mode = app
         .try_state::<Mutex<LauncherSettings>>()
         .and_then(|s| {
@@ -893,9 +913,13 @@ fn position_on_target_monitor(app: &AppHandle, w: &tauri::WebviewWindow) {
         app.cursor_position()
             .ok()
             .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+            .or_else(|| w.primary_monitor().ok().flatten())
             .or_else(|| app.primary_monitor().ok().flatten())
     } else {
-        app.primary_monitor().ok().flatten()
+        w.primary_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| app.primary_monitor().ok().flatten())
     };
     if let Some(m) = monitor {
         let mp = m.position();
@@ -1067,10 +1091,15 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         // Open URLs/files in the OS default browser / file manager.
         .plugin(tauri_plugin_opener::init())
-        // One instance only: a clicked link wakes the running app instead of
-        // spawning a duplicate. The deep-link feature forwards the URL args
-        // to the deep-link plugin before the (empty) callback runs.
-        .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
+        // One instance only: a clicked link or second AppMaka.exe launch wakes
+        // the running app instead of spawning a duplicate. The deep-link
+        // feature forwards any URL args before this callback runs; v0.18.6
+        // forces the existing instance to unminimize(), clamp to the primary
+        // monitor, show(), and set_focus() so a hidden/off-screen instance in
+        // Task Manager always reappears immediately.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            summon_main_window_from_second_instance(app);
+        }))
         .setup(|app| {
             let store =
                 AppStore::load(app.handle()).map_err(std::io::Error::other)?;
@@ -1266,6 +1295,13 @@ fn main() {
             // settings state exists. Off by default — the window is
             // only built when the saved setting asks for it.
             dock::apply_visibility(app.handle());
+            // v0.18.6: Ensure the Launcher ("main") window is unminimized,
+            // clamped onto a visible monitor on multi-monitor setups, shown,
+            // and focused at startup.
+            if let Some(main_win) = app.get_webview_window("main") {
+                position_on_target_monitor(app.handle(), &main_win);
+                windows::ensure_on_visible_monitor(app.handle(), &main_win);
+            }
             Ok(())
         })
         // Closing the main window hides it to the tray; Quit is via the

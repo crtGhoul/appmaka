@@ -191,6 +191,41 @@ pub struct LauncherSettings {
     /// tools (dictation like Handy) get an untouched hook chain.
     #[serde(default)]
     pub dictation_compat: bool,
+    /// Whether to download updates automatically in the background (v0.18.0).
+    #[serde(default)]
+    pub auto_update_download: bool,
+    /// Version string of an already-downloaded update awaiting restart (v0.18.0).
+    #[serde(default)]
+    pub pending_update_version: Option<String>,
+    /// Auto-hiding edge dock (v0.18.0).
+    #[serde(default)]
+    pub dock_enabled: bool,
+    #[serde(default = "default_dock_edge")]
+    pub dock_edge: String,
+    #[serde(default)]
+    pub dock_hotkey: String,
+    #[serde(default)]
+    pub dock_profiles: Vec<DockProfile>,
+    #[serde(default = "default_dock_active_profile")]
+    pub dock_active_profile: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DockProfile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_dock_edge")]
+    pub edge: String,
+    #[serde(default)]
+    pub pins: Vec<String>,
+}
+
+fn default_dock_edge() -> String {
+    "bottom".to_string()
+}
+
+fn default_dock_active_profile() -> String {
+    "Default".to_string()
 }
 
 fn default_accent() -> String {
@@ -268,6 +303,13 @@ impl Default for LauncherSettings {
             show_tile_ram: true,
             show_sleep_labels: true,
             dictation_compat: false,
+            auto_update_download: false,
+            pending_update_version: None,
+            dock_enabled: false,
+            dock_edge: default_dock_edge(),
+            dock_hotkey: String::new(),
+            dock_profiles: Vec::new(),
+            dock_active_profile: default_dock_active_profile(),
         }
     }
 }

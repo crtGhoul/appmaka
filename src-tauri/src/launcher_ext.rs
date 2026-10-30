@@ -111,3 +111,40 @@ pub fn set_auto_update_check(app: AppHandle, enabled: bool) -> Result<LauncherSe
     launcher_settings::save(&app, &settings)?;
     Ok(settings.clone())
 }
+
+/// Enable or disable background update pre-downloading.
+/// JS: `invoke("set_auto_update_download", { enabled })`
+#[tauri::command]
+pub fn set_auto_update_download(app: AppHandle, enabled: bool) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.auto_update_download = enabled;
+    launcher_settings::save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Record (or clear) a pending downloaded update version.
+/// JS: `invoke("set_pending_update_version", { version })`
+#[tauri::command]
+pub fn set_pending_update_version(
+    app: AppHandle,
+    version: Option<String>,
+) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.pending_update_version = version.and_then(|v| {
+        let trimmed = v.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    launcher_settings::save(&app, &settings)?;
+    Ok(settings.clone())
+}
+

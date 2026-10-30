@@ -35,6 +35,8 @@ pub enum HotkeyKind {
     Clipboard,
     /// Built-in dictation start/stop (v0.14.0).
     Dictation,
+    /// Auto-hiding edge dock toggle (v0.18.0).
+    Dock,
 }
 
 /// Friendly one-line description of a binding, used in conflict errors.
@@ -51,6 +53,7 @@ fn describe_binding(binding_id: &str, kind: &HotkeyKind) -> String {
         },
         HotkeyKind::Clipboard => "the clipboard history popup".to_string(),
         HotkeyKind::Dictation => "the dictation hotkey".to_string(),
+        HotkeyKind::Dock => "the edge dock hotkey".to_string(),
     }
 }
 
@@ -391,6 +394,15 @@ pub fn emit_hotkey_fired(app: &AppHandle, binding_id: &str, kind: &HotkeyKind) {
         // this arm only keeps the match exhaustive.
         HotkeyKind::Dictation => (
             "dictation",
+            HotkeyTarget {
+                routine_id: None,
+                workspace_id: None,
+                app_id: None,
+                account_id: None,
+            },
+        ),
+        HotkeyKind::Dock => (
+            "dock",
             HotkeyTarget {
                 routine_id: None,
                 workspace_id: None,

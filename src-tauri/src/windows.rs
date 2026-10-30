@@ -85,6 +85,337 @@ pub struct WindowPlacement {
     pub height: f64,
 }
 
+/// Physical monitor rectangle `(x, y, width, height)` in desktop coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl MonitorRect {
+    pub fn contains_point(&self, px: i32, py: i32) -> bool {
+        px >= self.x
+            && px < self.x.saturating_add(self.width.max(0))
+            && py >= self.y
+            && py < self.y.saturating_add(self.height.max(0))
+    }
+}
+
+/// Pure multi-monitor bounds check (v0.18.6): returns `true` when the
+/// window's center point falls inside at least one monitor rectangle, and
+/// `false` when it is off-screen (including Windows `-32000, -32000`
+/// minimized coordinates or dead space between monitors).
+pub fn is_window_center_on_any_monitor(
+    win_pos: (i32, i32),
+    win_size: (u32, u32),
+    monitors: &[MonitorRect],
+) -> bool {
+    let (wx, wy) = win_pos;
+    // Windows parks minimized windows around (-32000, -32000).
+    if wx <= -16_000 || wy <= -16_000 {
+        return false;
+    }
+    if monitors.is_empty() {
+        // If the OS reports no monitor list, don't false-positive clamp.
+        return true;
+    }
+    let cx = wx.saturating_add((win_size.0 as i32) / 2);
+    let cy = wy.saturating_add((win_size.1 as i32) / 2);
+    monitors.iter().any(|m| m.contains_point(cx, cy))
+}
+
+/// Physical top-left that centers `win_size` inside `target` monitor rect.
+pub fn center_in_monitor(win_size: (u32, u32), target: MonitorRect) -> (i32, i32) {
+    let x = target.x + (target.width - win_size.0 as i32) / 2;
+    let y = target.y + (target.height - win_size.1 as i32) / 2;
+    (x, y)
+}
+
+/// Check whether `window`'s center point currently lies on any available monitor.
+pub fn is_window_on_visible_monitor(app: &AppHandle, window: &WebviewWindow) -> bool {
+    if window.is_minimized().unwrap_or(false) {
+        return false;
+    }
+    let Ok(pos) = window.outer_position() else {
+        return false;
+    };
+    let size = window
+        .outer_size()
+        .map(|s| (s.width, s.height))
+        .unwrap_or((800, 600));
+    let monitors: Vec<MonitorRect> = window
+        .available_monitors()
+        .or_else(|_| app.available_monitors())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| MonitorRect {
+            x: m.position().x,
+            y: m.position().y,
+            width: m.size().width as i32,
+            height: m.size().height as i32,
+        })
+        .collect();
+    is_window_center_on_any_monitor((pos.x, pos.y), size, &monitors)
+}
+
+/// Multi-Monitor Bounds Clamp + Unminimize (v0.18.6):
+/// Whenever creating, showing, or focusing the Launcher or any account/popup
+/// window, always call `window.unminimize()` BEFORE `window.show()` and
+/// `window.set_focus()`. Then read `window.outer_position()` and check if
+/// the window's center point falls inside at least one monitor rect in
+/// `window.available_monitors()`. If it is off-screen (including Windows
+/// `-32000, -32000` minimized coords or dead space between monitors),
+/// automatically center the window on `window.primary_monitor()` (or the
+/// cursor's current monitor).
+pub fn ensure_on_visible_monitor(app: &AppHandle, window: &WebviewWindow) {
+    use tauri::{PhysicalPosition, Position};
+
+    let _ = window.unminimize();
+
+    let win_size = window
+        .outer_size()
+        .map(|s| (s.width, s.height))
+        .unwrap_or((1200, 800));
+    let monitors: Vec<MonitorRect> = window
+        .available_monitors()
+        .or_else(|_| app.available_monitors())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| MonitorRect {
+            x: m.position().x,
+            y: m.position().y,
+            width: m.size().width as i32,
+            height: m.size().height as i32,
+        })
+        .collect();
+
+    let on_screen = window
+        .outer_position()
+        .map(|pos| is_window_center_on_any_monitor((pos.x, pos.y), win_size, &monitors))
+        .unwrap_or(false);
+
+    if !on_screen {
+        let target_monitor = cursor_monitor(app)
+            .or_else(|| window.primary_monitor().ok().flatten())
+            .or_else(|| app.primary_monitor().ok().flatten());
+        if let Some(m) = target_monitor {
+            let rect = MonitorRect {
+                x: m.position().x,
+                y: m.position().y,
+                width: m.size().width as i32,
+                height: m.size().height as i32,
+            };
+            let (x, y) = center_in_monitor(win_size, rect);
+            if window
+                .set_position(Position::Physical(PhysicalPosition::new(x, y)))
+                .is_err()
+            {
+                let _ = window.center();
+            }
+        } else {
+            let _ = window.center();
+        }
+    }
+
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// Force `window` to unminimize, clamp specifically to the primary monitor
+/// when off-screen (or when forced on second-instance re-summon), show, and focus.
+pub fn ensure_on_primary_monitor(app: &AppHandle, window: &WebviewWindow) {
+    use tauri::{PhysicalPosition, Position};
+
+    let _ = window.unminimize();
+
+    let win_size = window
+        .outer_size()
+        .map(|s| (s.width, s.height))
+        .unwrap_or((900, 620));
+    let target = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .or_else(|| cursor_monitor(app));
+    if let Some(m) = target {
+        let rect = MonitorRect {
+            x: m.position().x,
+            y: m.position().y,
+            width: m.size().width as i32,
+            height: m.size().height as i32,
+        };
+        let (x, y) = center_in_monitor(win_size, rect);
+        if window
+            .set_position(Position::Physical(PhysicalPosition::new(x, y)))
+            .is_err()
+        {
+            let _ = window.center();
+        }
+    } else {
+        let _ = window.center();
+    }
+
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+/// Timeout for `WebviewWindowBuilder::build()` (v0.18.6): if
+/// `msedgewebview2.exe` is hung on a stale user-data folder lock, fail
+/// within 6 seconds instead of blocking forever without logging to `errors.json`.
+const WEBVIEW2_BUILD_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Check whether a WebView2 creation failure is `0x8007139F`
+/// (`ERROR_INVALID_STATE`, decimal `-2147019873`) or a creation timeout that
+/// can be healed by unlocking the account's user-data folder.
+pub fn is_webview2_recoverable_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("0x8007139f")
+        || lower.contains("8007139f")
+        || lower.contains("-2147019873")
+        || lower.contains("error_invalid_state")
+        || lower.contains("invalid state")
+        || lower.contains("timed out")
+}
+
+/// Delete stale Chromium/WebView2 singleton lock files inside `session_dir`
+/// while preserving `Default/Network/Cookies`, `Local Storage`, IndexedDB,
+/// and all login data (v0.18.6).
+pub fn clear_stale_webview_locks(session_dir: &Path) -> usize {
+    const LOCK_NAMES: [&str; 4] = [
+        "SingletonLock",
+        "SingletonCookie",
+        "SingletonSocket",
+        "lockfile",
+    ];
+    let candidate_dirs = [
+        session_dir.to_path_buf(),
+        session_dir.join("EBWebView"),
+        session_dir.join("Default"),
+        session_dir.join("EBWebView").join("Default"),
+    ];
+    let mut removed = 0usize;
+    for dir in &candidate_dirs {
+        for name in &LOCK_NAMES {
+            let p = dir.join(name);
+            if p.exists() || std::fs::symlink_metadata(&p).is_ok() {
+                if std::fs::remove_file(&p).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
+/// Terminate orphaned `msedgewebview2.exe` processes holding `session_dir`
+/// (or attributed to `(app_id, account_id)`) so a retry can create a fresh
+/// WebView2 environment with current browser arguments (v0.18.6).
+pub fn terminate_orphaned_webview2_for_session(
+    app: &AppHandle,
+    app_id: &str,
+    account_id: &str,
+    session_dir: &Path,
+) -> usize {
+    use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System, UpdateKind};
+
+    let sys = System::new_with_specifics(
+        RefreshKind::nothing().with_processes(
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::OnlyIfNotSet)
+                .without_tasks(),
+        ),
+    );
+    let self_pid = Pid::from_u32(std::process::id());
+    let session_norm = session_dir
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    let attributed_pids: HashSet<u32> = app
+        .try_state::<crate::procattr::ProcessAttribution>()
+        .and_then(|attr| attr.pids_for(app_id, account_id))
+        .unwrap_or_default();
+
+    let mut killed = 0usize;
+    for (pid, proc_) in sys.processes() {
+        if *pid == self_pid {
+            continue;
+        }
+        let name = proc_.name().to_string_lossy().to_ascii_lowercase();
+        if !name.contains("msedgewebview2") && !name.contains("webview") {
+            continue;
+        }
+        let cmd_matches = !session_norm.is_empty()
+            && proc_.cmd().iter().any(|arg| {
+                arg.to_string_lossy()
+                    .replace('/', "\\")
+                    .to_ascii_lowercase()
+                    .contains(&session_norm)
+            });
+        let is_attributed = attributed_pids.contains(&pid.as_u32());
+        if cmd_matches || is_attributed {
+            if proc_.kill() {
+                killed += 1;
+            }
+        }
+    }
+    // If command-line inspection was restricted by the OS and nothing matched
+    // directly, fall back to terminating descendant msedgewebview2 processes
+    // only when no other account window is currently open.
+    if killed == 0 {
+        let other_open = app
+            .try_state::<WindowState>()
+            .and_then(|s| s.inner.lock().ok().map(|m| !m.is_empty()))
+            .unwrap_or(true);
+        if !other_open {
+            for (pid, proc_) in sys.processes() {
+                if *pid == self_pid {
+                    continue;
+                }
+                let name = proc_.name().to_string_lossy().to_ascii_lowercase();
+                if !name.contains("msedgewebview2") {
+                    continue;
+                }
+                let mut ancestor = proc_.parent();
+                let mut is_descendant = false;
+                while let Some(p) = ancestor {
+                    if p == self_pid {
+                        is_descendant = true;
+                        break;
+                    }
+                    ancestor = sys.process(p).and_then(|pp| pp.parent());
+                }
+                if is_descendant && proc_.kill() {
+                    killed += 1;
+                }
+            }
+        }
+    }
+    killed
+}
+
+/// Self-heal an account's WebView2 user-data directory after a `0x8007139F`
+/// (`ERROR_INVALID_STATE`) or 6-second creation timeout: terminate orphaned
+/// `msedgewebview2.exe` processes holding that folder and delete stale
+/// `SingletonLock` / `lockfile` entries while preserving cookies and storage.
+fn recover_webview2_user_data_dir(
+    app: &AppHandle,
+    app_id: &str,
+    account_id: &str,
+    session_dir: &Path,
+    label: &str,
+) -> (usize, usize) {
+    if let Some(existing) = app.get_webview_window(label) {
+        let _ = existing.close();
+    }
+    let killed = terminate_orphaned_webview2_for_session(app, app_id, account_id, session_dir);
+    std::thread::sleep(Duration::from_millis(150));
+    let unlocked = clear_stale_webview_locks(session_dir);
+    (killed, unlocked)
+}
+
 /// Navigate an open account window back/forward in its history.
 ///
 /// Kept as a public command for compatibility (the visible floating toolbar
@@ -351,12 +682,12 @@ pub fn open_account_placed(
 
     let label = account_window_label(app_id, account_id);
     if let Some(window) = app.get_webview_window(&label) {
-        // A bare set_focus() is not enough on Windows: it cannot restore a
-        // minimized window, so the user would see "nothing opens". Unminimize
-        // and show first, then focus.
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+        if let Some(p) = placement {
+            apply_placement(&window, p);
+        }
+        // v0.18.6: always unminimize BEFORE show/set_focus and clamp
+        // off-screen or minimized (-32000, -32000) windows onto a visible monitor.
+        ensure_on_visible_monitor(app, &window);
         // An open that returns Ok while nothing appears is worse than a
         // loud failure: the user clicks again and again with no signal.
         // A window that stays invisible after show/focus is one such
@@ -378,9 +709,6 @@ pub fn open_account_placed(
         // forever. navigate_pending_url is one-shot (no-op without a
         // pending URL), so calling it here is safe.
         navigate_pending_url(app, &label);
-        if let Some(p) = placement {
-            apply_placement(&window, p);
-        }
         // A restore may have seeded a last-visited URL for this window,
         // but it is already open — drop the seed so a later close and
         // reopen doesn't inherit a URL from before this session.
@@ -438,161 +766,238 @@ pub fn open_account_placed(
     } else {
         (target_url.clone(), None)
     };
-    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(initial_url))
-        .data_directory(session_dir.clone())
-        .title(&title)
-        // No white flash before first paint (see the const).
-        .background_color(ACCOUNT_WINDOW_BACKGROUND);
-    // v0.9.6 (Windows): frameless — the native title bar and its X go away,
-    // replaced by our own slim caption strip (caption.rs). tao keeps border
-    // resizing working on frameless windows. Linux keeps native decorations.
-    #[cfg(windows)]
-    {
-        builder = builder.decorations(false);
-        builder = builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS);
-    }
-    // v0.9.0: tiled routines place the window at build time (no visible
-    // jump); untiled opens keep the classic centered 1200x800.
-    // WebviewWindowBuilder::position takes logical pixels directly.
-    if let Some(p) = placement {
-        builder = builder.position(p.x, p.y).inner_size(p.width, p.height);
-    } else if let Some((x, y)) = cursor_centered_position(app, 1200.0, 800.0) {
-        // v0.13.18: open on the monitor the user is actually on.
-        builder = builder.position(x, y).inner_size(1200.0, 800.0);
-    } else {
-        builder = builder.inner_size(1200.0, 800.0).center();
-    }
-    let mut builder = builder
-        .on_new_window(make_popup_handler(PopupContext {
-            app: app.clone(),
-            app_id: app_id.to_string(),
-            account_id: account_id.to_string(),
-            app_name: web_app.name.clone(),
-            app_url: web_app.url.clone(),
-            session_dir: session_dir.clone(),
-            popup_policy,
-            popup_allowlist: web_app.settings.popup_allowlist.clone(),
-            parent_label: label.clone(),
-            chain_allowed: false,
-        }))
-        // In-app download manager (v0.7.0): downloads stay in the account
-        // window's own session instead of kicking out to the system browser.
-        .on_download(crate::downloads::make_download_handler(app.clone()));
-    // v0.11.0: universal title-bar blending — re-tint the caption strip
-    // when the page navigates (theme-color can change per page). The hook
-    // must never block the navigation decision: it only hands the URL to
-    // a detached thread, and tint::request_retint dedupes + guards races.
-    #[cfg(windows)]
-    {
-        let tint_app = app.clone();
-        let tint_label = label.clone();
-        builder = builder.on_navigation(move |nav_url: &url::Url| {
-            let app = tint_app.clone();
-            let lbl = tint_label.clone();
-            let u = nav_url.clone();
-            std::thread::Builder::new()
-                .name(format!("appmaka-page-retint-{lbl}"))
-                .spawn(move || {
-                    crate::tint::request_retint(&app, &lbl, &u, crate::tint::TintTarget::PageStrip);
-                    // v0.13.8: a window built before a cursor settings
-                    // change re-runs its old init script on navigation;
-                    // converge it to the saved style.
-                    schedule_cursor_reapply(app.clone(), lbl.clone());
-                })
-                .ok();
-            true
-        });
-    }
-    // Non-Windows has no caption tint to re-run, but the cursor
-    // convergence in that hook matters on every platform: a window
-    // built before a cursor settings change must not keep its old
-    // build-time cursor after the next navigation.
-    #[cfg(not(windows))]
-    {
-        let nav_app = app.clone();
-        let nav_label = label.clone();
-        builder = builder.on_navigation(move |_nav_url: &url::Url| {
-            schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
-            true
-        });
-    }
-    // Cosmetic filtering: engine-generated hide selectors injected before
-    // first paint. Skipped entirely when no engine is loaded (fail open).
-    // The target=_blank shim is always injected: without it WebKitGTK drops
-    // target=_blank link clicks before they ever reach on_new_window.
-    builder = builder.initialization_script(TARGET_BLANK_SHIM_JS);
-    // Back/forward keyboard nav (v0.7.0): bare webviews have no chrome, so
-    // Alt+Left / Alt+Right get them here.
-    builder = builder.initialization_script(NAV_KEYS_JS);
-    // v0.13.5: F1 shortcut cheatsheet overlay.
-    builder = builder.initialization_script(shortcuts_overlay_js(app));
-    // v0.12.0: custom page cursor. Empty string when "off" — skipped.
-    let cursor_js = saved_cursor_js(app);
-    if !cursor_js.is_empty() {
-        builder = builder.initialization_script(cursor_js);
-    }
-    // v0.18.0: Tampermonkey-Lite user scripts matched against the
-    // URL this window opens on (restored last URL, else the app's
-    // start URL).
-    for js in crate::userscripts::user_scripts_init_scripts(app, target_url.as_str()) {
-        builder = builder.initialization_script(js);
-    }
-    let css = adblock.cosmetic_css_for(&web_app.url);
-    if !css.is_empty() {
-        builder = builder.initialization_script(cosmetic_init_script(&css));
-    }
-    // v0.18.4: scriptlets matched against the URL this window opens on.
-    // The engine output is already one guarded script (helpers plus one
-    // try/catch call per matching rule), so it injects as-is.
-    let scriptlets = adblock.scriptlet_js_for(&web_app.url);
-    if !scriptlets.is_empty() {
-        builder = builder.initialization_script(scriptlets);
-    }
-    // v0.18.5: YouTube ad-skipper fallback. Host-gated in JS itself, so
-    // it is injected into every account window and no-ops off YouTube;
-    // init scripts run on every navigation, so it also covers a window
-    // that navigates onto YouTube mid-session.
-    builder = builder.initialization_script(adblock.yt_ad_skipper_js().to_string());
-    // v0.15.0: unread badges — track the live document.title per window.
-    // The callback only touches the state mutex (no Win32 calls), so it
-    // is safe on whatever thread Tauri invokes it from.
-    {
-        let title_app = app.clone();
-        let title_label = label.clone();
-        builder = builder.on_document_title_changed(move |_window, title: String| {
-            if let Some(winstate) = title_app.try_state::<WindowState>() {
-                if let Ok(mut tracked) = winstate.inner.lock() {
-                    if let Some(t) = tracked.get_mut(&title_label) {
-                        t.page_title = title;
-                        t.page_title_seen = false;
+    let make_account_builder = || -> WebviewWindowBuilder<'_, tauri::Wry, AppHandle> {
+        let mut builder =
+            WebviewWindowBuilder::new(app, &label, WebviewUrl::External(initial_url.clone()))
+                .data_directory(session_dir.clone())
+                .title(&title)
+                // No white flash before first paint (see the const).
+                .background_color(ACCOUNT_WINDOW_BACKGROUND);
+        // v0.9.6 (Windows): frameless — the native title bar and its X go away,
+        // replaced by our own slim caption strip (caption.rs). tao keeps border
+        // resizing working on frameless windows. Linux keeps native decorations.
+        #[cfg(windows)]
+        {
+            builder = builder.decorations(false);
+            builder = builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS);
+        }
+        // v0.9.0: tiled routines place the window at build time (no visible
+        // jump); untiled opens keep the classic centered 1200x800.
+        // WebviewWindowBuilder::position takes logical pixels directly.
+        if let Some(p) = placement {
+            builder = builder.position(p.x, p.y).inner_size(p.width, p.height);
+        } else if let Some((x, y)) = cursor_centered_position(app, 1200.0, 800.0) {
+            // v0.13.18: open on the monitor the user is actually on.
+            builder = builder.position(x, y).inner_size(1200.0, 800.0);
+        } else {
+            builder = builder.inner_size(1200.0, 800.0).center();
+        }
+        let mut builder = builder
+            .on_new_window(make_popup_handler(PopupContext {
+                app: app.clone(),
+                app_id: app_id.to_string(),
+                account_id: account_id.to_string(),
+                app_name: web_app.name.clone(),
+                app_url: web_app.url.clone(),
+                session_dir: session_dir.clone(),
+                popup_policy: popup_policy.clone(),
+                popup_allowlist: web_app.settings.popup_allowlist.clone(),
+                parent_label: label.clone(),
+                chain_allowed: false,
+            }))
+            // In-app download manager (v0.7.0): downloads stay in the account
+            // window's own session instead of kicking out to the system browser.
+            .on_download(crate::downloads::make_download_handler(app.clone()));
+        // v0.11.0: universal title-bar blending — re-tint the caption strip
+        // when the page navigates (theme-color can change per page). The hook
+        // must never block the navigation decision: it only hands the URL to
+        // a detached thread, and tint::request_retint dedupes + guards races.
+        #[cfg(windows)]
+        {
+            let tint_app = app.clone();
+            let tint_label = label.clone();
+            builder = builder.on_navigation(move |nav_url: &url::Url| {
+                let app = tint_app.clone();
+                let lbl = tint_label.clone();
+                let u = nav_url.clone();
+                std::thread::Builder::new()
+                    .name(format!("appmaka-page-retint-{lbl}"))
+                    .spawn(move || {
+                        crate::tint::request_retint(
+                            &app,
+                            &lbl,
+                            &u,
+                            crate::tint::TintTarget::PageStrip,
+                        );
+                        // v0.13.8: a window built before a cursor settings
+                        // change re-runs its old init script on navigation;
+                        // converge it to the saved style.
+                        schedule_cursor_reapply(app.clone(), lbl.clone());
+                    })
+                    .ok();
+                true
+            });
+        }
+        // Non-Windows has no caption tint to re-run, but the cursor
+        // convergence in that hook matters on every platform: a window
+        // built before a cursor settings change must not keep its old
+        // build-time cursor after the next navigation.
+        #[cfg(not(windows))]
+        {
+            let nav_app = app.clone();
+            let nav_label = label.clone();
+            builder = builder.on_navigation(move |_nav_url: &url::Url| {
+                schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
+                true
+            });
+        }
+        // Cosmetic filtering: engine-generated hide selectors injected before
+        // first paint. Skipped entirely when no engine is loaded (fail open).
+        // The target=_blank shim is always injected: without it WebKitGTK drops
+        // target=_blank link clicks before they ever reach on_new_window.
+        builder = builder.initialization_script(TARGET_BLANK_SHIM_JS);
+        // Back/forward keyboard nav (v0.7.0): bare webviews have no chrome, so
+        // Alt+Left / Alt+Right get them here.
+        builder = builder.initialization_script(NAV_KEYS_JS);
+        // v0.13.5: F1 shortcut cheatsheet overlay.
+        builder = builder.initialization_script(shortcuts_overlay_js(app));
+        // v0.12.0: custom page cursor. Empty string when "off" — skipped.
+        let cursor_js = saved_cursor_js(app);
+        if !cursor_js.is_empty() {
+            builder = builder.initialization_script(cursor_js);
+        }
+        // v0.18.0: Tampermonkey-Lite user scripts matched against the
+        // URL this window opens on (restored last URL, else the app's
+        // start URL).
+        for js in crate::userscripts::user_scripts_init_scripts(app, target_url.as_str()) {
+            builder = builder.initialization_script(js);
+        }
+        let css = adblock.cosmetic_css_for(&web_app.url);
+        if !css.is_empty() {
+            builder = builder.initialization_script(cosmetic_init_script(&css));
+        }
+        // v0.18.4: scriptlets matched against the URL this window opens on.
+        // The engine output is already one guarded script (helpers plus one
+        // try/catch call per matching rule), so it injects as-is.
+        let scriptlets = adblock.scriptlet_js_for(&web_app.url);
+        if !scriptlets.is_empty() {
+            builder = builder.initialization_script(scriptlets);
+        }
+        // v0.18.5: YouTube ad-skipper fallback. Host-gated in JS itself, so
+        // it is injected into every account window and no-ops off YouTube;
+        // init scripts run on every navigation, so it also covers a window
+        // that navigates onto YouTube mid-session.
+        builder = builder.initialization_script(adblock.yt_ad_skipper_js().to_string());
+        // v0.15.0: unread badges — track the live document.title per window.
+        // The callback only touches the state mutex (no Win32 calls), so it
+        // is safe on whatever thread Tauri invokes it from.
+        {
+            let title_app = app.clone();
+            let title_label = label.clone();
+            builder = builder.on_document_title_changed(move |_window, title: String| {
+                if let Some(winstate) = title_app.try_state::<WindowState>() {
+                    if let Ok(mut tracked) = winstate.inner.lock() {
+                        if let Some(t) = tracked.get_mut(&title_label) {
+                            t.page_title = title;
+                            t.page_title_seen = false;
+                        }
                     }
                 }
+            });
+        }
+        builder
+    };
+
+    // v0.18.6: Wrap WebView2 window creation in a 6-second timeout so a hung
+    // msedgewebview2.exe never silently blocks without logging to errors.json.
+    // If CreateCoreWebView2EnvironmentWithOptions fails with 0x8007139F
+    // (ERROR_INVALID_STATE) or times out, automatically terminate orphaned
+    // msedgewebview2.exe processes holding that account's user-data folder,
+    // delete stale SingletonLock / lockfile entries (preserving Cookies and
+    // Local Storage), and retry once automatically.
+    let build_once_with_timeout = || -> Result<WebviewWindow, String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<WebviewWindow, String>>(1);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let res = make_account_builder()
+                    .build()
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(res);
+            });
+            match rx.recv_timeout(WEBVIEW2_BUILD_TIMEOUT) {
+                Ok(res) => res,
+                Err(_) => Err(format!(
+                    "WebView2 environment creation timed out after {}s for {label}",
+                    WEBVIEW2_BUILD_TIMEOUT.as_secs()
+                )),
             }
-        });
-    }
+        })
+    };
+
     // v0.15.0: per-account RAM attribution — snapshot descendants before
     // the build so the browser process spawned for this data directory
     // can be claimed for the account.
     let pids_before = crate::procattr::descendant_pids();
-    let window = builder.build().map_err(|e| {
-        let msg = format!("could not open account window: {e}");
-        // v0.11.0: recorded for Copy diagnostics. The launcher shows the
-        // inline error itself, so no dialog here.
-        crate::errors::record(
-            app,
-            "window-open",
-            "Could not open the app window.",
-            &msg,
-            false,
-        );
-        msg
-    })?;
+    let window = match build_once_with_timeout() {
+        Ok(w) => w,
+        Err(first_err) if is_webview2_recoverable_error(&first_err) => {
+            let (killed, unlocked) =
+                recover_webview2_user_data_dir(app, app_id, account_id, &session_dir, &label);
+            crate::errors::record(
+                app,
+                "window-open",
+                &format!(
+                    "Recovered locked session for \"{} — {}\" and retried.",
+                    web_app.name, account.label
+                ),
+                &format!(
+                    "initial error: {first_err}; terminated {killed} orphaned WebView2 process(es), removed {unlocked} stale lock file(s)"
+                ),
+                false,
+            );
+            let pids_retry = crate::procattr::descendant_pids();
+            let w = build_once_with_timeout().map_err(|retry_err| {
+                let msg = format!(
+                    "could not open account window after session unlock retry: {retry_err} (first attempt: {first_err})"
+                );
+                crate::errors::record(
+                    app,
+                    "window-open",
+                    "Could not open the app window.",
+                    &msg,
+                    true,
+                );
+                msg
+            })?;
+            crate::procattr::capture_new_processes(
+                app.clone(),
+                app_id.to_string(),
+                account_id.to_string(),
+                pids_retry,
+            );
+            w
+        }
+        Err(e) => {
+            let msg = format!("could not open account window: {e}");
+            // v0.11.0 / v0.18.6: recorded for Copy diagnostics and Error history.
+            crate::errors::record(
+                app,
+                "window-open",
+                "Could not open the app window.",
+                &msg,
+                false,
+            );
+            return Err(msg);
+        }
+    };
     crate::procattr::capture_new_processes(
         app.clone(),
         app_id.to_string(),
         account_id.to_string(),
         pids_before,
     );
+    // v0.18.6: unminimize, clamp onto a visible monitor if off-screen, show, and focus.
+    ensure_on_visible_monitor(app, &window);
     // v0.9.6: on Windows keep the DWM drop shadow on the frameless window
     // and attach our caption strip. On other platforms the caption calls
     // are no-ops.
@@ -1814,6 +2219,7 @@ fn build_contained_window(
     }
     match builder.build() {
         Ok(window) => {
+            ensure_on_visible_monitor(&ctx.app, &window);
             if kind == "popup" {
                 crate::popup_chrome::setup_popup_chrome(&ctx.app, &window, &label, url);
             }
@@ -1978,64 +2384,109 @@ fn spawn_contained_window(
     let _ = std::thread::Builder::new()
         .name(format!("appmaka-{label_prefix}-{n}"))
         .spawn(move || {
-            let mut builder = WebviewWindowBuilder::new(
-                &window_app,
-                &label,
-                WebviewUrl::External(url.clone()),
-            )
-            .data_directory(session_dir.clone())
-            .title(&title)
-            .inner_size(640.0, 720.0)
-            // Nested popups: same policy handler as every other
-            // window, chain-trusted (this window is an allowed popup).
-            .on_new_window(make_popup_handler(popup_ctx))
-            // Popup downloads go through the same in-app manager as every
-            // other window (v0.9.8): without this they silently bypassed
-            // the download folder, the history, and Mark of the Web.
-            .on_download(crate::downloads::make_download_handler(window_app.clone()));
-            // Same session folder as the account/tabbed builders: the
-            // browser arguments must match theirs exactly (see
-            // WEBVIEW2_BROWSER_ARGS).
-            #[cfg(windows)]
-            {
-                builder = builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS);
-            }
-            // v0.13.18: open on the monitor the user is actually on.
-            if let Some((x, y)) = cursor_centered_position(&window_app, 640.0, 720.0) {
-                builder = builder.position(x, y);
-            }
-            if let Some(script) = initialization_script {
-                builder = builder.initialization_script(script);
-            }
-            // v0.13.18: drawn cursor in popups (see build_contained_window).
-            let cursor_js = saved_cursor_js(&window_app);
-            if !cursor_js.is_empty() {
-                builder = builder.initialization_script(cursor_js);
-            }
-            // v0.9.11: re-tint the title bar when the popup navigates
-            // (theme-color can change per page). The hook must never block
-            // the navigation decision, so the work goes to a detached
-            // thread; the tint itself is best-effort and silent.
-            #[cfg(windows)]
-            if label_prefix == "popup" {
-                let nav_app = window_app.clone();
-                let nav_label = label.clone();
-                builder = builder.on_navigation(move |nav_url: &url::Url| {
-                    let app = nav_app.clone();
-                    let lbl = nav_label.clone();
-                    let u = nav_url.clone();
-                    std::thread::Builder::new()
-                        .name(format!("appmaka-popup-retint-{lbl}"))
-                        .spawn(move || {
-                            crate::popup_chrome::tint_popup_caption(&app, &lbl, &u);
-                            schedule_cursor_reapply(app.clone(), lbl.clone());
-                        })
-                        .ok();
-                    true
-                });
-            }
-            match builder.build() {
+            let app_id_for_recover = popup_ctx.app_id.clone();
+            let account_id_for_recover = popup_ctx.account_id.clone();
+            let make_popup_builder =
+                || -> WebviewWindowBuilder<'_, tauri::Wry, AppHandle> {
+                    let mut builder = WebviewWindowBuilder::new(
+                        &window_app,
+                        &label,
+                        WebviewUrl::External(url.clone()),
+                    )
+                    .data_directory(session_dir.clone())
+                    .title(&title)
+                    .inner_size(640.0, 720.0)
+                    // Nested popups: same policy handler as every other
+                    // window, chain-trusted (this window is an allowed popup).
+                    .on_new_window(make_popup_handler(popup_ctx.clone()))
+                    // Popup downloads go through the same in-app manager as every
+                    // other window (v0.9.8): without this they silently bypassed
+                    // the download folder, the history, and Mark of the Web.
+                    .on_download(crate::downloads::make_download_handler(
+                        window_app.clone(),
+                    ));
+                    // Same session folder as the account/tabbed builders: the
+                    // browser arguments must match theirs exactly (see
+                    // WEBVIEW2_BROWSER_ARGS).
+                    #[cfg(windows)]
+                    {
+                        builder =
+                            builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS);
+                    }
+                    // v0.13.18: open on the monitor the user is actually on.
+                    if let Some((x, y)) =
+                        cursor_centered_position(&window_app, 640.0, 720.0)
+                    {
+                        builder = builder.position(x, y);
+                    }
+                    if let Some(script) = initialization_script.as_ref() {
+                        builder = builder.initialization_script(script.clone());
+                    }
+                    // v0.13.18: drawn cursor in popups (see build_contained_window).
+                    let cursor_js = saved_cursor_js(&window_app);
+                    if !cursor_js.is_empty() {
+                        builder = builder.initialization_script(cursor_js);
+                    }
+                    #[cfg(windows)]
+                    if label_prefix == "popup" {
+                        let nav_app = window_app.clone();
+                        let nav_label = label.clone();
+                        builder = builder.on_navigation(move |nav_url: &url::Url| {
+                            let app = nav_app.clone();
+                            let lbl = nav_label.clone();
+                            let u = nav_url.clone();
+                            std::thread::Builder::new()
+                                .name(format!("appmaka-popup-retint-{lbl}"))
+                                .spawn(move || {
+                                    crate::popup_chrome::tint_popup_caption(
+                                        &app, &lbl, &u,
+                                    );
+                                    schedule_cursor_reapply(app.clone(), lbl.clone());
+                                })
+                                .ok();
+                            true
+                        });
+                    }
+                    builder
+                };
+
+            let build_popup_once = || -> Result<WebviewWindow, String> {
+                let (tx, rx) =
+                    std::sync::mpsc::sync_channel::<Result<WebviewWindow, String>>(1);
+                std::thread::scope(|s| {
+                    s.spawn(|| {
+                        let res =
+                            make_popup_builder().build().map_err(|e| e.to_string());
+                        let _ = tx.send(res);
+                    });
+                    match rx.recv_timeout(WEBVIEW2_BUILD_TIMEOUT) {
+                        Ok(res) => res,
+                        Err(_) => Err(format!(
+                            "WebView2 popup creation timed out after {}s for {label}",
+                            WEBVIEW2_BUILD_TIMEOUT.as_secs()
+                        )),
+                    }
+                })
+            };
+
+            let build_res = match build_popup_once() {
+                Ok(w) => Ok(w),
+                Err(first_err) if is_webview2_recoverable_error(&first_err) => {
+                    let _ = recover_webview2_user_data_dir(
+                        &window_app,
+                        &app_id_for_recover,
+                        &account_id_for_recover,
+                        &session_dir,
+                        &label,
+                    );
+                    build_popup_once()
+                }
+                Err(e) => Err(e),
+            };
+
+            match build_res {
                 Ok(_window) => {
+                    ensure_on_visible_monitor(&window_app, &_window);
                     // Close-lifecycle trace (see log_popup_lifecycle).
                     attach_popup_lifecycle_trace(&window_app, &_window, &label);
                     log_popup_lifecycle(&window_app, &label, "spawned");
@@ -3791,6 +4242,86 @@ mod tests {
         assert!(!cursor_window_label("preview-abc-header"));
         assert!(!cursor_window_label("main"));
         assert!(!cursor_window_label("clipboard"));
+    }
+
+    #[test]
+    fn multi_monitor_bounds_clamp_detects_offscreen_and_minimized_coords() {
+        let monitors = vec![
+            MonitorRect {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            MonitorRect {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+            },
+            MonitorRect {
+                x: 2560,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        ];
+        // Visible on left, primary, and right monitors:
+        assert!(is_window_center_on_any_monitor((-1500, 100), (1200, 800), &monitors));
+        assert!(is_window_center_on_any_monitor((200, 200), (1200, 800), &monitors));
+        assert!(is_window_center_on_any_monitor((2800, 100), (1200, 800), &monitors));
+        // Windows minimized coords (-32000, -32000) must be treated as off-screen:
+        assert!(!is_window_center_on_any_monitor((-32000, -32000), (1200, 800), &monitors));
+        // Dead space above/below/past unplugged 4th monitor:
+        assert!(!is_window_center_on_any_monitor((5000, 100), (1200, 800), &monitors));
+        assert!(!is_window_center_on_any_monitor((-1500, 1400), (1200, 800), &monitors));
+        // Centering math lands inside target monitor:
+        let (cx, cy) = center_in_monitor((1200, 800), monitors[1]);
+        assert_eq!((cx, cy), (680, 320));
+    }
+
+    #[test]
+    fn webview2_recoverable_error_matches_invalid_state_and_timeout() {
+        assert!(is_webview2_recoverable_error(
+            "WebView2 error: HRESULT 0x8007139F (ERROR_INVALID_STATE)"
+        ));
+        assert!(is_webview2_recoverable_error(
+            "CreateCoreWebView2EnvironmentWithOptions failed: -2147019873"
+        ));
+        assert!(is_webview2_recoverable_error(
+            "WebView2 environment creation timed out after 6s for acct-1-main"
+        ));
+        assert!(!is_webview2_recoverable_error("App URL is not valid"));
+    }
+
+    #[test]
+    fn clear_stale_webview_locks_preserves_cookies_and_local_storage() {
+        let tmp = std::env::temp_dir().join(format!("appmaka-lock-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let cookies_dir = tmp.join("EBWebView").join("Default").join("Network");
+        let storage_dir = tmp.join("EBWebView").join("Default").join("Local Storage");
+        std::fs::create_dir_all(&cookies_dir).unwrap();
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let cookies_file = cookies_dir.join("Cookies");
+        let storage_file = storage_dir.join("leveldb.ldb");
+        std::fs::write(&cookies_file, b"session-cookie").unwrap();
+        std::fs::write(&storage_file, b"local-storage").unwrap();
+
+        let lock1 = tmp.join("SingletonLock");
+        let lock2 = tmp.join("EBWebView").join("lockfile");
+        let lock3 = tmp.join("EBWebView").join("Default").join("SingletonCookie");
+        std::fs::write(&lock1, b"1").unwrap();
+        std::fs::write(&lock2, b"1").unwrap();
+        std::fs::write(&lock3, b"1").unwrap();
+
+        let removed = clear_stale_webview_locks(&tmp);
+        assert_eq!(removed, 3);
+        assert!(!lock1.exists());
+        assert!(!lock2.exists());
+        assert!(!lock3.exists());
+        assert!(cookies_file.exists());
+        assert!(storage_file.exists());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

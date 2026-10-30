@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
+import "./tauriBrowserShim";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 

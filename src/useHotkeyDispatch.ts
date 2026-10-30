@@ -79,9 +79,12 @@ export function useHotkeyDispatch(
           }
         }
       }
-    }).then((u) => {
-      unlisten = u;
-    });
+    }).then(
+      (u) => {
+        unlisten = u;
+      },
+      () => {}
+    );
     return () => {
       alive = false;
       unlisten?.();

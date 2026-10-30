@@ -785,8 +785,7 @@ fn build_clipboard_window(app: &AppHandle) -> Result<(), String> {
         .build()
         .map_err(|e| format!("could not open clipboard history: {e}"))?;
     position_clipboard_window(app, &win);
-    let _ = win.show();
-    let _ = win.set_focus();
+    crate::windows::ensure_on_visible_monitor(app, &win);
     Ok(())
 }
 
@@ -795,12 +794,15 @@ fn build_clipboard_window(app: &AppHandle) -> Result<(), String> {
 /// thread, never on a sync command thread or the main thread.
 pub fn toggle_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(WINDOW_LABEL) {
-        if w.is_visible().unwrap_or(false) {
+        if w.is_visible().unwrap_or(false)
+            && !w.is_minimized().unwrap_or(false)
+            && crate::windows::is_window_on_visible_monitor(app, &w)
+        {
             let _ = w.hide();
         } else {
+            let _ = w.unminimize();
             position_clipboard_window(app, &w);
-            let _ = w.show();
-            let _ = w.set_focus();
+            crate::windows::ensure_on_visible_monitor(app, &w);
         }
         return;
     }

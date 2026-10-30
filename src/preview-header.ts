@@ -2,6 +2,7 @@
 // so we import `invoke` from @tauri-apps/api like the main app does — the
 // window.__TAURI__ global is never injected (withGlobalTauri stays false on
 // purpose, so site webviews never get the IPC bridge).
+import "./tauriBrowserShim";
 import { invoke } from "@tauri-apps/api/core";
 
 declare global {

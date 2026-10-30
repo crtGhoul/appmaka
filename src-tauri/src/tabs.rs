@@ -649,6 +649,7 @@ fn build_tabbed_window(
     let window = builder
         .build()
         .map_err(|e| format!("could not open tabbed window: {e}"))?;
+    crate::windows::ensure_on_visible_monitor(app, &window);
     if let Some(entry) = args.entry {
         crate::procattr::capture_new_processes(
             app.clone(),

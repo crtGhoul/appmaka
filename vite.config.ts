@@ -6,7 +6,34 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: "appmaka-tauri-internals-shim",
+      transform(code, id) {
+        if (id.includes("@tauri-apps/")) {
+          return code
+            .replaceAll(
+              "window.__TAURI_INTERNALS__",
+              "window.__APPMAKA_INTERNALS__"
+            )
+            .replaceAll(
+              "window.__TAURI_EVENT_PLUGIN_INTERNALS__",
+              "window.__APPMAKA_EVENT_INTERNALS__"
+            );
+        }
+        return null;
+      },
+    },
+  ],
+  optimizeDeps: {
+    exclude: [
+      "@tauri-apps/api",
+      "@tauri-apps/plugin-opener",
+      "@tauri-apps/plugin-process",
+      "@tauri-apps/plugin-updater",
+    ],
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
@@ -33,9 +60,10 @@ export default defineConfig(async () => ({
   },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 1420,
+    port: 3000,
     strictPort: true,
-    host: host || false,
+    host: host || "0.0.0.0",
+    allowedHosts: true,
     hmr: host
       ? {
           protocol: "ws",
