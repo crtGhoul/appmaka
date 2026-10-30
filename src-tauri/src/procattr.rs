@@ -259,6 +259,18 @@ pub fn account_memory(app: tauri::AppHandle) -> Vec<AccountMemory> {
         .collect()
 }
 
+impl ProcessAttribution {
+    /// PIDs currently attributed to one account (v0.18.6 self-heal
+    /// lookup). Empty when nothing was captured for the account.
+    pub fn pids_for(&self, app_id: &str, account_id: &str) -> HashSet<u32> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&account_key(app_id, account_id)).cloned())
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
