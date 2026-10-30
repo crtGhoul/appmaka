@@ -300,10 +300,10 @@ pub fn clear_stale_webview_locks(session_dir: &Path) -> usize {
     for dir in &candidate_dirs {
         for name in &LOCK_NAMES {
             let p = dir.join(name);
-            if p.exists() || std::fs::symlink_metadata(&p).is_ok() {
-                if std::fs::remove_file(&p).is_ok() {
-                    removed += 1;
-                }
+            if (p.exists() || std::fs::symlink_metadata(&p).is_ok())
+                && std::fs::remove_file(&p).is_ok()
+            {
+                removed += 1;
             }
         }
     }
@@ -335,7 +335,7 @@ pub fn terminate_orphaned_webview2_for_session(
         .to_ascii_lowercase();
     let attributed_pids: HashSet<u32> = app
         .try_state::<crate::procattr::ProcessAttribution>()
-        .and_then(|attr| attr.pids_for(app_id, account_id))
+        .map(|attr| attr.pids_for(app_id, account_id))
         .unwrap_or_default();
 
     let mut killed = 0usize;
@@ -355,10 +355,8 @@ pub fn terminate_orphaned_webview2_for_session(
                     .contains(&session_norm)
             });
         let is_attributed = attributed_pids.contains(&pid.as_u32());
-        if cmd_matches || is_attributed {
-            if proc_.kill() {
-                killed += 1;
-            }
+        if (cmd_matches || is_attributed) && proc_.kill() {
+            killed += 1;
         }
     }
     // If command-line inspection was restricted by the OS and nothing matched
@@ -505,14 +503,6 @@ pub struct WindowState {
 }
 
 impl WindowState {
-    /// v0.16.4: seed the URLs a session restore saved, for
-    /// open_account_placed to consume as the windows open.
-    pub(crate) fn seed_restore_urls(&self, urls: HashMap<String, String>) {
-        if let Ok(mut guard) = self.restore_urls.lock() {
-            guard.extend(urls);
-        }
-    }
-
     /// Take (one-shot) the restore-seeded URL for a window label.
     pub(crate) fn take_restore_url(&self, label: &str) -> Option<String> {
         self.restore_urls
@@ -628,19 +618,17 @@ pub(crate) const WEBVIEW2_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msP
 /// The stored last-visited URL a fresh open of this account should land
 /// on, if one exists (v0.16.4). An in-progress session restore seeds
 /// its saved URLs in memory (taken one-shot — a later manual reopen
-/// must not inherit them); outside a restore, the session file is the
-/// source (it still holds the entry after a crash, before any restore
-/// ran). None means "nothing stored — use the app's home URL".
+/// must not inherit them). Session files no longer carry last URLs
+/// (v0.18.6), so outside a restore there is no stored URL to fall back
+/// to. None means "nothing stored — use the app's home URL".
 fn stored_last_url(
-    app: &AppHandle,
+    _app: &AppHandle,
     winstate: &WindowState,
-    app_id: &str,
-    account_id: &str,
+    _app_id: &str,
+    _account_id: &str,
     label: &str,
 ) -> Option<String> {
-    winstate
-        .take_restore_url(label)
-        .or_else(|| crate::session::stored_account_last_url(app, app_id, account_id))
+    winstate.take_restore_url(label)
 }
 
 /// Open an account's window, or focus it if it is already open. The window is
