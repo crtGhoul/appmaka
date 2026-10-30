@@ -33,6 +33,7 @@ use tauri::{AppHandle, Manager};
 // it compiles there and under `test` (its suite runs on every
 // platform); a Linux release build doesn't carry it at all.
 #[cfg(any(windows, test))]
+#[allow(dead_code)] // Live on Windows; on Linux it only compiles under test cfg.
 mod doh;
 /// AppMaka-owned scriptlet implementations (v0.18.4). Unconditional:
 /// scriptlet injection runs on every platform, unlike network blocking.
