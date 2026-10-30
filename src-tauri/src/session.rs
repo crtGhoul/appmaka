@@ -516,7 +516,7 @@ pub fn search_live_query(app: &AppHandle) -> Option<String> {
 pub fn write_session(app: &AppHandle) {
     let prev = load_session(app);
     let mut accounts = Vec::new();
-    for (label, app_id, account_id, opened_at) in windows::live_tracked_accounts(app) {
+    for (label, app_id, account_id, opened_at, _last_url) in windows::live_tracked_accounts(app) {
         let rect = merge_rect(
             app.get_webview_window(&label)
                 .as_ref()
