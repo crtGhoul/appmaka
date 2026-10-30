@@ -463,7 +463,7 @@ fn build_search_window(
     match builder.build() {
         Ok(window) => {
             #[cfg(windows)]
-            crate::adblock::attach_network_blocking(&window, adblock, adblock_flag);
+            crate::adblock::attach_network_blocking(&window, adblock, adblock_flag, url.as_str().to_string());
             #[cfg(windows)]
             crate::windows::attach_fullscreen_sync(&window);
             // v0.9.6: DWM shadow on the frameless window + caption strip
