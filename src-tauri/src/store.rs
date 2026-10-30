@@ -51,7 +51,7 @@ pub struct AppSettings {
 }
 
 fn default_auto_close_minutes() -> u32 {
-    30
+    15
 }
 
 fn default_popup_policy() -> String {
@@ -63,7 +63,7 @@ fn default_true() -> bool {
 }
 
 fn default_auto_suspend_minutes() -> u64 {
-    30
+    15
 }
 
 impl Default for AppSettings {
@@ -72,8 +72,8 @@ impl Default for AppSettings {
             popup_policy: "block".to_string(),
             popup_allowlist: Vec::new(),
             adblock_enabled: true,
-            auto_suspend_minutes: 30,
-            auto_close_minutes: 30,
+            auto_suspend_minutes: 15,
+            auto_close_minutes: 15,
         }
     }
 }
@@ -127,6 +127,13 @@ pub struct Account {
     /// `settings.adblock_enabled`.
     #[serde(default)]
     pub adblock_enabled: Option<bool>,
+    /// v0.18.5: Keep Awake — when true this account's window is never
+    /// auto-suspended, auto-closed, low-memory-throttled, or evicted
+    /// by the window cap, whether or not audio is detected (the
+    /// music-window lock). `None`/false = normal idle rules. Old
+    /// records migrate via the serde default (off).
+    #[serde(default)]
+    pub keep_awake: Option<bool>,
     /// Old records without it migrate to 0 (treated as "long ago").
     #[serde(default)]
     pub last_opened: u64,
@@ -177,6 +184,15 @@ impl WebApp {
             .and_then(|a| a.adblock_enabled)
             .unwrap_or(self.settings.adblock_enabled)
     }
+
+    /// v0.18.5: whether this account's window is locked awake.
+    pub fn effective_keep_awake(&self, account_id: &str) -> bool {
+        self.accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .and_then(|a| a.keep_awake)
+            .unwrap_or(false)
+    }
 }
 
 /// The v0 shape (before accounts/settings existed). Kept only so old
@@ -202,6 +218,88 @@ fn unix_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+/// The session-dir layout every install on disk already uses:
+/// `sessions/<app_id>/<account_id>`. Creation sites single-source the
+/// layout here so the collision resolver below compares against exactly
+/// what account creation writes.
+fn legacy_session_dir(root: &Path, app_id: &str, account_id: &str) -> PathBuf {
+    root.join(app_id).join(account_id)
+}
+
+/// Every live account's (app_id, account_id, stored session dir), in
+/// store order. Store order is insertion order, which is what makes the
+/// seniority rule in `resolve_session_dir` deterministic.
+fn dir_claims(apps: &[WebApp]) -> Vec<(String, String, PathBuf)> {
+    apps.iter()
+        .flat_map(|a| {
+            a.accounts
+                .iter()
+                .map(|ac| (a.id.clone(), ac.id.clone(), PathBuf::from(&ac.session_dir)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Case-folded path components for collision comparison. Folding case
+/// on every platform is deliberate: the data dir can live on a
+/// case-insensitive filesystem (NTFS/APFS) whatever the OS, and two
+/// accounts sharing one WebView2 user-data folder would mix logins —
+/// the failure session isolation exists to prevent. Ids containing
+/// separators ("a/b") collapse naturally here because Path splits them
+/// into components before comparison.
+fn session_dir_key(dir: &Path) -> Vec<String> {
+    dir.components()
+        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .collect()
+}
+
+/// The collision suffix for a pair: "-h" + 8 hex of FNV-1a-32 over
+/// "app_id\0account_id", appended to the dir's final component.
+/// Hand-rolled FNV because DefaultHasher's output is not stable across
+/// Rust releases, and the suffixed name holds a login — it must never
+/// drift between builds.
+fn suffixed_session_dir(dir: &Path, app_id: &str, account_id: &str) -> PathBuf {
+    let mut hash: u32 = 0x811c_9dc5;
+    for &b in format!("{app_id}\0{account_id}").as_bytes() {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    let name = dir
+        .file_name()
+        .map(|n| format!("{}-h{hash:08x}", n.to_string_lossy()))
+        .unwrap_or_else(|| format!("session-h{hash:08x}"));
+    dir.with_file_name(name)
+}
+
+/// The session dir an account should actually open, given every live
+/// account's claim. Generated ids (`app-<millis>-<n>`) can never
+/// collide, so normally this is the stored dir unchanged. But a
+/// hand-edited apps.json can carry ids whose dirs land on the same
+/// folder (separator ids like "a/b" + "c" vs "a" + "b/c", or ids
+/// differing only by case on a case-insensitive filesystem). Sharing a
+/// dir would silently merge two accounts' logins, so the junior pair —
+/// every colliding pair after the first in store order — is redirected
+/// to a hash-suffixed sibling. The senior pair keeps the legacy dir:
+/// store order is insertion order, so the senior pair is the incumbent
+/// whose logins already live there.
+fn resolve_session_dir(
+    claims: &[(String, String, PathBuf)],
+    app_id: &str,
+    account_id: &str,
+    stored: &Path,
+) -> PathBuf {
+    let key = session_dir_key(stored);
+    let claimed_earlier = claims
+        .iter()
+        .take_while(|(a, c, _)| !(a == app_id && c == account_id))
+        .any(|(_, _, dir)| session_dir_key(dir) == key);
+    if claimed_earlier {
+        suffixed_session_dir(stored, app_id, account_id)
+    } else {
+        stored.to_path_buf()
+    }
 }
 
 fn new_id(prefix: &str) -> String {
@@ -366,10 +464,8 @@ impl AppStore {
         let mut apps = Vec::with_capacity(legacy.len());
         for old in legacy {
             let account_id = new_id("acct");
-            let session_dir = data_dir
-                .join("sessions")
-                .join(&old.id)
-                .join(&account_id);
+            let session_dir =
+                legacy_session_dir(&data_dir.join("sessions"), &old.id, &account_id);
             fs::create_dir_all(&session_dir)
                 .map_err(|e| format!("could not create session dir: {e}"))?;
             apps.push(WebApp {
@@ -390,6 +486,7 @@ impl AppStore {
                     auto_suspend_minutes: None,
                     auto_close_minutes: None,
                     adblock_enabled: None,
+                    keep_awake: None,
                     last_opened: 0,
                     created_at: now,
                 }],
@@ -472,7 +569,7 @@ impl AppStore {
         let now = unix_secs();
         let app_id = new_id("app");
         let account_id = new_id("acct");
-        let session_dir = self.sessions_root().join(&app_id).join(&account_id);
+        let session_dir = legacy_session_dir(&self.sessions_root(), &app_id, &account_id);
         fs::create_dir_all(&session_dir)
             .map_err(|e| format!("could not create session dir: {e}"))?;
 
@@ -494,6 +591,7 @@ impl AppStore {
                 auto_suspend_minutes: None,
                 auto_close_minutes: None,
                 adblock_enabled: None,
+                keep_awake: None,
                 last_opened: 0,
                 created_at: now,
             }],
@@ -551,7 +649,7 @@ impl AppStore {
             let now = unix_secs();
             let app_id = existing.id.clone();
             let account_id = new_id("acct");
-            let session_dir = self.sessions_root().join(&app_id).join(&account_id);
+            let session_dir = legacy_session_dir(&self.sessions_root(), &app_id, &account_id);
             crate::preview::move_session_dir(temp_dir, &session_dir)?;
             // Best-effort thumbnail, fetched before the write lock.
             let thumbnail = self.fetch_thumbnail(&url);
@@ -570,6 +668,7 @@ impl AppStore {
                 auto_suspend_minutes: None,
                 auto_close_minutes: None,
                 adblock_enabled: None,
+                keep_awake: None,
                 last_opened: 0,
                 created_at: now,
             };
@@ -595,7 +694,7 @@ impl AppStore {
         let now = unix_secs();
         let app_id = new_id("app");
         let account_id = new_id("acct");
-        let session_dir = self.sessions_root().join(&app_id).join(&account_id);
+        let session_dir = legacy_session_dir(&self.sessions_root(), &app_id, &account_id);
         crate::preview::move_session_dir(temp_dir, &session_dir)?;
         // Best-effort thumbnail, fetched before the write lock.
         let thumbnail = self.fetch_thumbnail(&url);
@@ -622,6 +721,7 @@ impl AppStore {
                 auto_suspend_minutes: None,
                 auto_close_minutes: None,
                 adblock_enabled: None,
+                keep_awake: None,
                 last_opened: 0,
                 created_at: now,
             }],
@@ -875,7 +975,7 @@ impl AppStore {
 
         let now = unix_secs();
         let account_id = new_id("acct");
-        let session_dir = self.sessions_root().join(app_id).join(&account_id);
+        let session_dir = legacy_session_dir(&self.sessions_root(), app_id, &account_id);
         fs::create_dir_all(&session_dir)
             .map_err(|e| format!("could not create session dir: {e}"))?;
 
@@ -902,6 +1002,7 @@ impl AppStore {
                 auto_suspend_minutes: None,
                 auto_close_minutes: None,
                 adblock_enabled: None,
+                keep_awake: None,
                 last_opened: 0,
                 created_at: now,
             };
@@ -920,21 +1021,36 @@ impl AppStore {
                 .apps
                 .lock()
                 .map_err(|e| format!("store lock poisoned: {e}"))?;
+            // Resolve before removing: the dir this account actually
+            // opens (see resolve_session_dir). Under a dir collision the
+            // stored path belongs to the senior account, not this one,
+            // and deleting it would wipe the senior's login.
+            let (pos, resolved) = {
+                let app = apps
+                    .iter()
+                    .find(|a| a.id == app_id)
+                    .ok_or_else(|| "App not found.".to_string())?;
+                if app.accounts.len() <= 1 {
+                    return Err(
+                        "An app must keep at least one account — remove the app instead."
+                            .to_string(),
+                    );
+                }
+                let pos = app
+                    .accounts
+                    .iter()
+                    .position(|a| a.id == account_id)
+                    .ok_or_else(|| "Account not found.".to_string())?;
+                let claims = dir_claims(&apps);
+                let stored = PathBuf::from(&app.accounts[pos].session_dir);
+                (pos, resolve_session_dir(&claims, app_id, account_id, &stored))
+            };
             let app = apps
                 .iter_mut()
                 .find(|a| a.id == app_id)
                 .ok_or_else(|| "App not found.".to_string())?;
-            if app.accounts.len() <= 1 {
-                return Err(
-                    "An app must keep at least one account — remove the app instead.".to_string(),
-                );
-            }
-            let pos = app
-                .accounts
-                .iter()
-                .position(|a| a.id == account_id)
-                .ok_or_else(|| "Account not found.".to_string())?;
-            app.accounts.remove(pos).session_dir
+            app.accounts.remove(pos);
+            resolved.to_string_lossy().into_owned()
         };
         let _ = fs::remove_dir_all(session_dir);
         self.save()
@@ -948,6 +1064,51 @@ impl AppStore {
     /// (Interim allow: called by the `forget_login` command, which the
     /// coordinator registers in main.rs.)
     #[allow(dead_code)]
+    /// v0.18.5: set one account's Keep Awake lock (persists).
+    pub fn set_account_keep_awake(
+        &self,
+        app_id: &str,
+        account_id: &str,
+        keep_awake: bool,
+    ) -> Result<(), String> {
+        {
+            let mut apps = self
+                .apps
+                .lock()
+                .map_err(|e| format!("store lock poisoned: {e}"))?;
+            let account = apps
+                .iter_mut()
+                .find(|a| a.id == app_id)
+                .and_then(|a| a.accounts.iter_mut().find(|ac| ac.id == account_id))
+                .ok_or_else(|| "Account not found.".to_string())?;
+            account.keep_awake = Some(keep_awake);
+        }
+        self.save()
+    }
+
+    /// v0.18.5: set one account's persisted adblock override (the
+    /// strip Shield toggle persists, not just the live flag).
+    pub fn set_account_adblock(
+        &self,
+        app_id: &str,
+        account_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        {
+            let mut apps = self
+                .apps
+                .lock()
+                .map_err(|e| format!("store lock poisoned: {e}"))?;
+            let account = apps
+                .iter_mut()
+                .find(|a| a.id == app_id)
+                .and_then(|a| a.accounts.iter_mut().find(|ac| ac.id == account_id))
+                .ok_or_else(|| "Account not found.".to_string())?;
+            account.adblock_enabled = Some(enabled);
+        }
+        self.save()
+    }
+
     pub fn forget_account_session(&self, app_id: &str, account_id: &str) -> Result<(), String> {
         // The stored absolute path is the source of truth, so only this
         // account's directory is ever touched.
@@ -982,14 +1143,17 @@ impl AppStore {
     /// Absolute session-dir path for an account. The caller (window opener)
     /// needs it before any window exists, so this is separate from the record.
     pub fn session_dir_for(&self, app_id: &str, account_id: &str) -> Result<PathBuf, String> {
-        self.apps
+        let apps = self
+            .apps
             .lock()
-            .map_err(|e| format!("store lock poisoned: {e}"))?
+            .map_err(|e| format!("store lock poisoned: {e}"))?;
+        let stored = apps
             .iter()
             .find(|a| a.id == app_id)
             .and_then(|a| a.accounts.iter().find(|ac| ac.id == account_id))
             .map(|ac| PathBuf::from(&ac.session_dir))
-            .ok_or_else(|| "Account not found.".to_string())
+            .ok_or_else(|| "Account not found.".to_string())?;
+        Ok(resolve_session_dir(&dir_claims(&apps), app_id, account_id, &stored))
     }
 }
 
@@ -1004,8 +1168,8 @@ mod tests {
         assert_eq!(s.popup_policy, "allow");
         assert!(s.popup_allowlist.is_empty());
         assert!(s.adblock_enabled);
-        assert_eq!(s.auto_suspend_minutes, 30);
-        assert_eq!(s.auto_close_minutes, 30);
+        assert_eq!(s.auto_suspend_minutes, 15);
+        assert_eq!(s.auto_close_minutes, 15);
     }
 
     #[test]
@@ -1078,5 +1242,182 @@ mod tests {
         // path), rather than silently becoming a broken record.
         let bad: Result<WebApp, _> = serde_json::from_str(r#"{"name":"No id"}"#);
         assert!(bad.is_err());
+    }
+
+    // -- Session-dir partition boundaries --------------------------------
+    // Two accounts sharing one dir would merge their logins — the exact
+    // failure session isolation exists to prevent. Generated ids are
+    // collision-proof, so these fixtures model hand-edited apps.json ids:
+    // separators, case variants, unicode.
+
+    fn claims_for(root: &Path, pairs: &[(&str, &str)]) -> Vec<(String, String, PathBuf)> {
+        pairs
+            .iter()
+            .map(|(a, c)| {
+                (
+                    a.to_string(),
+                    c.to_string(),
+                    legacy_session_dir(root, a, c),
+                )
+            })
+            .collect()
+    }
+
+    fn resolved_for(root: &Path, pairs: &[(&str, &str)], pair: (&str, &str)) -> PathBuf {
+        let claims = claims_for(root, pairs);
+        let stored = legacy_session_dir(root, pair.0, pair.1);
+        resolve_session_dir(&claims, pair.0, pair.1, &stored)
+    }
+
+    #[test]
+    fn session_dirs_pairwise_distinct_for_tricky_ids() {
+        let root = Path::new("/data/sessions");
+        let pairs: Vec<(&str, &str)> = vec![
+            ("app-100-0", "acct-100-0"), // generated shape
+            ("app-100-0", "acct-100-1"), // second account, same app
+            ("a/b", "c"),                // separator injection...
+            ("a", "b/c"),                // ...same folder, split differently
+            ("App", "Main"),             // case variant...
+            ("app", "main"),             // ...collides on case-insensitive FS
+            ("CAFÉ", "compte"),          // unicode case variant
+            ("café", "Compte"),
+            ("café", "acct"),            // unicode, no collision
+            ("日本語", "アカウント"),     // unicode, no collision
+            ("..", "x"),                 // dotdot id escapes the root — still distinct
+            ("a b", "c d"),              // spaces
+        ];
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for pair in &pairs {
+            let dir = resolved_for(root, &pairs, *pair);
+            assert!(
+                !seen.contains(&dir),
+                "dir collision: {pair:?} resolved to {dir:?}, already claimed by {seen:?}"
+            );
+            seen.push(dir);
+        }
+        // Pairs that collide with nobody keep the legacy layout exactly —
+        // an existing login dir is never renamed without a collision.
+        for pair in [
+            ("app-100-0", "acct-100-0"),
+            ("app-100-0", "acct-100-1"),
+            ("café", "acct"),
+            ("日本語", "アカウント"),
+            ("a b", "c d"),
+        ] {
+            assert_eq!(
+                resolved_for(root, &pairs, pair),
+                legacy_session_dir(root, pair.0, pair.1),
+                "non-colliding pair {pair:?} must keep its legacy dir"
+            );
+        }
+    }
+
+    #[test]
+    fn session_dir_stable_for_same_pair() {
+        let root = Path::new("/data/sessions");
+        let pairs = [("a/b", "c"), ("a", "b/c"), ("gh", "acct-1")];
+        // Same inputs, fresh claims: the answer is a pure function of the
+        // live list, so repeat lookups (one per window open) never drift.
+        assert_eq!(
+            resolved_for(root, &pairs, ("a", "b/c")),
+            resolved_for(root, &pairs, ("a", "b/c"))
+        );
+        assert_eq!(
+            resolved_for(root, &pairs, ("gh", "acct-1")),
+            resolved_for(root, &pairs, ("gh", "acct-1"))
+        );
+        // Unrelated accounts joining the list don't move existing pairs.
+        let bigger = [
+            ("a/b", "c"),
+            ("a", "b/c"),
+            ("gh", "acct-1"),
+            ("other", "acct-9"),
+        ];
+        assert_eq!(
+            resolved_for(root, &pairs, ("gh", "acct-1")),
+            resolved_for(root, &bigger, ("gh", "acct-1"))
+        );
+        assert_eq!(
+            resolved_for(root, &pairs, ("a", "b/c")),
+            resolved_for(root, &bigger, ("a", "b/c"))
+        );
+    }
+
+    #[test]
+    fn session_dir_collision_goes_to_the_junior_pair() {
+        let root = Path::new("/data/sessions");
+        let pairs = [("a/b", "c"), ("a", "b/c")];
+        let legacy = legacy_session_dir(root, "a", "b/c");
+        // Senior pair (first in store order) keeps the legacy dir — its
+        // logins are the ones already on disk there.
+        assert_eq!(resolved_for(root, &pairs, ("a/b", "c")), legacy);
+        // Junior pair gets the hash-suffixed sibling: final component is
+        // the legacy account segment + "-h" + 8 lowercase hex.
+        let junior = resolved_for(root, &pairs, ("a", "b/c"));
+        assert_ne!(junior, legacy);
+        let name = junior.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("c-h"), "unexpected suffix shape: {name}");
+        let hex = &name[name.len() - 8..];
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        // The suffix is stable: it recomputes to itself.
+        assert_eq!(junior, suffixed_session_dir(&legacy, "a", "b/c"));
+        // Seniority follows store order: reversed list, reversed outcome.
+        let reversed = [("a", "b/c"), ("a/b", "c")];
+        assert_eq!(resolved_for(root, &reversed, ("a", "b/c")), legacy);
+        assert_ne!(resolved_for(root, &reversed, ("a/b", "c")), legacy);
+        // Case-only twins collide too (the comparison case-folds).
+        let case_pairs = [("App", "Main"), ("app", "main")];
+        assert_eq!(
+            resolved_for(root, &case_pairs, ("App", "Main")),
+            legacy_session_dir(root, "App", "Main")
+        );
+        assert_ne!(
+            resolved_for(root, &case_pairs, ("app", "main")),
+            legacy_session_dir(root, "app", "main")
+        );
+        // Two different juniors on the same senior get different suffixes
+        // (the hash covers the pair, not the dir).
+        let triple = [("a", "b/c"), ("a/b", "c"), ("a//b", "c")];
+        let j1 = resolved_for(root, &triple, ("a/b", "c"));
+        let j2 = resolved_for(root, &triple, ("a//b", "c"));
+        assert_ne!(j1, j2);
+        assert_ne!(j1, legacy_session_dir(root, "a", "b/c"));
+        assert_eq!(
+            resolved_for(root, &triple, ("a", "b/c")),
+            legacy_session_dir(root, "a", "b/c")
+        );
+    }
+
+    #[test]
+    fn fixed_dirs_never_collide_with_session_dirs() {
+        // websearch.rs's search dir and windows.rs's private dirs live
+        // outside `sessions/` entirely; preview.rs's temp dirs sit
+        // directly inside it as a single ".preview-<id>" component.
+        // Those fns need an AppHandle, so this pins the path shapes they
+        // compose (see search_data_dir / preview dir / private dir code).
+        let data = Path::new("/data");
+        let sessions = data.join("sessions");
+        let websearch = data.join("websearch");
+        let private_root = data.join("private_sessions");
+        for pair in [
+            ("app-1", "acct-1"),
+            ("websearch", "acct-1"), // an app literally named like the fixed dir
+            (".preview-3", "acct-1"),
+            ("private_sessions", "acct-1"),
+        ] {
+            let dir = legacy_session_dir(&sessions, pair.0, pair.1);
+            // Session dirs are always under sessions/; the fixed roots
+            // are siblings, so no equality is possible.
+            assert!(dir.starts_with(&sessions));
+            assert_ne!(session_dir_key(&dir), session_dir_key(&websearch));
+            assert_ne!(session_dir_key(&dir), session_dir_key(&private_root));
+            // A preview dir is sessions/<one component>; a session dir
+            // has an account component below the app component, so even
+            // an app id starting ".preview-" can't reach one.
+            for n in 0..8 {
+                let preview = sessions.join(format!(".preview-{n}"));
+                assert_ne!(session_dir_key(&dir), session_dir_key(&preview));
+            }
+        }
     }
 }
