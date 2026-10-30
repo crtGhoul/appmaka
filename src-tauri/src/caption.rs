@@ -330,6 +330,16 @@ mod imp {
         /// v0.12.0: back-button hover/pressed for plain page strips.
         hover_back: bool,
         pressed_back: bool,
+        /// v0.18.5: forward/reload/shield/keep-awake hover/pressed for
+        /// plain page strips (account windows only).
+        hover_forward: bool,
+        pressed_forward: bool,
+        hover_reload: bool,
+        pressed_reload: bool,
+        hover_shield: bool,
+        pressed_shield: bool,
+        hover_awake: bool,
+        pressed_awake: bool,
         /// v0.13.0: close (X) button hover/pressed for plain page strips.
         /// Tabbed strips use hover_tab/pressed_tab with TabHit::CloseWindow.
         hover_close: bool,
@@ -430,14 +440,20 @@ mod imp {
     /// v0.12.0: back button for plain page strips — a left-edge slot the
     /// same size as the window buttons, mirroring button_rect_at.
     fn back_button_rect(hwnd: HWND, scale: f64) -> Option<RECT> {
+        left_button_rect(hwnd, scale, 0)
+    }
+
+    /// v0.18.5: left-edge slots for the plain page strip, same size as
+    /// the window buttons: 0 = back, 1 = forward, 2 = reload.
+    fn left_button_rect(hwnd: HWND, scale: f64, slot: i32) -> Option<RECT> {
         unsafe {
             let mut rc = RECT::default();
             GetClientRect(hwnd, &mut rc).ok()?;
             let bw = (BTN_W_LOGICAL * scale).round() as i32;
             Some(RECT {
-                left: rc.left,
+                left: rc.left + bw * slot,
                 top: rc.top,
-                right: rc.left + bw,
+                right: rc.left + bw * (slot + 1),
                 bottom: rc.bottom,
             })
         }
@@ -484,10 +500,16 @@ mod imp {
         }
         // Snapshot everything the paint needs under one short borrow, then
         // paint with no borrow held (the v0.9.7 two-phase rule).
-        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, page_tint, hover_tab, pressed_tab, hover_back, pressed_back, hover_close, pressed_close, page_title) =
+        let (scale, owner, hover_min, pressed_min, hover_max, pressed_max, tabbed, page_tint, hover_tab, pressed_tab, hover_back, pressed_back, hover_close, pressed_close, page_title, hover_forward, pressed_forward, hover_reload, pressed_reload, hover_shield, pressed_shield, hover_awake, pressed_awake, is_account, shield_on, awake_on) =
             with_chrome(|ch| {
                 let label = ch.by_hwnd.get(&(hwnd.0 as isize))?;
                 let cp = ch.captions.get(label)?;
+                // v0.18.5: strip state glyphs read live here (no Win32
+                // calls inside the snapshot — only state locks), so a
+                // toggle from the launcher repaints correctly.
+                let is_account = label.starts_with("acct-");
+                let (shield_on, awake_on) =
+                    crate::windows::window_strip_state(&ch.app, label);
                 Some((
                     cp.scale,
                     cp.owner,
@@ -504,9 +526,20 @@ mod imp {
                     cp.hover_close,
                     cp.pressed_close,
                     cp.page_title.clone(),
+                    cp.hover_forward,
+                    cp.pressed_forward,
+                    cp.hover_reload,
+                    cp.pressed_reload,
+                    cp.hover_shield,
+                    cp.pressed_shield,
+                    cp.hover_awake,
+                    cp.pressed_awake,
+                    is_account,
+                    shield_on,
+                    awake_on,
                 ))
             })
-            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None, None, false, false, false, false, String::new()));
+            .unwrap_or((1.0, HWND::default(), false, false, false, false, None, None, None, None, false, false, false, false, String::new(), false, false, false, false, false, false, false, false, false, false, false));
 
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
@@ -657,17 +690,18 @@ mod imp {
                         text_color
                     },
                 );
-                // Title: left-aligned after the back button, room reserved
-                // for the min/max/close slots on the right.
+                // Title: left-aligned after the back/forward/reload
+                // buttons, room reserved for the close/max/min/shield/
+                // awake slots on the right.
                 if !page_title.is_empty() {
                     let btn_w = btn.right - btn.left;
                     let pad = (8.0 * scale).round() as i32;
                     let mut rc = RECT::default();
                     let _ = GetClientRect(hwnd, &mut rc);
                     let title_rc = RECT {
-                        left: rc.left + btn_w + pad,
+                        left: rc.left + btn_w * 3 + pad,
                         top: rc.top,
-                        right: rc.right - btn_w * 3 - pad,
+                        right: rc.right - btn_w * 5 - pad,
                         bottom: rc.bottom,
                     };
                     if title_rc.right > title_rc.left {
@@ -680,6 +714,24 @@ mod imp {
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
                         );
                     }
+                }
+            }
+            // v0.18.5: quick controls for account strips only — never
+            // on tabbed strips (no single account to act on) or
+            // non-account strips (a button that no-ops is a fake
+            // button). Shield and awake glyphs carry live state.
+            if is_account {
+                if let Some(btn) = left_button_rect(hwnd, scale, 1) {
+                    paint_text_button(hdc, btn, hover_forward, pressed_forward, "→", scale, false);
+                }
+                if let Some(btn) = left_button_rect(hwnd, scale, 2) {
+                    paint_text_button(hdc, btn, hover_reload, pressed_reload, "↻", scale, false);
+                }
+                if let Some(btn) = button_rect_at(hwnd, scale, 3) {
+                    paint_shield_button(hdc, btn, hover_shield, pressed_shield, shield_on, scale);
+                }
+                if let Some(btn) = button_rect_at(hwnd, scale, 4) {
+                    paint_text_button(hdc, btn, hover_awake, pressed_awake, "♪", scale, awake_on);
                 }
             }
         }
@@ -720,6 +772,81 @@ mod imp {
             _ => rgb(204, 204, 204),
         };
         draw_text_centered(hdc, btn, "×", scale, color);
+    }
+
+    /// v0.18.5: one text-glyph strip button (forward, reload, awake):
+    /// hover/press background like the back button, glyph centered.
+    /// `bright` is the live state (awake lock) — state glyphs read
+    /// bright even without hover.
+    unsafe fn paint_text_button(
+        hdc: HDC,
+        btn: RECT,
+        hover: bool,
+        pressed: bool,
+        text: &str,
+        scale: f64,
+        bright: bool,
+    ) {
+        if hover || pressed {
+            let bbg = CreateSolidBrush(if pressed {
+                rgb(46, 46, 46)
+            } else {
+                rgb(58, 58, 58)
+            });
+            FillRect(hdc, &btn, bbg);
+            let _ = DeleteObject(hbrush_to_obj(bbg));
+        }
+        let color = if hover || pressed || bright {
+            rgb(255, 255, 255)
+        } else {
+            rgb(204, 204, 204)
+        };
+        draw_text_centered(hdc, btn, text, scale, color);
+    }
+
+    /// v0.18.5: shield outline for the adblock toggle, drawn with a
+    /// pen — no font glyph to gamble on. Bright when adblock is on.
+    unsafe fn paint_shield_button(
+        hdc: HDC,
+        btn: RECT,
+        hover: bool,
+        pressed: bool,
+        on: bool,
+        scale: f64,
+    ) {
+        if hover || pressed {
+            let bbg = CreateSolidBrush(if pressed {
+                rgb(46, 46, 46)
+            } else {
+                rgb(58, 58, 58)
+            });
+            FillRect(hdc, &btn, bbg);
+            let _ = DeleteObject(hbrush_to_obj(bbg));
+        }
+        let color = if hover || pressed || on {
+            rgb(255, 255, 255)
+        } else {
+            rgb(204, 204, 204)
+        };
+        let pen = CreatePen(PS_SOLID, (1.0 * scale).max(1.0) as i32, color);
+        let old = SelectObject(hdc, HGDIOBJ(pen.0));
+        let bw = btn.right - btn.left;
+        let bh = btn.bottom - btn.top;
+        let cx = btn.left + bw / 2;
+        let w = (9.0 * scale).round() as i32;
+        let h = (11.0 * scale).round() as i32;
+        let top = btn.top + (bh - h) / 2;
+        let pts = [
+            POINT { x: cx - w, y: top },
+            POINT { x: cx + w, y: top },
+            POINT { x: cx + w, y: top + h * 2 / 3 },
+            POINT { x: cx, y: top + h },
+            POINT { x: cx - w, y: top + h * 2 / 3 },
+            POINT { x: cx - w, y: top },
+        ];
+        let _ = Polyline(hdc, &pts);
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
     }
 
     /// DrawTextW helper: single-line, vertically centered text in a rect.
@@ -937,6 +1064,21 @@ mod imp {
             // keep their tab layout).
             let over_back = cp.tabbed.is_none()
                 && back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
+            // v0.18.5: quick controls — account strips only, same
+            // press-and-release shape as back/close.
+            let is_account = label.starts_with("acct-");
+            let over_forward = cp.tabbed.is_none()
+                && is_account
+                && left_button_rect(hwnd, cp.scale, 1).is_some_and(|b| pt_in_rect(x, y, &b));
+            let over_reload = cp.tabbed.is_none()
+                && is_account
+                && left_button_rect(hwnd, cp.scale, 2).is_some_and(|b| pt_in_rect(x, y, &b));
+            let over_shield = cp.tabbed.is_none()
+                && is_account
+                && button_rect_at(hwnd, cp.scale, 3).is_some_and(|b| pt_in_rect(x, y, &b));
+            let over_awake = cp.tabbed.is_none()
+                && is_account
+                && button_rect_at(hwnd, cp.scale, 4).is_some_and(|b| pt_in_rect(x, y, &b));
             // v0.13.0: close (X) button for plain page strips, rightmost
             // slot (Windows order).
             let over_close = cp.tabbed.is_none()
@@ -950,12 +1092,24 @@ mod imp {
             } else if over_back {
                 cp.pressed_back = true;
                 SetCapture(hwnd);
+            } else if over_forward {
+                cp.pressed_forward = true;
+                SetCapture(hwnd);
+            } else if over_reload {
+                cp.pressed_reload = true;
+                SetCapture(hwnd);
+            } else if over_shield {
+                cp.pressed_shield = true;
+                SetCapture(hwnd);
+            } else if over_awake {
+                cp.pressed_awake = true;
+                SetCapture(hwnd);
             } else if over_close {
                 cp.pressed_close = true;
                 SetCapture(hwnd);
             }
             let _ = InvalidateRect(Some(hwnd), None, false);
-            if over_max || over_min || over_back || over_close {
+            if over_max || over_min || over_back || over_forward || over_reload || over_shield || over_awake || over_close {
                 Some(Down::None)
             } else if IsZoomed(cp.owner).as_bool() {
                 Some(Down::Restore(cp.owner))
@@ -1111,6 +1265,128 @@ mod imp {
                     .ok();
             }
         }
+        // v0.18.5: forward / reload / shield / keep-awake, same
+        // press-and-release shape as back. Toggles repaint the strip
+        // (their glyphs carry live state) after the state flips.
+        let forward_click = with_chrome(|ch| {
+            let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
+            let cp = ch.captions.get_mut(&label)?;
+            if !cp.pressed_forward {
+                return None;
+            }
+            cp.pressed_forward = false;
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let over = left_button_rect(hwnd, cp.scale, 1)
+                .is_some_and(|b| pt_in_rect(x, y, &b));
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            over.then(|| label.clone())
+        });
+        if let Some(label) = forward_click {
+            if let Some(app) = with_chrome(|ch| Some(ch.app.clone())) {
+                std::thread::Builder::new()
+                    .name("appmaka-strip-forward".to_string())
+                    .spawn(move || {
+                        if let Some(w) = app.get_webview_window(&label) {
+                            let _ = w.eval("history.forward()");
+                        }
+                    })
+                    .ok();
+            }
+        }
+        let reload_click = with_chrome(|ch| {
+            let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
+            let cp = ch.captions.get_mut(&label)?;
+            if !cp.pressed_reload {
+                return None;
+            }
+            cp.pressed_reload = false;
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let over = left_button_rect(hwnd, cp.scale, 2)
+                .is_some_and(|b| pt_in_rect(x, y, &b));
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            over.then(|| label.clone())
+        });
+        if let Some(label) = reload_click {
+            if let Some(app) = with_chrome(|ch| Some(ch.app.clone())) {
+                std::thread::Builder::new()
+                    .name("appmaka-strip-reload".to_string())
+                    .spawn(move || {
+                        if let Some(w) = app.get_webview_window(&label) {
+                            let _ = w.eval("location.reload()");
+                        }
+                    })
+                    .ok();
+            }
+        }
+        let shield_click = with_chrome(|ch| {
+            let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
+            let cp = ch.captions.get_mut(&label)?;
+            if !cp.pressed_shield {
+                return None;
+            }
+            cp.pressed_shield = false;
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let over = button_rect_at(hwnd, cp.scale, 3)
+                .is_some_and(|b| pt_in_rect(x, y, &b));
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            over.then(|| label.clone())
+        });
+        if let Some(label) = shield_click {
+            if let Some(app) = with_chrome(|ch| Some(ch.app.clone())) {
+                // HWND is not Send: cross the thread boundary as an
+                // address and rebuild it inside the thread.
+                let strip_raw = hwnd.0 as isize;
+                std::thread::Builder::new()
+                    .name("appmaka-strip-shield".to_string())
+                    .spawn(move || {
+                        let _ = crate::windows::toggle_account_adblock(&app, &label);
+                        let _ = InvalidateRect(
+                            Some(HWND(strip_raw as *mut std::ffi::c_void)),
+                            None,
+                            false,
+                        );
+                    })
+                    .ok();
+            }
+        }
+        let awake_click = with_chrome(|ch| {
+            let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
+            let cp = ch.captions.get_mut(&label)?;
+            if !cp.pressed_awake {
+                return None;
+            }
+            cp.pressed_awake = false;
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+            let over = button_rect_at(hwnd, cp.scale, 4)
+                .is_some_and(|b| pt_in_rect(x, y, &b));
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            over.then(|| label.clone())
+        });
+        if let Some(label) = awake_click {
+            if let Some(app) = with_chrome(|ch| Some(ch.app.clone())) {
+                // HWND is not Send: cross as an address, rebuild inside.
+                let strip_raw = hwnd.0 as isize;
+                std::thread::Builder::new()
+                    .name("appmaka-strip-awake".to_string())
+                    .spawn(move || {
+                        let _ = crate::windows::toggle_account_keep_awake(&app, &label);
+                        let _ = InvalidateRect(
+                            Some(HWND(strip_raw as *mut std::ffi::c_void)),
+                            None,
+                            false,
+                        );
+                    })
+                    .ok();
+            }
+        }
         // v0.13.0: close (X) button press-and-release for plain page
         // strips. Recompute the hit at release; only a matching
         // press+release closes. User intent: pinned windows get the
@@ -1195,18 +1471,17 @@ mod imp {
             }
             TabHit::Add => show_add_tab_menu(&app, &label),
             TabHit::CloseWindow => {
-                // v0.13.11 (user's ask): the strip X closes the ACTIVE
-                // TAB, not the whole group — each tab is a different app
-                // to the user, and the X taking both down was the top
-                // tabbed-window complaint ("close just the one I
-                // choose"). Same semantics as the Esc+LMB gesture:
-                // active tab closes; the last tab closes the window,
-                // pin-aware. Whole-group close still lives on the
-                // dashboard rows and the OS window close (Alt+F4).
+                // v0.16.2 (user's reversal of v0.13.11): the strip X
+                // closes the WHOLE window, like every other window's X —
+                // closing only the active tab left the window standing
+                // and read as a broken close. Pin-aware via
+                // close_tabbed_window; the Esc+LMB gesture keeps its
+                // tab-level semantics (it points at a tab, the X points
+                // at the window).
                 std::thread::Builder::new()
                     .name("appmaka-tab-close".to_string())
                     .spawn(move || {
-                        crate::tabs::gesture_close_active_tab(&app, &label)
+                        crate::tabs::close_window_for_label(&app, &label)
                     })
                     .ok();
             }
@@ -1441,17 +1716,39 @@ mod imp {
             // v0.12.0: back-button hover for plain page strips.
             let hover_back = cp.tabbed.is_none()
                 && back_button_rect(hwnd, cp.scale).is_some_and(|b| pt_in_rect(x, y, &b));
+            // v0.18.5: quick-control hover — account strips only.
+            let is_account = label.starts_with("acct-");
+            let hover_forward = cp.tabbed.is_none()
+                && is_account
+                && left_button_rect(hwnd, cp.scale, 1).is_some_and(|b| pt_in_rect(x, y, &b));
+            let hover_reload = cp.tabbed.is_none()
+                && is_account
+                && left_button_rect(hwnd, cp.scale, 2).is_some_and(|b| pt_in_rect(x, y, &b));
+            let hover_shield = cp.tabbed.is_none()
+                && is_account
+                && button_rect_at(hwnd, cp.scale, 3).is_some_and(|b| pt_in_rect(x, y, &b));
+            let hover_awake = cp.tabbed.is_none()
+                && is_account
+                && button_rect_at(hwnd, cp.scale, 4).is_some_and(|b| pt_in_rect(x, y, &b));
             // v0.13.0: close (X) hover for plain page strips.
             let hover_close = cp.tabbed.is_none()
                 && button_rect_at(hwnd, cp.scale, 0).is_some_and(|b| pt_in_rect(x, y, &b));
             if hover_min != cp.hover_min
                 || hover_max != cp.hover_max
                 || hover_back != cp.hover_back
+                || hover_forward != cp.hover_forward
+                || hover_reload != cp.hover_reload
+                || hover_shield != cp.hover_shield
+                || hover_awake != cp.hover_awake
                 || hover_close != cp.hover_close
             {
                 cp.hover_min = hover_min;
                 cp.hover_max = hover_max;
                 cp.hover_back = hover_back;
+                cp.hover_forward = hover_forward;
+                cp.hover_reload = hover_reload;
+                cp.hover_shield = hover_shield;
+                cp.hover_awake = hover_awake;
                 cp.hover_close = hover_close;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
@@ -1490,6 +1787,10 @@ mod imp {
             cp.hover_min = false;
             cp.hover_max = false;
             cp.hover_back = false;
+            cp.hover_forward = false;
+            cp.hover_reload = false;
+            cp.hover_shield = false;
+            cp.hover_awake = false;
             cp.hover_close = false;
             cp.hover_tab = None;
             let _ = InvalidateRect(Some(hwnd), None, false);
@@ -2188,6 +2489,14 @@ mod imp {
                     pressed_max: false,
                     hover_back: false,
                     pressed_back: false,
+                    hover_forward: false,
+                    pressed_forward: false,
+                    hover_reload: false,
+                    pressed_reload: false,
+                    hover_shield: false,
+                    pressed_shield: false,
+                    hover_awake: false,
+                    pressed_awake: false,
                     hover_close: false,
                     pressed_close: false,
                     mouse_in: false,
