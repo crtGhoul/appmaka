@@ -203,6 +203,14 @@ pub fn start_preview(
         if let Some((x, y)) = windows::cursor_centered_position(app, 1200.0, 800.0) {
             site_builder = site_builder.position(x, y);
         }
+        // The preview's contained popups share this throwaway folder
+        // and carry the standard browser arguments, so the site window
+        // must carry them too (see windows::WEBVIEW2_BROWSER_ARGS).
+        #[cfg(windows)]
+        {
+            site_builder =
+                site_builder.additional_browser_args(windows::WEBVIEW2_BROWSER_ARGS);
+        }
         // v0.13.18: previews get the same standard page kit as account
         // windows. The cursor matters most: the drawn pointer is the
         // only visible mouse for users whose native cursor doesn't
@@ -242,6 +250,7 @@ pub fn start_preview(
             &site,
             adblock,
             Arc::new(AtomicBool::new(true)),
+            url.clone(),
         );
 
         // Control window: our own UI, parked just above the site window and
