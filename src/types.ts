@@ -92,12 +92,34 @@ export interface CustomProgram {
   icon_path: string | null;
 }
 
+/** A saved dock layout (v0.18.0): the pins and edge snapshotted under a name. */
+export interface DockProfile {
+  name: string;
+  /** Which screen edge the dock hugged when saved: "bottom" | "left" | "right". */
+  edge: string;
+  /** Tagged pinned tile ids, same shape as LauncherSettings.pinned. */
+  pins: string[];
+}
+
 /** Summon hotkey + run-at-startup + launcher panel look, stored in launcher.json on the backend. */
 export interface LauncherSettings {
   hotkey: string;
   autostart: boolean;
   /** Launcher panel translucency, 0.3 (faint) .. 1.0 (solid). Backend always sends it (serde default). */
   panel_opacity: number;
+  /** Whether the workspace dock (pinned tiles on a screen edge) is shown. Backend always sends it (serde default). */
+  dock_enabled: boolean;
+  /** Which screen edge the dock hugs: "bottom" | "left" | "right". Backend always sends it (serde default). */
+  dock_edge: string;
+  /** Global hotkey that shows/hides the dock; "" = unbound. Backend always sends it (serde default). */
+  dock_hotkey: string;
+  /** Saved dock profiles (v0.18.0). Backend always sends them (serde default). */
+  dock_profiles: DockProfile[];
+  /**
+   * Name of the profile the current pins + edge were applied from, "" when
+   * they match none (v0.18.0). Backend always sends it (serde default).
+   */
+  dock_active_profile: string;
   /**
    * Tagged ids of pinned tiles (`app:<id>`, `account:<id>`, `program:<id>`);
    * pins span all tile kinds, so the kind prefix disambiguates.
@@ -116,6 +138,13 @@ export interface LauncherSettings {
   monitor_mode: "cursor" | "primary";
   /** Whether to silently check for updates on startup (and every 24h). */
   auto_update_check: boolean;
+  /** Whether a found update downloads in the background (v0.16.4). Backend always sends it (serde default). */
+  auto_update_download: boolean;
+  /**
+   * Version of an update that finished downloading in an earlier run and is
+   * waiting to install (v0.16.4). Backend always sends it; null when none.
+   */
+  pending_update_version: string | null;
   /** Web-search engine for the launcher's `?query` command. Backend always sends it (serde default). */
   search_engine: "duckduckgo" | "google";
   /**
@@ -259,6 +288,19 @@ export interface OpenAccountWindow {
   pinned: boolean;
   /** v0.15.0: unread count from the live page title; null/undefined = no badge. */
   unread?: number | null;
+  /**
+   * v0.16.4: the window is open but frozen in place (Windows-only —
+   * always false on other platforms). Backend always sends it.
+   */
+  suspended: boolean;
+  /** v0.18.5: WebView2 reports the document is playing audio. */
+  playingAudio: boolean;
+  /** v0.18.5: the account's Keep Awake lock. */
+  keepAwake: boolean;
+  /** v0.18.5: live document.title (the track title for music apps). */
+  pageTitle: string;
+  /** v0.18.5: the window's live adblock flag. */
+  adblockOn: boolean;
 }
 
 /** v0.15.0: one account's attributed RSS, from `account_memory`. */
@@ -283,6 +325,8 @@ export interface TabSummary {
   accountId: string;
   appName: string;
   accountLabel: string;
+  /** v0.16.4: unread count from the tab's last live page title; null/undefined = no badge. */
+  unread?: number | null;
 }
 
 export interface TabbedWindowInfo {
