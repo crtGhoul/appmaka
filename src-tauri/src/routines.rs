@@ -379,6 +379,8 @@ pub async fn run_routine(
                             app_id: item.app_id.clone(),
                             account_id,
                             last_url: None,
+                            page_title: String::new(),
+                            page_title_seen: false,
                         });
                         Ok(())
                     } else {
