@@ -563,6 +563,11 @@ export function IconGrid({
   ramFor,
   sleepingFor,
   suspendedFor,
+  playingFor,
+  awakeFor,
+  adblockFor,
+  openFor,
+  onTileAction,
   onTileContextMenu,
   numberHints,
 }: {
@@ -583,6 +588,16 @@ export function IconGrid({
   sleepingFor?: (r: SearchResult) => boolean;
   /** Suspended (open but frozen, Windows-only) accounts (v0.16.4). Optional. */
   suspendedFor?: (r: SearchResult) => boolean;
+  /** Now-playing track title per result (v0.18.5). Undefined = not playing. Optional. */
+  playingFor?: (r: SearchResult) => string | undefined;
+  /** Keep Awake lock per result (v0.18.5). Optional. */
+  awakeFor?: (r: SearchResult) => boolean;
+  /** Live adblock flag per result (v0.18.5). Optional. */
+  adblockFor?: (r: SearchResult) => boolean;
+  /** Whether the result's window is open (v0.18.5). Gates the hover actions. Optional. */
+  openFor?: (r: SearchResult) => boolean;
+  /** Quick action from a tile's hover controls (v0.18.5). Optional. */
+  onTileAction?: (r: SearchResult, action: string) => void;
   /** Right-click on a tile. Receives the result and the cursor position. Optional. */
   onTileContextMenu?: (r: SearchResult, x: number, y: number) => void;
 }) {
@@ -654,6 +669,97 @@ export function IconGrid({
               Sleeping
             </span>
           ) : null}
+          {/* v0.18.5: Now Playing pill — live track title while the
+              window reports playing audio. Clicking it still opens /
+              focuses the window (it lives inside the tile button). */}
+          {(() => {
+            const title = playingFor?.(r);
+            if (title == null) return null;
+            const short = title.length > 32 ? `${title.slice(0, 31)}…` : title;
+            return (
+              <span className="tile-now-playing" title={title || "Now playing"}>
+                {title ? `♪ Now playing · ${short}` : "♪ Now playing"}
+              </span>
+            );
+          })()}
+          {/* v0.18.5: state badges for open windows — Awake, Adblock
+              on. Playing is covered by the pill above. */}
+          {awakeFor?.(r) ? (
+            <span className="tile-state-badge" title="Keep Awake is on — this window is never auto-suspended or auto-closed">
+              Awake
+            </span>
+          ) : null}
+          {adblockFor?.(r) ? (
+            <span className="tile-state-badge" title="Ad blocking is on for this window">
+              Adblock on
+            </span>
+          ) : null}
+          {/* v0.18.5: hover actions for open tiles only. Spans, not
+              nested buttons — the tile itself is a button — with
+              keyboard activation so the flow stays keyboard-usable. */}
+          {openFor?.(r) && onTileAction ? (
+            <span className="tile-quick-actions" onClick={(e) => e.stopPropagation()}>
+              <span
+                role="button"
+                tabIndex={0}
+                className="tile-quick-action"
+                title="Reload this window"
+                aria-label="Reload this window"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onTileAction(r, "reload");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onTileAction(r, "reload");
+                  }
+                }}
+              >
+                ↻
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                className="tile-quick-action"
+                title="Toggle ad blocking for this window (reloads the page)"
+                aria-label="Toggle ad blocking"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onTileAction(r, "toggle_adblock");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onTileAction(r, "toggle_adblock");
+                  }
+                }}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                  <path d="M8 1.5l5 2v4.2c0 3.4-2.2 5.6-5 6.8-2.8-1.2-5-3.4-5-6.8V3.5l5-2z" />
+                </svg>
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                className="tile-quick-action"
+                title="Toggle Keep Awake — never auto-suspend or auto-close this window"
+                aria-label="Toggle Keep Awake"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onTileAction(r, "toggle_keep_awake");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onTileAction(r, "toggle_keep_awake");
+                  }
+                }}
+              >
+                ♪
+              </span>
+            </span>
+          ) : null}
         </button>
       ))}
     </div>
@@ -671,11 +777,14 @@ export function QuickSwitchPalette({
   onActivate,
   onClose,
   renderIcon,
+  playingFor,
 }: {
   items: SearchResult[];
   onActivate: (r: SearchResult) => void;
   onClose: () => void;
   renderIcon: (r: SearchResult) => React.ReactNode;
+  /** Now-playing track title per result (v0.18.5). Optional. */
+  playingFor?: (r: SearchResult) => string | undefined;
 }) {
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -759,6 +868,16 @@ export function QuickSwitchPalette({
                   {r.context ? (
                     <span className="palette-sub">{r.context}</span>
                   ) : null}
+                  {(() => {
+                    const title = playingFor?.(r);
+                    if (title == null) return null;
+                    const short = title.length > 32 ? `${title.slice(0, 31)}…` : title;
+                    return (
+                      <span className="palette-now-playing" title={title || "Now playing"}>
+                        {title ? `♪ ${short}` : "♪ Now playing"}
+                      </span>
+                    );
+                  })()}
                   {query.trim() !== "" && i < 9 ? (
                     <span className="palette-key" aria-hidden="true">
                       Alt+{i + 1}
