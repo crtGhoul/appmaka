@@ -213,11 +213,15 @@ fn run_tabs_flow(app: &AppHandle) {
                     app_id: apps[0].clone(),
                     account_id: acc0.clone(),
                     last_url: None,
+                    page_title: String::new(),
+                    page_title_seen: false,
                 },
                 tabs::TabEntry {
                     app_id: apps[1].clone(),
                     account_id: acc1.clone(),
                     last_url: None,
+                    page_title: String::new(),
+                    page_title_seen: false,
                 },
             ],
             active: 1,
@@ -326,7 +330,10 @@ fn run_flow(app: &AppHandle, url: &str, mode: &str) {
                 eprintln!("[e2e] close mode: no popup row found");
                 return;
             };
-            match crate::windows::close_open_window(app.clone(), label.clone()) {
+            match tauri::async_runtime::block_on(crate::windows::close_open_window(
+                app.clone(),
+                label.clone(),
+            )) {
                 Ok(()) => eprintln!("[e2e] closed {label}"),
                 Err(e) => eprintln!("[e2e] close failed: {e}"),
             }
