@@ -22,6 +22,12 @@ use serde::Serialize;
 use std::time::Duration;
 use tauri::{AppHandle, Runtime};
 #[cfg(windows)]
+use std::path::PathBuf;
+#[cfg(windows)]
+use std::sync::Mutex;
+#[cfg(windows)]
+use tauri::Manager;
+#[cfg(windows)]
 use tauri::Emitter;
 
 /// Progress events emitted to the frontend while the MSI downloads.
@@ -89,6 +95,145 @@ pub fn msi_url_from_nsis_url(nsis_url: &str, version: &str) -> Result<String, St
         Some(i) if i + 1 < nsis_url.len() => Ok(format!("{}/{}", &nsis_url[..i], file)),
         _ => Err("couldn't work out the installer download link.".to_string()),
     }
+}
+
+/// Path of the MSI `download_msi_update` verified this session, waiting
+/// for `launch_msi_update`. In-memory on purpose: the bytes stay on disk
+/// in app-data, but a fresh app run re-downloads (and re-verifies) rather
+/// than launching a file it didn't check itself this session.
+#[cfg(windows)]
+static VERIFIED_MSI: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// File name of the stashed MSI inside app-data's `updates` folder.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn msi_file_name(version: &str) -> String {
+    format!("AppMaka-{version}-update.msi")
+}
+
+/// Download the MSI and verify its signature, then stash the verified
+/// file in app-data for `launch_msi_update`. Emits `msi-update-progress`
+/// events while downloading. Returns the downloaded version. Every
+/// failure returns a plain-language message for the Updates UI.
+#[tauri::command]
+pub async fn download_msi_update<R: Runtime>(
+    app: AppHandle<R>,
+    nsis_url: String,
+    version: String,
+) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (&app, nsis_url, version);
+        Err("MSI updates only apply on Windows.".to_string())
+    }
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        let record_app = app.clone();
+        let result =
+            tokio::task::spawn_blocking(move || run_msi_download(&app, &nsis_url, &version))
+                .await
+                .map_err(|e| format!("the update was interrupted ({e})."))
+                .and_then(|r| r);
+        if let Err(e) = &result {
+            // v0.11.0: recorded for Copy diagnostics. The updater panel
+            // shows the inline error itself, so no dialog here.
+            crate::errors::record(
+                &record_app,
+                "updater",
+                "The update couldn't be downloaded.",
+                e,
+                false,
+            );
+        }
+        result
+    }
+}
+
+/// Launch the MSI stashed by `download_msi_update` and exit into the
+/// installer. Only a file verified this session can be launched — with
+/// nothing stashed this refuses instead of guessing a path.
+#[tauri::command]
+pub async fn launch_msi_update<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        let _ = &app;
+        Err("MSI updates only apply on Windows.".to_string())
+    }
+    #[cfg(windows)]
+    {
+        let app = app.clone();
+        let record_app = app.clone();
+        let result = tokio::task::spawn_blocking(move || run_msi_launch(&app))
+            .await
+            .map_err(|e| format!("the update was interrupted ({e})."))
+            .and_then(|r| r);
+        if let Err(e) = &result {
+            crate::errors::record(
+                &record_app,
+                "updater",
+                "The update couldn't be installed.",
+                e,
+                false,
+            );
+        }
+        result
+    }
+}
+
+#[cfg(windows)]
+fn run_msi_download<R: Runtime>(
+    app: &AppHandle<R>,
+    nsis_url: &str,
+    version: &str,
+) -> Result<String, String> {
+    let msi_url = msi_url_from_nsis_url(nsis_url, version)?;
+
+    let msi_bytes = download_with_progress(app, &msi_url)?;
+
+    let sig_url = format!("{msi_url}.sig");
+    let sig_bytes = download_bytes(&sig_url)?;
+
+    let pubkey_b64 = updater_pubkey(app)?;
+    verify_msi_signature(&msi_bytes, &sig_bytes, &pubkey_b64, version)?;
+
+    let updates_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "couldn't save the downloaded update.".to_string())?
+        .join("updates");
+    std::fs::create_dir_all(&updates_dir)
+        .map_err(|_| "couldn't save the downloaded update.".to_string())?;
+    let msi_path = updates_dir.join(msi_file_name(version));
+    std::fs::write(&msi_path, &msi_bytes)
+        .map_err(|_| "couldn't save the downloaded update.".to_string())?;
+
+    *VERIFIED_MSI
+        .lock()
+        .map_err(|_| "the update state got tangled — restart AppMaka and try again.".to_string())? =
+        Some(msi_path);
+    Ok(version.to_string())
+}
+
+#[cfg(windows)]
+fn run_msi_launch<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let msi_path = VERIFIED_MSI
+        .lock()
+        .map_err(|_| "the update state got tangled — restart AppMaka and try again.".to_string())?
+        .take()
+        .ok_or_else(|| "No downloaded update is ready to install.".to_string())?;
+
+    launch_msiexec(&msi_path)?;
+
+    // The installer is now running detached. Exit immediately — staying
+    // alive even briefly lets Restart Manager see a process that refuses
+    // close requests (the main window hides to the tray), which wedges
+    // the app ("Not Responding"). The `msi-update-launched` emit is
+    // best-effort; the frontend also flips to "Installer launched" when
+    // this command resolves (see App.tsx).
+    let _ = app.emit("msi-update-launched", ());
+    app.exit(0);
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
 /// Download the MSI, verify its signature, and hand it to the Windows
