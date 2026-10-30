@@ -223,16 +223,25 @@ impl AdblockState {
 
     /// Should this request be blocked? Used by the Windows network hook.
     /// Fail-open: no engine, bad URL, or engine error => false (allow).
+    /// v0.18.5: `source_url` is the window's page URL, not the
+    /// subresource URL — domain-scoped `@@` exceptions (uBlock unbreak
+    /// / quick-fixes, e.g. `domain=youtube.com`) only match when the
+    /// engine sees the page the request came from. An empty source
+    /// falls back to the request URL (the old behavior).
     #[cfg(windows)]
-    pub fn check_request(&self, url: &str, request_type: &str, method: &str) -> bool {
+    pub fn check_request(
+        &self,
+        url: &str,
+        source_url: &str,
+        request_type: &str,
+        method: &str,
+    ) -> bool {
         let engine = match self.engine.read().ok().and_then(|g| g.clone()) {
             Some(e) => e,
             None => return false,
         };
-        // source_url = url: we don't track the initiating page here, so
-        // third-party-only rules won't fire — first-party and generic rules
-        // still do. Conservative, never breaks navigation.
-        let request = match Request::new(url, url, request_type, method) {
+        let source_url = if source_url.is_empty() { url } else { source_url };
+        let request = match Request::new(url, source_url, request_type, method) {
             Ok(r) => r,
             Err(_) => return false,
         };
@@ -265,6 +274,13 @@ impl AdblockState {
             None => return String::new(),
         };
         engine.url_cosmetic_resources(page_url).injected_script
+    }
+
+    /// v0.18.5: the YouTube ad-skipper script. Host-gated in JS itself,
+    /// so builders inject it into every account window; it no-ops off
+    /// YouTube. Not a filter scriptlet — no list rule references it.
+    pub fn yt_ad_skipper_js(&self) -> &'static str {
+        scriptlets::YT_AD_SKIPPER_JS
     }
 
     pub fn cosmetic_css_for(&self, page_url: &str) -> String {
@@ -315,10 +331,11 @@ pub fn attach_network_blocking(
     window: &tauri::WebviewWindow,
     state: &AdblockState,
     enabled: Arc<std::sync::atomic::AtomicBool>,
+    page_url: String,
 ) {
     let state = state.clone();
     let _ = window.with_webview(move |platform| {
-        hook_platform(platform, &state, enabled);
+        hook_platform(platform, &state, enabled, page_url);
     });
 }
 
@@ -328,6 +345,7 @@ fn hook_platform(
     platform: tauri::webview::PlatformWebview,
     state: &AdblockState,
     enabled: Arc<std::sync::atomic::AtomicBool>,
+    page_url: String,
 ) {
     use webview2_com::Microsoft::Web::WebView2::Win32::*;
     use webview2_com::WebResourceRequestedEventHandler;
@@ -352,7 +370,7 @@ fn hook_platform(
                       args: Option<ICoreWebView2WebResourceRequestedEventArgs>| {
                     // Never propagate an error out of here: fail open.
                     if enabled.load(std::sync::atomic::Ordering::Relaxed)
-                        && should_block(args.as_ref(), &state)
+                        && should_block(args.as_ref(), &state, &page_url)
                     {
                         if let Some(args) = args.as_ref() {
                             block_with_empty_response(args, &environment);
@@ -374,6 +392,7 @@ fn hook_platform(
 fn should_block(
     args: Option<&webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebResourceRequestedEventArgs>,
     state: &AdblockState,
+    page_url: &str,
 ) -> bool {
     use webview2_com::Microsoft::Web::WebView2::Win32::*;
     use webview2_com::take_pwstr;
@@ -411,7 +430,7 @@ fn should_block(
             .map(|()| resource_context_name(&context))
             .unwrap_or("other")
     };
-    state.check_request(&uri, request_type, &method)
+    state.check_request(&uri, page_url, request_type, &method)
 }
 
 /// Answer a blocked request with an empty 403. Errors are swallowed: if we
