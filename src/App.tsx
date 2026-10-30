@@ -573,6 +573,7 @@ function AccountPanel({
   onFillLogin,
   onSaveLogin,
   onSuspend,
+  onFixBlank,
   onEdit,
   onForgetLogin,
   onRemove,
@@ -585,6 +586,7 @@ function AccountPanel({
   onFillLogin: () => void;
   onSaveLogin: () => void;
   onSuspend: () => void;
+  onFixBlank: () => void;
   onEdit: () => void;
   onForgetLogin: () => void;
   onRemove: () => void;
@@ -636,6 +638,13 @@ function AccountPanel({
           </button>
           <button className="text-button" onClick={done(onSuspend)}>
             Suspend
+          </button>
+          <button
+            className="text-button"
+            onClick={done(onFixBlank)}
+            title="Close this window and reopen it fresh. Your login and session data are kept — only the renderer is rebuilt."
+          >
+            Fix blank page
           </button>
         </div>
         <div className="account-panel-group">
@@ -1196,7 +1205,7 @@ function AddAccountForm({
 function adblockStateLabel(adblockEnabled: boolean, networkAdblock: boolean): string {
   if (!adblockEnabled) return "Ad blocking: off";
   if (networkAdblock) return "Ad blocking: on — network + cosmetic";
-  return "Ad blocking: on — cosmetic only (network blocking is Windows-only)";
+  return "Ad blocking: on — cosmetic + scriptlets (network blocking is Windows-only)";
 }
 
 function AppSettingsForm({
@@ -2627,6 +2636,14 @@ function AppShell() {
   // either open (possibly suspended) or closed by reclaim (sleeping) —
   // never both at once.
   const [suspendedKeys, setSuspendedKeys] = useState<Set<string>>(new Set());
+  // v0.18.5: Now Playing titles, Keep Awake locks, and live adblock
+  // flags for open windows, keyed the same way. Only open windows
+  // appear in the poll, so presence here implies open.
+  const [playingTitles, setPlayingTitles] = useState<Map<string, string>>(
+    new Map()
+  );
+  const [awakeKeys, setAwakeKeys] = useState<Set<string>>(new Set());
+  const [adblockKeys, setAdblockKeys] = useState<Set<string>>(new Set());
   const refreshWindowPins = useCallback(async () => {
     try {
       const ramTimeout = new Promise<AccountMemory[]>((resolve) =>
@@ -2673,6 +2690,20 @@ function AppShell() {
             .map((w) => `${w.appId}:${w.accountId}`)
         )
       );
+      // v0.18.5: Now Playing / Awake / Adblock state for open windows.
+      const playing = new Map<string, string>();
+      const awake = new Set<string>();
+      const adblocked = new Set<string>();
+      for (const w of wins) {
+        if (!w.accountId) continue;
+        const key = `${w.appId}:${w.accountId}`;
+        if (w.playingAudio) playing.set(key, w.pageTitle);
+        if (w.keepAwake) awake.add(key);
+        if (w.adblockOn) adblocked.add(key);
+      }
+      setPlayingTitles(playing);
+      setAwakeKeys(awake);
+      setAdblockKeys(adblocked);
       const ramMap = new Map<string, number>();
       for (const m of ram) {
         if (m.rssKb > 0) {
@@ -3306,6 +3337,38 @@ function AppShell() {
     }
   }
 
+  /** v0.18.5: tile hover actions (reload / shield / keep-awake). */
+  async function handleTileAction(r: SearchResult, action: string) {
+    if (r.kind !== "account") return;
+    setError(null);
+    try {
+      await invoke("account_window_command", {
+        appId: r.app.id,
+        accountId: r.account.id,
+        action,
+      });
+      await refreshWindowPins();
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  }
+
+  /** v0.18.5: close an account window and reopen it fresh — the
+      no-data-loss fix for a stuck or blank window. */
+  async function handleFixBlankAccount(app: WebApp, account: Account) {
+    setError(null);
+    try {
+      await invoke("fix_account_window", {
+        appId: app.id,
+        accountId: account.id,
+      });
+      await refreshWindowPins();
+      setNotice(`Reopened "${account.label}" fresh.`);
+    } catch (err) {
+      setError(`Could not fix "${account.label}". ${errMsg(err)}`);
+    }
+  }
+
   /** v0.7.0: "Forget this login" confirm dialog's Confirm button. */
   async function handleForgetLoginConfirm() {
     const target = forgetLoginTarget;
@@ -3710,7 +3773,7 @@ function AppShell() {
       {platform && !platform.network_adblock && (
         <div className="banner banner-info" role="status">
           Network-level ad blocking is Windows-only in this build. On this device you still
-          get popup blocking and cosmetic ad hiding.
+          get popup blocking, cosmetic ad hiding, and scriptlet blocking.
         </div>
       )}
       {platform && platform.network_adblock && platform.filter_lists_state === "loading" && (
@@ -3757,6 +3820,11 @@ function AppShell() {
             }}
             onClose={() => setPaletteOpen(false)}
             renderIcon={renderResultIcon}
+            playingFor={(r) =>
+              r.kind === "account"
+                ? playingTitles.get(`${r.app.id}:${r.account.id}`)
+                : undefined
+            }
           />
         )}
         <div
@@ -3944,6 +4012,27 @@ function AppShell() {
                     ? suspendedKeys.has(`${r.app.id}:${r.account.id}`)
                     : false
                 }
+                playingFor={(r) =>
+                  r.kind === "account"
+                    ? playingTitles.get(`${r.app.id}:${r.account.id}`)
+                    : undefined
+                }
+                awakeFor={(r) =>
+                  r.kind === "account"
+                    ? awakeKeys.has(`${r.app.id}:${r.account.id}`)
+                    : false
+                }
+                adblockFor={(r) =>
+                  r.kind === "account"
+                    ? adblockKeys.has(`${r.app.id}:${r.account.id}`)
+                    : false
+                }
+                openFor={(r) =>
+                  r.kind === "account"
+                    ? openLabels.has(`acct-${r.app.id}-${r.account.id}`)
+                    : false
+                }
+                onTileAction={(r, action) => void handleTileAction(r, action)}
                 onTileContextMenu={(r, x, y) => openTileMenu(r, x, y)}
               />
             )}
@@ -4408,6 +4497,9 @@ function AppShell() {
           }
           onSuspend={() =>
             void handleSuspendAccount(panelAccount.app, panelAccount.account)
+          }
+          onFixBlank={() =>
+            void handleFixBlankAccount(panelAccount.app, panelAccount.account)
           }
           onEdit={() =>
             setEditingAccount({ app: panelAccount.app, account: panelAccount.account })
