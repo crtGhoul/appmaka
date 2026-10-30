@@ -363,14 +363,12 @@ mod tests {
                 account_id: "acct1".to_string(),
                 rect: None,
                 pinned: true,
-                last_url: None,
             },
             SessionWindow::Account {
                 app_id: "app1".to_string(),
                 account_id: "acct2".to_string(),
                 rect: None,
                 pinned: false,
-                last_url: None,
             },
             SessionWindow::Search {
                 query: "q".to_string(),
