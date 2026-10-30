@@ -9,11 +9,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 
+/// Hosts queued for the background resolver + hosts already queued.
+type PendingQueue = (VecDeque<String>, HashSet<String>);
+
 pub struct DohSinkhole {
     path: PathBuf,
     enabled: bool,
     verdicts: Mutex<HashMap<String, bool>>,
-    pending: Arc<(Mutex< (VecDeque<String>, HashSet<String>) >, Condvar)>,
+    pending: Arc<(Mutex<PendingQueue>, Condvar)>,
 }
 
 impl DohSinkhole {
@@ -26,7 +29,7 @@ impl DohSinkhole {
             path,
             enabled,
             verdicts: Mutex::new(verdicts),
-            pending: Arc::new((Mutex::new((VecDeque::new(), HashSet::new())), Condvar::new())),
+            pending: Arc::new((Mutex::new(PendingQueue::default()), Condvar::new())),
         }
     }
 }
