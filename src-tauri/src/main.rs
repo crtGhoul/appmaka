@@ -1382,6 +1382,9 @@ fn main() {
             windows::close_open_window,
             windows::toggle_window_fullscreen,
             windows::list_open_account_windows,
+            // v0.18.5: strip / tile window actions + fix-blank-page.
+            windows::account_window_command,
+            windows::fix_account_window,
             // v0.9.11: "Add to applications" for popup windows.
             popup_add::popup_add_to_applications,
             windows::memory_snapshot,
