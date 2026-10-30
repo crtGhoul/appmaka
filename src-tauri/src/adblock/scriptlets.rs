@@ -163,18 +163,26 @@ function amEditApply(node, segs, idx) {
     amEditApply(child, segs, idx + 1);
 }
 function amEditWalk(node, parsed) {
-    if (parsed.recursive) {
-        amEditApply(node, parsed.segs, 0);
-        if (node !== null && typeof node === 'object') {
-            for (var k in node) {
-                if (Object.prototype.hasOwnProperty.call(node, k)) {
-                    amEditWalk(node[k], parsed);
+    // v0.18.5: one shared-object guard for the whole walk, so a
+    // subtree reachable twice is edited once instead of twice.
+    var seen = (typeof WeakSet === 'function') ? new WeakSet() : null;
+    function walk(n) {
+        if (n !== null && typeof n === 'object') {
+            if (seen) {
+                if (seen.has(n)) { return; }
+                seen.add(n);
+            }
+        }
+        amEditApply(n, parsed.segs, 0);
+        if (parsed.recursive && n !== null && typeof n === 'object') {
+            for (var k in n) {
+                if (Object.prototype.hasOwnProperty.call(n, k)) {
+                    walk(n[k]);
                 }
             }
         }
-        return;
     }
-    amEditApply(node, parsed.segs, 0);
+    walk(node);
 }
 "##;
 
@@ -205,13 +213,18 @@ const SET_JS: &str = r##"function set(path, valueStr) {
             } catch (e) {}
             return;
         }
+        // v0.18.5: never invent an object for a missing intermediate.
+        // Pre-populating `window.ytInitialPlayerResponse = {}` made
+        // YouTube's bootstrap see a truthy empty object and abort on a
+        // black screen. Hold the current value (possibly undefined)
+        // behind the accessor below instead: the getter returns it
+        // as-is, and the setter traps the leaf only once the page
+        // itself assigns a real object.
         var cur = null;
         try { cur = owner[seg]; } catch (e) {}
-        if (cur === null || (typeof cur !== 'object' && typeof cur !== 'function')) {
-            cur = {};
-            try { owner[seg] = cur; } catch (e) { return; }
+        if (cur !== null && (typeof cur === 'object' || typeof cur === 'function')) {
+            trap(cur, parts, idx + 1);
         }
-        trap(cur, parts, idx + 1);
         // Chain onto a previous set-rule's accessor for this same property
         // instead of replacing it, so several rules sharing an intermediate
         // (ytInitialPlayerResponse.playerAds + .adPlacements) all re-trap
@@ -285,7 +298,13 @@ const JSON_PRUNE_FETCH_RESPONSE_JS: &str = r##"function jsonPruneFetchResponse(p
                     if (!found) { return resp; }
                 }
                 try { amPrunePaths(data, paths); } catch (e) {}
-                return new Response(JSON.stringify(data), { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+                // v0.18.5: a fresh Response reports url "" — YouTube
+                // Music's browse/player handlers key off it, so carry
+                // the original url (and type) across onto the new one.
+                var outResp = new Response(JSON.stringify(data), { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+                try { Object.defineProperty(outResp, 'url', { value: resp.url, configurable: true }); } catch (e) {}
+                try { Object.defineProperty(outResp, 'type', { value: resp.type, configurable: true }); } catch (e) {}
+                return outResp;
             }).catch(function() { return resp; });
         });
     };
@@ -299,6 +318,10 @@ const JSON_EDIT_FETCH_RESPONSE_JS: &str = r##"function jsonEditFetchResponse(pat
     var parsed = amParseEditPattern(pattern);
     var origFetch = window.fetch;
     if (typeof origFetch !== 'function' || parsed === null) { return; }
+    // v0.18.5: an empty urlPattern used to mean "edit every fetch",
+    // which let this rule touch browse payloads it was never meant
+    // for. Without a pattern, install nothing.
+    if (typeof urlPattern !== 'string' || urlPattern === '') { return; }
     window.fetch = function(input, init) {
         var url = amFetchUrl(input);
         var should = (typeof urlPattern === 'string' && urlPattern !== '') ? amMatchUrl(urlPattern, url) : true;
@@ -308,7 +331,13 @@ const JSON_EDIT_FETCH_RESPONSE_JS: &str = r##"function jsonEditFetchResponse(pat
                 var data;
                 try { data = JSON.parse(text); } catch (e) { return resp; }
                 try { amEditWalk(data, parsed); } catch (e) {}
-                return new Response(JSON.stringify(data), { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+                // v0.18.5: carry the original url/type across (see the
+                // prune-fetch note above) — a blank url breaks the
+                // browse/player handlers downstream.
+                var outResp = new Response(JSON.stringify(data), { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+                try { Object.defineProperty(outResp, 'url', { value: resp.url, configurable: true }); } catch (e) {}
+                try { Object.defineProperty(outResp, 'type', { value: resp.type, configurable: true }); } catch (e) {}
+                return outResp;
             }).catch(function() { return resp; });
         });
     };
@@ -412,7 +441,12 @@ const TRUSTED_RPFR_JS: &str = r##"function trustedRpfr(pattern, replacement, url
         return origFetch.apply(this, arguments).then(function(resp) {
             if (!should) { return resp; }
             return resp.clone().text().then(function(text) {
-                return new Response(apply(text), { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+                // v0.18.5: carry the original url/type across — a
+                // blank url breaks the browse/player handlers.
+                var outResp = new Response(apply(text), { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+                try { Object.defineProperty(outResp, 'url', { value: resp.url, configurable: true }); } catch (e) {}
+                try { Object.defineProperty(outResp, 'type', { value: resp.type, configurable: true }); } catch (e) {}
+                return outResp;
             }).catch(function() { return resp; });
         });
     };
@@ -423,6 +457,57 @@ const TRUSTED_RPFR_JS: &str = r##"function trustedRpfr(pattern, replacement, url
 const NOWOIF_JS: &str = r##"function nowoif() {
     try { window.open = function() { return null; }; } catch (e) {}
 }"##;
+
+// v0.18.5: YouTube / YouTube Music ad-skipper fallback. This is NOT a
+// filter-rule scriptlet — no list references it — so it is injected
+// directly (see yt_ad_skipper_js_for) rather than via `resources()`.
+// Host-gated twice: Rust checks the page URL before injecting, and the
+// script itself checks location.hostname before doing anything, so it
+// is inert on every other site. While an ad is showing it mutes the ad
+// audio, clicks a skip button the moment one appears, or fast-forwards
+// the ad video — and only while `.ad-showing` holds. Audio it muted
+// itself is restored when the ad ends.
+pub const YT_AD_SKIPPER_JS: &str = r##"(function() {
+    if (window.__amYtSkipInstalled) { return; }
+    window.__amYtSkipInstalled = true;
+    var h = '';
+    try { h = location.hostname; } catch (e) {}
+    if (!(h === 'youtube.com' || h.endsWith('.youtube.com') || h === 'music.youtube.com' || h.endsWith('.music.youtube.com'))) { return; }
+    var mutedByUs = false;
+    function tick() {
+        var player = null;
+        try { player = document.querySelector('#movie_player'); } catch (e) {}
+        if (!player) { return; }
+        var ad = player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting');
+        var video = null;
+        try { video = player.querySelector('video'); } catch (e) {}
+        if (!ad) {
+            if (mutedByUs && video) { try { video.muted = false; } catch (e) {} }
+            mutedByUs = false;
+            return;
+        }
+        if (video && !video.muted) { try { video.muted = true; mutedByUs = true; } catch (e) {} }
+        var skip = null;
+        try { skip = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button'); } catch (e) {}
+        if (skip) { try { skip.click(); } catch (e) {} return; }
+        if (video && video.duration && isFinite(video.duration)) { try { video.currentTime = video.duration; } catch (e) {} }
+    }
+    try {
+        if (document.documentElement) {
+            var obs = new MutationObserver(function() { try { tick(); } catch (e) {} });
+            obs.observe(document.documentElement, { attributes: true, subtree: true, attributeFilter: ['class'] });
+        }
+    } catch (e) {}
+    try { setInterval(tick, 500); } catch (e) {}
+    try { tick(); } catch (e) {}
+})();"##;
+
+// Host-gated in JS itself (see the hostname check at the top), so
+// builders inject it into every account window: Tauri init scripts
+// run at document-start on every navigation, which is what makes the
+// skipper work when a window navigates onto YouTube mid-session, not
+// just when the app's home URL is YouTube. Off YouTube it returns
+// after one hostname read.
 
 fn resource(
     name: &str,
@@ -559,6 +644,70 @@ www.youtube.com##+js(trusted-replace-xhr-response, /"adPlacements.*?([A-Z]"\}|\}
             other.injected_script.is_empty(),
             "unexpected scriptlets for example.com: {}",
             other.injected_script
+        );
+    }
+
+    #[test]
+    fn set_never_prepopulates_missing_intermediates() {
+        // v0.18.5: the black-screen root cause was `cur = {}` for a
+        // missing intermediate (YouTube saw a truthy empty object).
+        // The node harness proves the runtime behavior; this pins the
+        // source so a future edit can't quietly reintroduce it.
+        assert!(
+            !SET_JS.contains("cur = {};"),
+            "set() must never invent an object for a missing intermediate"
+        );
+        assert!(
+            SET_JS.contains("held = cur;") || SET_JS.contains("var held = cur;"),
+            "set() must hold the current value behind its accessor"
+        );
+    }
+
+    #[test]
+    fn fetch_scriptlets_preserve_response_url_and_type() {
+        // v0.18.5: a fresh Response reports url "" — the wrappers must
+        // carry the original url/type across (the node harness proves
+        // it end to end; this pins the code).
+        for js in [
+            JSON_PRUNE_FETCH_RESPONSE_JS,
+            JSON_EDIT_FETCH_RESPONSE_JS,
+            TRUSTED_RPFR_JS,
+        ] {
+            assert!(
+                js.contains("defineProperty(outResp, 'url'"),
+                "fetch wrapper must preserve response.url"
+            );
+            assert!(
+                js.contains("defineProperty(outResp, 'type'"),
+                "fetch wrapper must preserve response.type"
+            );
+        }
+        assert!(
+            JSON_EDIT_FETCH_RESPONSE_JS
+                .contains("if (typeof urlPattern !== 'string' || urlPattern === '') { return; }"),
+            "json-edit-fetch-response must refuse an empty urlPattern"
+        );
+    }
+
+    #[test]
+    fn yt_ad_skipper_covers_the_ad_states() {
+        let js = YT_AD_SKIPPER_JS;
+        assert!(js.contains("ad-showing"), "skipper must watch .ad-showing");
+        assert!(
+            js.contains(".ytp-ad-skip-button"),
+            "skipper must click the skip button"
+        );
+        assert!(
+            js.contains("video.currentTime = video.duration"),
+            "skipper must fast-forward when no skip button exists"
+        );
+        assert!(
+            js.contains("mutedByUs"),
+            "skipper must restore audio it muted itself when the ad ends"
+        );
+        assert!(
+            js.contains("music.youtube.com"),
+            "skipper must gate on YouTube / YouTube Music hosts"
         );
     }
 
