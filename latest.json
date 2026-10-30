@@ -1,15 +1,15 @@
 {
-  "version": "0.18.4",
-  "notes": "Ad blocking that reaches video ads: scriptlet support for the uBlock filter lists (YouTube/YouTube Music player-data rules), running on Linux too. YouTube fights back, so this is maintenance via list updates, not a one-time fix. Live Linux run: app launches with the uBlock lists, example.com renders, close + launcher re-summon responsive; YouTube page blank in headless WebKit here, real YouTube behavior is the PC proof.",
-  "pub_date": "2026-10-28T13:16:58Z",
+  "version": "0.18.5",
+  "notes": "Black-screen fixes, background audio protection, caption strip controls, Now Playing tiles",
+  "pub_date": "2026-10-30T00:56:47Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1lmOSs3WW10enVUNWJBcFJQcUhxcHYyQlllb0hOU3hmRldDdWZJMlpQaHI2Sm9NSFQxa1lxeTVCemxMWDNid1d6Q2cydGFaanMzZGNXYVBrenhST2dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTkyODEzCWZpbGU6QXBwTWFrYV8wLjE4LjRfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguNAp6amxoSXU0WE1qdWdEOUMzcjcxL2hFd2taOW84SmJrbVMvcnhlZDdzc0QyVkJjbjM5MlZhMjU4LzNPdG1SeEFPcTcrRnI5QVA4RWdpcFR1c1p1TjVCQT09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.4/AppMaka_0.18.4_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1JES2FzZUw2Q0xrYmUyNXBDd0NJc2lnYlc3ekFmMEx6STBSdXhqVkVMdC9pY3phdUM3UU5lczJUd3lrWitCVlZnSU40bk1FS2FYUEdDMWFyWExhckFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzIxNzA0CWZpbGU6QXBwTWFrYV8wLjE4LjVfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguNQo4VUh0MGJZTms2YUoxTm9ZaDl4QXZtV0UzT0ZPYXNvQ0FZNDd5RjlLZjlEY1kvcW1GZ1UyVjRpYzRyVlRiL2FJcHpoT0xCMm1GeGpLMXJiUHg2TC9DZz09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.5/AppMaka_0.18.5_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2JPZHVYbGhmZnZib2ZHNXU3MXNDR3RCcXJLUHM1QW10TXlUOCtEbmJiQ0NTQllGVm13V0R2cnZvTytUSDEyVkMxbHliVDBNWlJmSTA1aThKbFBmNmdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTkzMzYzCWZpbGU6QXBwTWFrYV8wLjE4LjRfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjQKWE0rejYxTEtCREoyUHc3d2kwTVJpSEJjWHlsYTdKVzBEb3l5aDJQR3c3dVhDZitURm5nTkdDMTRIazdEVUU0OFRjK0s3STgrNEcwUkN4bHlXL2lQRGc9PQo=",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.4/AppMaka_0.18.4_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1ljY1IxNEpRemMvRjNmTjltS2ZlZUhZN2hINlRaOVhlZElwQlR5R2ZTTFVOK1RHVjVlN05wTHpZOUJTRUIvVFVwVmx1WXVHYm5SOVc1Q09CS1ljN2dJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzIxNjMzCWZpbGU6QXBwTWFrYV8wLjE4LjVfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjUKWlNHZ3pCT2svUXlBTnRnRTZQL0k2N2ZONXFKM09MNjN5bkt2eGpyL3lPSVpSNHdhVjFlcm8vcEtPbUYwRlp4cHZyVVJyWUlpTW5GYzgxVlB2VXk1Qnc9PQo=",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.5/AppMaka_0.18.5_amd64.AppImage"
     }
   }
 }
