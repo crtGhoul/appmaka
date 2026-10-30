@@ -10,7 +10,7 @@
 //! modals sharing the account's session), per-window activity tracking, and
 //! the auto-suspend watcher (TrySuspend on Windows, no-op on Linux).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -158,6 +158,13 @@ struct TrackedWindow {
 #[derive(Default)]
 pub struct WindowState {
     inner: Mutex<HashMap<String, TrackedWindow>>,
+    /// v0.18.5 (Windows): labels whose document is currently playing
+    /// audio, per WebView2's IsDocumentPlayingAudioChanged. Written by
+    /// the COM handler attached at window build (see
+    /// attach_audio_tracking); read by the idle guards. Empty on Linux
+    /// — WebKitGTK exposes no equivalent, so Linux windows rely on
+    /// Keep Awake alone for audio protection.
+    audio_playing: Mutex<HashSet<String>>,
     /// Last-visited URLs seeded by session restore (v0.16.4), keyed by
     /// window label. open_account_placed takes an entry one-shot as its
     /// window opens; leftovers (a restore entry whose window never
@@ -220,6 +227,12 @@ fn enforce_account_window_cap(app: &AppHandle, winstate: &WindowState) {
         // evicted to make room; the next-oldest unpinned window goes. If
         // every window is pinned, the cap yields and the open proceeds.
         labels.retain(|(label, _)| !crate::pin::is_pinned(app, label));
+        // v0.18.5: playing-audio and Keep Awake windows are never
+        // evicted either; if every window is protected, the cap yields
+        // the same way.
+        labels.retain(|(label, t)| {
+            !window_idle_protected(app, label, &t.app_id, &t.account_id)
+        });
         labels.sort_by_key(|(_, t)| t.last_active);
         labels.into_iter().map(|(l, _)| l.clone()).next()
     };
@@ -271,7 +284,15 @@ const ACCOUNT_WINDOW_BACKGROUND: tauri::utils::config::Color =
 /// low-memory target also pushing trims, heavy pages were being
 /// squeezed from two directions at once.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) const WEBVIEW2_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,OptimizationHints,MediaRouter --enable-features=TrimOnMemoryPressure";
+// v0.18.5: TrimOnMemoryPressure is gone (it throttled background
+// renderers mid-playback), and the backgrounding/throttling disables
+// plus no-user-gesture autoplay keep a music window alive when it
+// loses focus. UPGRADE NOTE: WebView2 keys a browser process by user
+// data folder AND these args, so a stale 0.18.4 process holding a
+// session folder blocks the new args until it exits — fully quit
+// AppMaka (tray Quit, no lingering msedgewebview2) before the first
+// 0.18.5 window opens on an existing account.
+pub(crate) const WEBVIEW2_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,OptimizationHints,MediaRouter,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,AudioServiceOutOfProcess --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --autoplay-policy=no-user-gesture-required";
 
 /// The stored last-visited URL a fresh open of this account should land
 /// on, if one exists (v0.16.4). An in-progress session restore seeds
@@ -351,6 +372,12 @@ pub fn open_account_placed(
                 true,
             );
         }
+        // v0.18.5: don't rely on a Focused(true) event that never fires
+        // for a window that is already focused — a deferred window
+        // clicked while already focused would sit on about:blank
+        // forever. navigate_pending_url is one-shot (no-op without a
+        // pending URL), so calling it here is safe.
+        navigate_pending_url(app, &label);
         if let Some(p) = placement {
             apply_placement(&window, p);
         }
@@ -521,6 +548,11 @@ pub fn open_account_placed(
     if !scriptlets.is_empty() {
         builder = builder.initialization_script(scriptlets);
     }
+    // v0.18.5: YouTube ad-skipper fallback. Host-gated in JS itself, so
+    // it is injected into every account window and no-ops off YouTube;
+    // init scripts run on every navigation, so it also covers a window
+    // that navigates onto YouTube mid-session.
+    builder = builder.initialization_script(adblock.yt_ad_skipper_js().to_string());
     // v0.15.0: unread badges — track the live document.title per window.
     // The callback only touches the state mutex (no Win32 calls), so it
     // is safe on whatever thread Tauri invokes it from.
@@ -678,6 +710,8 @@ pub fn open_account_placed(
                         None
                     };
                 if let Some(t) = removed {
+                    // v0.18.5: a destroyed window is not playing audio.
+                    set_audio_playing(&track_app, &track_label, false);
                     if let Some(dir) = t.private_dir {
                         delete_private_session_dir(&dir);
                     }
@@ -702,7 +736,10 @@ pub fn open_account_placed(
     });
 
     #[cfg(windows)]
-    crate::adblock::attach_network_blocking(&window, adblock, adblock_flag);
+    crate::adblock::attach_network_blocking(&window, adblock, adblock_flag, web_app.url.clone());
+    // v0.18.5: audio tracking for the idle guards (Windows only).
+    #[cfg(windows)]
+    attach_audio_tracking(&window, app);
     #[cfg(windows)]
     attach_fullscreen_sync(&window);
 
@@ -2122,7 +2159,22 @@ fn touch_window(app: &AppHandle, label: &str, focused: bool) {
     if focused {
         resume_window(app, label);
     } else if let Some(window) = app.get_webview_window(label) {
-        set_window_memory_target_low(&window, true);
+        // v0.18.5: never low-memory-throttle a window that is playing
+        // audio or locked awake — throttling mid-playback is how music
+        // windows froze. Resolve the account under a short lock, then
+        // decide outside it.
+        let ids = app.try_state::<WindowState>().and_then(|s| {
+            s.inner.lock().ok().and_then(|m| {
+                m.get(label)
+                    .map(|t| (t.app_id.clone(), t.account_id.clone()))
+            })
+        });
+        let protected = ids
+            .map(|(a, c)| window_idle_protected(app, label, &a, &c))
+            .unwrap_or(false);
+        if !protected {
+            set_window_memory_target_low(&window, true);
+        }
     }
 }
 
@@ -2243,6 +2295,10 @@ fn suspend_idle_windows(app: &AppHandle) {
         if window.is_focused().unwrap_or(true) {
             continue;
         }
+        // v0.18.5: playing audio / Keep Awake never suspends.
+        if window_idle_protected(app, &label, &app_id, &account_id) {
+            continue;
+        }
         suspend_one(app, &label, &window);
     }
 }
@@ -2290,6 +2346,10 @@ fn close_idle_windows(app: &AppHandle) {
         };
         // Fail closed: if focus state is unknown, don't close.
         if window.is_focused().unwrap_or(true) {
+            continue;
+        }
+        // v0.18.5: playing audio / Keep Awake never auto-closes.
+        if window_idle_protected(app, &label, &app_id, &account_id) {
             continue;
         }
         close_tracked_window(app, &label, CloseIntent::Background);
@@ -2347,6 +2407,20 @@ pub fn suspend_account_window(
 
 #[cfg(windows)]
 fn suspend_one(app: &AppHandle, label: &str, window: &WebviewWindow) {
+    // v0.18.5: never suspend a window that is playing audio or locked
+    // awake — including the low-memory fallback below, which would
+    // otherwise throttle it anyway.
+    let ids = app.try_state::<WindowState>().and_then(|s| {
+        s.inner
+            .lock()
+            .ok()
+            .and_then(|m| m.get(label).map(|t| (t.app_id.clone(), t.account_id.clone())))
+    });
+    if let Some((a, c)) = ids {
+        if window_idle_protected(app, label, &a, &c) {
+            return;
+        }
+    }
     // Record the page before the renderer freezes (v0.16.4): once
     // TrySuspend lands, the URL is not readable again until wake.
     capture_last_url(app, label);
@@ -2401,6 +2475,92 @@ fn webview_hidden(window: &WebviewWindow) -> bool {
         }
     });
     hidden.load(Ordering::Relaxed)
+}
+
+/// v0.18.5: mark one window's audio state. Only ever touches the
+/// audio set — never the window-state mutex — so the COM handler can
+/// call it without any lock-ordering risk.
+fn set_audio_playing(app: &AppHandle, label: &str, playing: bool) {
+    if let Some(winstate) = app.try_state::<WindowState>() {
+        if let Ok(mut set) = winstate.audio_playing.lock() {
+            if playing {
+                set.insert(label.to_string());
+            } else {
+                set.remove(label);
+            }
+        }
+    }
+}
+
+/// v0.18.5: is this window protected from idle reclaim — playing audio
+/// (Windows COM state) or locked awake by the user? Audio state
+/// unknown does not protect; Keep Awake always does.
+fn window_idle_protected(app: &AppHandle, label: &str, app_id: &str, account_id: &str) -> bool {
+    if let Some(winstate) = app.try_state::<WindowState>() {
+        if let Ok(playing) = winstate.audio_playing.lock() {
+            if playing.contains(label) {
+                return true;
+            }
+        }
+    }
+    if let Some(store) = app.try_state::<AppStore>() {
+        if let Ok(web_app) = store.get(app_id) {
+            if web_app.effective_keep_awake(account_id) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// v0.18.5 (Windows): track WebView2's document-playing-audio state for
+/// one window. A COM changed-handler writes the label into (or out of)
+/// WindowState.audio_playing; the idle guards read that set, so the
+/// suspend timer never makes a COM call itself. Fail-open: any hookup
+/// failure just means no audio protection for this window. The handler
+/// body is trivial by design — no unwrap, no indexing, nothing that
+/// can panic across the COM boundary.
+#[cfg(windows)]
+fn attach_audio_tracking(window: &WebviewWindow, app: &AppHandle) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2, ICoreWebView2_8,
+    };
+    use webview2_com::IsDocumentPlayingAudioChangedEventHandler;
+    use windows_core::Interface;
+
+    let app = app.clone();
+    let label = window.label().to_string();
+    let _ = window.with_webview(move |platform| unsafe {
+        let Ok(core) = platform.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(core8) = core.cast::<ICoreWebView2_8>() else {
+            return;
+        };
+        // Seed the current state so a window already playing when it
+        // opens is protected before the first change event.
+        let mut playing = windows_core::BOOL(0);
+        if core8.IsDocumentPlayingAudio(&mut playing).is_ok() && playing.as_bool() {
+            set_audio_playing(&app, &label, true);
+        }
+        let handler_app = app.clone();
+        let handler_label = label.clone();
+        let handler = IsDocumentPlayingAudioChangedEventHandler::create(Box::new(
+            move |sender: Option<ICoreWebView2>, _args: Option<windows_core::IUnknown>| {
+                let playing = sender
+                    .and_then(|s| s.cast::<ICoreWebView2_8>().ok())
+                    .and_then(|c8| {
+                        let mut p = windows_core::BOOL(0);
+                        c8.IsDocumentPlayingAudio(&mut p).ok().map(|_| p.as_bool())
+                    })
+                    .unwrap_or(false);
+                set_audio_playing(&handler_app, &handler_label, playing);
+                Ok(())
+            },
+        ));
+        let mut token: i64 = 0;
+        let _ = core8.add_IsDocumentPlayingAudioChanged(&handler, &mut token);
+    });
 }
 
 /// Best-effort TrySuspend. Returns whether WebView2 accepted the suspend.
@@ -2723,6 +2883,33 @@ pub fn set_app_adblock_enabled(app: &AppHandle, app_id: &str, enabled: bool) {
 /// Push one account's effective adblock value to its open window, if any.
 /// Called after per-account edits in `update_account` — the per-account
 /// mirror of `set_app_adblock_enabled`.
+/// v0.18.5: live adblock flag + Keep Awake lock for one window label,
+/// for the caption strip's state glyphs. (false, false) when the label
+/// is not a tracked account window. Windows-only: the strip itself is
+/// a Windows surface, so no caller exists on other platforms.
+#[cfg(windows)]
+pub(crate) fn window_strip_state(app: &AppHandle, label: &str) -> (bool, bool) {
+    let Some((app_id, account_id, adblock)) = app.try_state::<WindowState>().and_then(|s| {
+        s.inner.lock().ok().and_then(|m| {
+            m.get(label).map(|t| {
+                (
+                    t.app_id.clone(),
+                    t.account_id.clone(),
+                    t.adblock_enabled.load(Ordering::Relaxed),
+                )
+            })
+        })
+    }) else {
+        return (false, false);
+    };
+    let awake = app
+        .try_state::<AppStore>()
+        .and_then(|store| store.get(&app_id).ok())
+        .map(|a| a.effective_keep_awake(&account_id))
+        .unwrap_or(false);
+    (adblock, awake)
+}
+
 pub fn set_account_adblock_enabled(
     app: &AppHandle,
     app_id: &str,
@@ -2737,6 +2924,153 @@ pub fn set_account_adblock_enabled(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// v0.18.5: window actions shared by the caption strip buttons, the
+// launcher hover actions, and the tile quick menu. Tauri exposes no
+// back/forward API, so navigation goes through JS eval in the page.
+// ---------------------------------------------------------------------------
+
+/// Back, forward, or reload one account window. Unknown actions are
+/// ignored; a missing window is a silent no-op (the tile may have
+/// closed between the click and this call).
+pub(crate) fn account_window_action(app: &AppHandle, label: &str, action: &str) {
+    let js = match action {
+        "back" => "history.back()",
+        "forward" => "history.forward()",
+        "reload" => "location.reload()",
+        _ => return,
+    };
+    if let Some(w) = app.get_webview_window(label) {
+        let _ = w.eval(js);
+    }
+}
+
+/// Flip one account's adblock from a strip button or tile action:
+/// live flag first (so the current window obeys at once), persisted
+/// override second, then a reload so the page re-fetches under the new
+/// rules. Returns the new value, or None when the label is unknown.
+pub(crate) fn toggle_account_adblock(app: &AppHandle, label: &str) -> Option<bool> {
+    let (app_id, account_id, live) = app.try_state::<WindowState>().and_then(|s| {
+        s.inner.lock().ok().and_then(|m| {
+            m.get(label).map(|t| {
+                (
+                    t.app_id.clone(),
+                    t.account_id.clone(),
+                    t.adblock_enabled.load(Ordering::Relaxed),
+                )
+            })
+        })
+    })?;
+    let new = !live;
+    set_account_adblock_enabled(app, &app_id, &account_id, new);
+    if let Some(store) = app.try_state::<AppStore>() {
+        let _ = store.set_account_adblock(&app_id, &account_id, new);
+    }
+    account_window_action(app, label, "reload");
+    Some(new)
+}
+
+/// Flip one account's Keep Awake lock from a strip button or tile
+/// action. Returns the new value, or None when the label is unknown.
+pub(crate) fn toggle_account_keep_awake(app: &AppHandle, label: &str) -> Option<bool> {
+    let (app_id, account_id) = app.try_state::<WindowState>().and_then(|s| {
+        s.inner
+            .lock()
+            .ok()
+            .and_then(|m| m.get(label).map(|t| (t.app_id.clone(), t.account_id.clone())))
+    })?;
+    let store = app.try_state::<AppStore>()?;
+    let current = store
+        .get(&app_id)
+        .map(|a| a.effective_keep_awake(&account_id))
+        .unwrap_or(false);
+    store
+        .set_account_keep_awake(&app_id, &account_id, !current)
+        .ok()?;
+    Some(!current)
+}
+
+/// Navigate, toggle adblock, or toggle Keep Awake for one account's
+/// window, from the launcher / tile menu.
+#[tauri::command]
+pub fn account_window_command(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    app_id: String,
+    account_id: String,
+    action: String,
+) -> Result<Option<bool>, String> {
+    // Validate the account before touching any window.
+    let _ = store
+        .get(&app_id)?
+        .accounts
+        .iter()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| "Account not found.".to_string())?;
+    let label = account_window_label(&app_id, &account_id);
+    Ok(match action.as_str() {
+        "back" | "forward" | "reload" => {
+            account_window_action(&app, &label, &action);
+            None
+        }
+        "toggle_adblock" => toggle_account_adblock(&app, &label),
+        "toggle_keep_awake" => toggle_account_keep_awake(&app, &label),
+        _ => return Err(format!("unknown window action: {action}")),
+    })
+}
+
+/// v0.18.5: close an account window and reopen it fresh — the
+/// no-data-loss fix for a stuck or blank window. Session data is
+/// kept; only the renderer is rebuilt, and the reopen lands on the
+/// last-visited URL captured at close. Pinned windows refuse (unpin
+/// first) rather than bypassing the pin confirm. Async on purpose:
+/// window.close() destroys asynchronously, so the command polls for
+/// the window to actually be gone before reopening — reopening at
+/// once would just refocus the dying window.
+#[tauri::command]
+pub async fn fix_account_window(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    winstate: State<'_, WindowState>,
+    app_id: String,
+    account_id: String,
+) -> Result<(), String> {
+    let _ = store
+        .get(&app_id)?
+        .accounts
+        .iter()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| "Account not found.".to_string())?;
+    let label = account_window_label(&app_id, &account_id);
+    if crate::pin::is_pinned(&app, &label) {
+        return Err("This window is pinned — unpin it first, then fix it.".to_string());
+    }
+    if app.get_webview_window(&label).is_some() {
+        close_tracked_window(&app, &label, crate::pin::CloseIntent::Background);
+        for _ in 0..50 {
+            if app.get_webview_window(&label).is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if app.get_webview_window(&label).is_some() {
+            return Err("The window did not close in time — try again.".to_string());
+        }
+    }
+    open_account_placed(
+        &app,
+        &store,
+        &adblock,
+        &winstate,
+        &app_id,
+        &account_id,
+        None,
+        false,
+        false,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2770,6 +3104,17 @@ pub struct OpenAccountInfo {
     /// destroyed and must reload. Exposed so the UI can stop
     /// conflating the two states.
     pub suspended: bool,
+    /// v0.18.5: WebView2 reports the document is playing audio
+    /// (Windows only; always false on Linux, which has no API for it).
+    pub playing_audio: bool,
+    /// v0.18.5: the account's Keep Awake lock.
+    pub keep_awake: bool,
+    /// v0.18.5: live document.title, for the launcher's Now Playing
+    /// pill (the track title). Empty when the page has no title yet.
+    pub page_title: String,
+    /// v0.18.5: the window's live adblock flag, for the Adblock On
+    /// badge. Search/preview windows always report true.
+    pub adblock_on: bool,
 }
 
 /// Close every open account window. Returns how many were closed. Sessions
@@ -2913,29 +3258,36 @@ pub fn list_open_account_windows(
     app: AppHandle,
     store: State<'_, AppStore>,
 ) -> Vec<OpenAccountInfo> {
-    let tracked: Vec<(String, String, String, String, bool, bool)> = match app.try_state::<WindowState>() {
-        Some(winstate) => match winstate.inner.lock() {
-            Ok(map) => map
-                .iter()
-                .filter(|(l, _)| l.starts_with("acct-"))
-                .map(|(l, t)| {
-                    (
-                        l.clone(),
-                        t.app_id.clone(),
-                        t.account_id.clone(),
-                        t.page_title.clone(),
-                        t.page_title_seen,
-                        t.suspended,
-                    )
-                })
-                .collect(),
-            Err(_) => return Vec::new(),
-        },
-        None => return Vec::new(),
-    };
+    // v0.18.5: snapshot the audio set once for all rows below.
+    let playing: HashSet<String> = app
+        .try_state::<WindowState>()
+        .and_then(|s| s.audio_playing.lock().ok().map(|set| set.clone()))
+        .unwrap_or_default();
+    let tracked: Vec<(String, String, String, String, bool, bool, bool)> =
+        match app.try_state::<WindowState>() {
+            Some(winstate) => match winstate.inner.lock() {
+                Ok(map) => map
+                    .iter()
+                    .filter(|(l, _)| l.starts_with("acct-"))
+                    .map(|(l, t)| {
+                        (
+                            l.clone(),
+                            t.app_id.clone(),
+                            t.account_id.clone(),
+                            t.page_title.clone(),
+                            t.page_title_seen,
+                            t.suspended,
+                            t.adblock_enabled.load(Ordering::Relaxed),
+                        )
+                    })
+                    .collect(),
+                Err(_) => return Vec::new(),
+            },
+            None => return Vec::new(),
+        };
     tracked
         .into_iter()
-        .map(|(label, app_id, account_id, page_title, seen, suspended)| {
+        .map(|(label, app_id, account_id, page_title, seen, suspended, adblock_on)| {
             let (app_name, account_label) = store
                 .get(&app_id)
                 .ok()
@@ -2954,9 +3306,9 @@ pub fn list_open_account_windows(
                 .unwrap_or(false);
             OpenAccountInfo {
                 pinned: crate::pin::is_pinned(&app, &label),
-                label,
-                app_id,
-                account_id,
+                label: label.clone(),
+                app_id: app_id.clone(),
+                account_id: account_id.clone(),
                 app_name,
                 account_label,
                 focused,
@@ -2968,6 +3320,14 @@ pub fn list_open_account_windows(
                     crate::badges::parse_unread_count(&page_title)
                 },
                 suspended,
+                // v0.18.5: audio state + Keep Awake + title for tiles.
+                playing_audio: playing.contains(&label),
+                keep_awake: store
+                    .get(&app_id)
+                    .map(|a| a.effective_keep_awake(&account_id))
+                    .unwrap_or(false),
+                page_title: page_title.clone(),
+                adblock_on,
             }
         })
         // The search window has no tile, so the dashboard is its only
@@ -2987,7 +3347,7 @@ pub fn list_open_account_windows(
                         app_id: "websearch".to_string(),
                         account_id: String::new(),
                         app_name: "Web search".to_string(),
-                        account_label,
+                        account_label: account_label.clone(),
                         focused: w.is_focused().unwrap_or(false),
                         pinned: crate::pin::is_pinned(
                             &app,
@@ -2996,6 +3356,10 @@ pub fn list_open_account_windows(
                         unread: None,
                         // The search window is never TrySuspend-frozen.
                         suspended: false,
+                        playing_audio: false,
+                        keep_awake: false,
+                        page_title: account_label,
+                        adblock_on: true,
                     }
                 }),
         )
@@ -3022,12 +3386,16 @@ pub fn list_open_account_windows(
                 app_id: String::new(),
                 account_id: String::new(),
                 app_name,
+                page_title: url_str.clone(),
                 account_label: url_str,
                 focused: w.is_focused().unwrap_or(false),
                 pinned: false,
                 unread: None,
                 // Popups are never TrySuspend-frozen.
                 suspended: false,
+                playing_audio: false,
+                keep_awake: false,
+                adblock_on: false,
             })
         }))
         .collect()
@@ -3283,7 +3651,14 @@ mod tests {
         assert!(WEBVIEW2_BROWSER_ARGS.contains("msSmartScreenProtection"));
         assert!(WEBVIEW2_BROWSER_ARGS.contains("msWebOOUI"));
         assert!(WEBVIEW2_BROWSER_ARGS.contains("msPdfOOUI"));
-        assert!(WEBVIEW2_BROWSER_ARGS.contains("TrimOnMemoryPressure"));
+        // v0.18.5: background throttling is off so music windows keep
+        // playing unfocused — TrimOnMemoryPressure is gone, and the
+        // backgrounding disables are present instead.
+        assert!(!WEBVIEW2_BROWSER_ARGS.contains("TrimOnMemoryPressure"));
+        assert!(WEBVIEW2_BROWSER_ARGS.contains("disable-background-timer-throttling"));
+        assert!(WEBVIEW2_BROWSER_ARGS.contains("disable-backgrounding-occluded-windows"));
+        assert!(WEBVIEW2_BROWSER_ARGS.contains("disable-renderer-backgrounding"));
+        assert!(WEBVIEW2_BROWSER_ARGS.contains("autoplay-policy=no-user-gesture-required"));
         // The 256 MB heap cap was dropped in v0.16.6 (see the const).
         assert!(!WEBVIEW2_BROWSER_ARGS.contains("max-old-space-size"));
     }
