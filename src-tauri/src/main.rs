@@ -1525,7 +1525,6 @@ fn main() {
             dictation::clear_dictation_transcripts,
             dictation::copy_dictation_transcript,
             dictation::set_dictation_model,
-            dictation::set_dictation_device,
             dictation::set_dictation_hold,
             dictation::set_dictation_hotkey,
             dictation::dictation_hotkey_status,
@@ -1551,6 +1550,7 @@ fn main() {
             msi_update::get_install_type,
             msi_update::download_msi_update,
             msi_update::launch_msi_update,
+            msi_update::install_msi_update,
             // v0.8.0: workspaces
             workspaces::list_workspaces,
             workspaces::save_workspace,
