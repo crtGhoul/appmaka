@@ -564,8 +564,8 @@ export function IconGrid({
   sleepingFor,
   suspendedFor,
   playingFor,
-  awakeFor,
-  adblockFor,
+  awakeFor: _awakeFor,
+  adblockFor: _adblockFor,
   openFor,
   onTileAction,
   onTileContextMenu,
@@ -669,31 +669,16 @@ export function IconGrid({
               Sleeping
             </span>
           ) : null}
-          {/* v0.18.5: Now Playing pill — live track title while the
-              window reports playing audio. Clicking it still opens /
-              focuses the window (it lives inside the tile button). */}
           {(() => {
             const title = playingFor?.(r);
             if (title == null) return null;
-            const short = title.length > 32 ? `${title.slice(0, 31)}…` : title;
+            const short = title.length > 26 ? `${title.slice(0, 25)}…` : title;
             return (
-              <span className="tile-now-playing" title={title || "Now playing"}>
-                {title ? `♪ Now playing · ${short}` : "♪ Now playing"}
+              <span className="tile-now-playing" title={title || "Playing audio"}>
+                {title ? `♪ ${short}` : "♪ Playing"}
               </span>
             );
           })()}
-          {/* v0.18.5: state badges for open windows — Awake, Adblock
-              on. Playing is covered by the pill above. */}
-          {awakeFor?.(r) ? (
-            <span className="tile-state-badge" title="Keep Awake is on — this window is never auto-suspended or auto-closed">
-              Awake
-            </span>
-          ) : null}
-          {adblockFor?.(r) ? (
-            <span className="tile-state-badge" title="Ad blocking is on for this window">
-              Adblock on
-            </span>
-          ) : null}
           {/* v0.18.5: hover actions for open tiles only. Spans, not
               nested buttons — the tile itself is a button — with
               keyboard activation so the flow stays keyboard-usable. */}
@@ -981,17 +966,11 @@ export function SearchBar({
         value={query}
         onChange={(e) => onQuery(e.target.value)}
         onKeyDown={onKeyDown}
-        placeholder="Search apps, accounts, and programs…"
+        placeholder="Search apps, accounts, or type =, >, ?…"
         aria-label="Search apps, accounts, and programs"
         autoComplete="off"
         spellCheck={false}
       />
-      <span className="search-hint" aria-hidden="true">
-        Arrow keys move · Enter opens · Esc clears, then hides
-      </span>
-      <span className="search-hint search-hint-sub" aria-hidden="true">
-        = calculates · &gt; runs a system command · ? searches the web
-      </span>
     </div>
   );
 }

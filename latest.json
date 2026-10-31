@@ -1,15 +1,15 @@
 {
-  "version": "0.18.6",
-  "notes": "WebView2 session self-heal, multi-monitor window clamp, and user scripts.",
-  "pub_date": "2026-10-30T07:05:39Z",
+  "version": "0.18.7",
+  "notes": "Fix 3-monitor desktop web app opening (unscoped WebView2 timeout + orphan lock cleanup + physical cursor monitor placement) and quiet UI pass.",
+  "pub_date": "2026-10-30T20:15:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1ZweEpZZGZRYmFmQjg0ek8wa3RHRkRNQVdGM3BsNmhPcGJaVXhWeUZiNmNaTmRjdFdHVmNUYWMzMkg1NEdDaHlOYUJXdUZ2TXBxQXJuVWFpOFIwbXcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzQzOTE4CWZpbGU6QXBwTWFrYV8wLjE4LjZfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguNgphUC85NVdhTkxtYjRsOWFtUlVYSk9ZLys4Yi9TMUdrY25HSGhBRS9DaTNJbGNvaFhXRmtmRVdEZVcycmZrOE95QitOaktRVUloa2Y1TXlhMTF2NitBZz09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.6/AppMaka_0.18.6_x64-setup.exe"
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.7/AppMaka_0.18.7_x64-setup.exe"
     },
     "linux-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1Z1MmcvVHhNMjRwNkhuUGF4MXZvM3h0UW5EMkg1clRaOC8yWmJRRU50WVh6b0FVM05NZzNlYTEvMis5V3ArQlpNRUw1dWR0QzVUMTZ5UlFXWitrMXdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzQzMTg0CWZpbGU6QXBwTWFrYV8wLjE4LjZfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjYKTURFYloydFNpMEJTa1hZUFhMN1NyWmw1czVhdWRabnI0Vi9RNHJObDhhVU1LdHJaZ2hJSngva08wSUZPcyswbHVORmlOb3lSNE52SDZLNUpuVmFTQ3c9PQo=",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.6/AppMaka_0.18.6_amd64.AppImage"
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.7/AppMaka_0.18.7_amd64.AppImage"
     }
   }
 }

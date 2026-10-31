@@ -34,9 +34,9 @@
 .panel {
   background: #ffffff;
   border: 1px solid #e3e5e9;
-  border-radius: 12px;
+  border-radius: 10px;
   padding: 20px;
-  margin-top: 20px;
+  margin-top: 16px;
 }
 
 .panel h2 {
@@ -518,26 +518,21 @@ input[type="color"] {
   max-height: calc(100vh - 40px);
   display: flex;
   flex-direction: column;
-  padding: 18px 18px 10px;
-  border-radius: 26px;
-  background: rgba(22, 24, 31, var(--folder-alpha, 0.55));
-  -webkit-backdrop-filter: blur(28px) saturate(1.5);
-  backdrop-filter: blur(28px) saturate(1.5);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow:
-    0 32px 80px rgba(0, 0, 0, 0.45),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  padding: 16px 16px 10px;
+  border-radius: 14px;
+  background: rgba(20, 21, 26, var(--folder-alpha, 0.72));
+  -webkit-backdrop-filter: blur(24px) saturate(1.25);
+  backdrop-filter: blur(24px) saturate(1.25);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.42);
   color: #f2f3f5;
-  /* Entrance: fade + slight scale. Replays on every summon because the
-     panel remounts via a key bump (see App.tsx summonCount). Transform and
-     opacity only — cheap over the backdrop blur. */
-  animation: panel-in 180ms ease-out;
+  animation: panel-in 150ms ease-out;
 }
 
 @keyframes panel-in {
   from {
     opacity: 0;
-    transform: scale(0.97) translateY(6px);
+    transform: scale(0.985) translateY(4px);
   }
   to {
     opacity: 1;
@@ -550,9 +545,9 @@ input[type="color"] {
 }
 
 .folder-panel .search-input {
-  background: rgba(255, 255, 255, 0.09);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 9px;
   color: #fff;
 }
 
@@ -603,19 +598,16 @@ input[type="color"] {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
   padding: 10px 4px 8px;
   background: transparent;
-  /* v0.18.5: crisp glass border on launcher tiles. */
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
   cursor: pointer;
   color: #f2f3f5;
-  /* Smooth hover/press; newly appearing tiles (filtering) fade in.
-     Transform + opacity only — cheap over the backdrop blur. */
-  transition: background-color 120ms ease, transform 120ms ease;
-  animation: tile-in 150ms ease-out;
+  transition: background-color 100ms ease, border-color 100ms ease;
+  animation: tile-in 120ms ease-out;
 }
 
 @keyframes tile-in {
@@ -628,15 +620,17 @@ input[type="color"] {
 }
 
 .icon-tile:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .icon-tile:active {
-  transform: scale(0.93);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .icon-tile.is-active {
-  background: rgba(var(--accent-mid-rgb), 0.38);
+  background: rgba(var(--accent-mid-rgb), 0.28);
+  border-color: rgba(var(--accent-bright-rgb), 0.35);
 }
 
 /* Inline rename affordance: the name itself is the edit control. */
@@ -711,6 +705,7 @@ input[type="color"] {
   font-weight: 700;
   line-height: 19px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
   pointer-events: none;
 }
@@ -734,52 +729,37 @@ input[type="color"] {
   font-weight: 700;
   line-height: 19px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 /* v0.15.0: per-account RAM under the tile, and inline in Library rows. */
 .tile-ram {
   font-size: 11px;
-  color: #5b5e66;
+  color: rgba(255, 255, 255, 0.44);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .account-ram {
   color: #5b5e66;
+  font-variant-numeric: tabular-nums;
 }
 
 /* v0.15.0: "Sleeping" chip — quiet, muted, no accent: it's a state note,
    not a call to action. */
 .tile-sleep {
   font-size: 11px;
-  color: #5b5e66;
+  color: rgba(255, 255, 255, 0.44);
   white-space: nowrap;
 }
 
-/* v0.18.5: Now Playing pill — the one animated tile element, and the
-   animation IS the state (audio is playing right now). Subtle glow
-   pulse, quiet colors, no layout shift: it sits in the tile's flow. */
 .tile-now-playing {
   font-size: 11px;
-  color: #d8d2f0;
-  background: rgba(var(--accent-mid-rgb), 0.22);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  padding: 1px 8px;
+  color: var(--accent-text);
   white-space: nowrap;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
-  animation: now-playing-glow 2.4s ease-in-out infinite;
-}
-
-@keyframes now-playing-glow {
-  0%,
-  100% {
-    box-shadow: 0 0 0 rgba(var(--accent-mid-rgb), 0);
-  }
-  50% {
-    box-shadow: 0 0 10px rgba(var(--accent-mid-rgb), 0.45);
-  }
 }
 
 /* v0.18.5: small state badges for open windows (Awake, Adblock on). */
@@ -1103,30 +1083,34 @@ input[type="color"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 4px 2px;
+  gap: 8px;
+  padding: 8px 4px 2px;
   margin-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.launcher-foot-primary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
 }
 
 .launcher-foot .text-button {
-  color: #c7c9f5;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.launcher-foot .text-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
 }
 
 .launcher-foot .muted {
   color: rgba(255, 255, 255, 0.5);
-}
-
-/* v0.9.6: the Restore-session button lives with the pinned tiles now,
-   not in the footer — a quiet right-aligned row above the grid. */
-.restore-row {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0 4px 2px;
-}
-
-.restore-row .text-button {
-  color: #c7c9f5;
-  font-size: 12px;
 }
 
 /* --- Library view --- */

@@ -241,6 +241,7 @@ pub fn start_preview(
         let site = site_builder
             .build()
             .map_err(|e| format!("could not open preview window: {e}"))?;
+        windows::center_window_on_cursor_monitor(app, &site);
         windows::ensure_on_visible_monitor(app, &site);
         #[cfg(windows)]
         windows::attach_fullscreen_sync(&site);

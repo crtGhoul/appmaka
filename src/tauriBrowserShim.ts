@@ -223,7 +223,7 @@ if (typeof window !== "undefined") {
       const args = (rawArgs ?? {}) as Record<string, unknown>;
       switch (cmd) {
         case "plugin:app|version":
-          return "0.18.6";
+          return "0.18.7";
         case "plugin:window|set_size":
         case "plugin:window|set_decorations":
         case "plugin:window|center":

@@ -910,9 +910,7 @@ fn position_on_target_monitor(app: &AppHandle, w: &tauri::WebviewWindow) {
         })
         .unwrap_or(true);
     let monitor = if cursor_mode {
-        app.cursor_position()
-            .ok()
-            .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+        windows::cursor_monitor(app)
             .or_else(|| w.primary_monitor().ok().flatten())
             .or_else(|| app.primary_monitor().ok().flatten())
     } else {
@@ -1145,6 +1143,9 @@ fn main() {
             preview::cleanup_stale_previews(app.handle());
             // Same for private session dirs orphaned by a crash.
             windows::cleanup_orphan_private_sessions(app.handle());
+            // Sweep any orphaned msedgewebview2.exe processes left behind by a
+            // previous killed/crashed AppMaka instance before opening windows.
+            let _ = windows::cleanup_orphan_webview2_processes(app.handle());
 
             // Filter lists download + engine compile happen on a background
             // thread so startup never waits on the network.

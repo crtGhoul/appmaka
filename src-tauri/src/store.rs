@@ -1153,7 +1153,15 @@ impl AppStore {
             .and_then(|a| a.accounts.iter().find(|ac| ac.id == account_id))
             .map(|ac| PathBuf::from(&ac.session_dir))
             .ok_or_else(|| "Account not found.".to_string())?;
-        Ok(resolve_session_dir(&dir_claims(&apps), app_id, account_id, &stored))
+        let resolved = resolve_session_dir(&dir_claims(&apps), app_id, account_id, &stored);
+        drop(apps);
+        if fs::create_dir_all(&resolved).is_ok() {
+            return Ok(resolved);
+        }
+        let fallback = legacy_session_dir(&self.sessions_root(), app_id, account_id);
+        fs::create_dir_all(&fallback)
+            .map_err(|e| format!("could not create session dir: {e}"))?;
+        Ok(fallback)
     }
 }
 

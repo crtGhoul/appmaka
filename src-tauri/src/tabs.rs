@@ -512,143 +512,174 @@ fn build_tabbed_window(
     args: BuildTabbedArgs<'_>,
 ) -> Result<WebviewWindow, String> {
     let page = resolve_tab_page(app, store, adblock, args.entry, args.group_id)?;
-    let mut builder = WebviewWindowBuilder::new(app, args.label, WebviewUrl::External(page.url.clone()))
-        .data_directory(page.session_dir.clone())
-        .title(&page.title)
-        // v0.16.4: pre-paint background in the strips' dark default
-        // (#1b1b1b — caption.rs's unresolved tint, the Linux strip's
-        // body), so a tab (re)build never flashes the webview's default
-        // white before the page paints.
-        .background_color(tauri::webview::Color(22, 23, 27, 255));
-    #[cfg(windows)]
-    {
-        // Frameless like account windows: the tab strip replaces the
-        // native title bar (caption.rs paints the tabs).
-        builder = builder.decorations(false);
-        builder = builder.additional_browser_args(crate::windows::WEBVIEW2_BROWSER_ARGS);
-    }
-    if let Some(g) = args.geometry {
-        if g.maximized {
-            builder = builder.maximized(true);
-        } else {
-            builder = builder
-                .position(g.x, g.y)
-                .inner_size(g.w, g.h);
-        }
-    } else if let Some(p) = args.placement {
-        builder = builder.position(p.x, p.y).inner_size(p.width, p.height);
-    } else if let Some((x, y)) = crate::windows::cursor_centered_position(app, 1200.0, 800.0) {
-        // v0.13.18: open on the monitor the user is actually on.
-        builder = builder.position(x, y).inner_size(1200.0, 800.0);
+    if let Some(entry) = args.entry {
+        crate::windows::prepare_session_dir_for_open(
+            app,
+            &entry.app_id,
+            &entry.account_id,
+            &page.session_dir,
+        );
     } else {
-        builder = builder.inner_size(1200.0, 800.0).center();
+        let _ = crate::windows::clear_stale_webview_locks(&page.session_dir);
     }
-    let window_app = app.clone();
-    match page.popup {
-        Some(mut ctx) => {
-            ctx.parent_label = args.label.to_string();
-            builder = builder.on_new_window(crate::windows::make_popup_handler(ctx));
-        }
-        None => {
-            // Empty group: deny everything; there is no app context yet.
-            builder = builder.on_new_window(|_url: url::Url, _f| {
-                tauri::webview::NewWindowResponse::Deny
-            });
-        }
-    }
-    builder = builder
-        .on_download(crate::downloads::make_download_handler(window_app.clone()))
-        .initialization_script(crate::windows::TARGET_BLANK_SHIM_JS)
-        .initialization_script(crate::windows::NAV_KEYS_JS)
-        .initialization_script(crate::windows::shortcuts_overlay_js(&window_app));
-    if !page.adblock_css.is_empty() {
-        builder = builder.initialization_script(crate::windows::cosmetic_init_script(&page.adblock_css));
-    }
-    // v0.18.4: scriptlets, same source as account windows.
-    if !page.adblock_scriptlet.is_empty() {
-        builder = builder.initialization_script(page.adblock_scriptlet.clone());
-    }
-    // v0.12.0: custom page cursor in tabbed windows.
-    let cursor_js = crate::windows::saved_cursor_js(&window_app);
-    if !cursor_js.is_empty() {
-        builder = builder.initialization_script(cursor_js);
-    }
-    // v0.18.0: Tampermonkey-Lite user scripts matched against this
-    // page's URL.
-    for js in crate::userscripts::user_scripts_init_scripts(&window_app, page.url.as_str()) {
-        builder = builder.initialization_script(js);
-    }
-    // v0.10.0: re-tint the strip when the active tab navigates
-    // (theme-color can change per page). Same pattern as the v0.9.11
-    // popup retint: never block the navigation decision, detached thread.
-    #[cfg(windows)]
-    {
-        let nav_app = window_app.clone();
-        let nav_label = args.label.to_string();
-        builder = builder.on_navigation(move |nav_url: &url::Url| {
-            let app = nav_app.clone();
-            let lbl = nav_label.clone();
-            let u = nav_url.clone();
-            std::thread::Builder::new()
-                .name(format!("appmaka-tabbed-retint-{lbl}"))
-                .spawn(move || {
-                    tint_tabbed_caption(&app, &lbl, &u);
-                    // v0.13.8: converge the cursor to the saved style
-                    // (see windows::schedule_cursor_reapply).
-                    crate::windows::schedule_cursor_reapply(app.clone(), lbl.clone());
-                })
-                .ok();
-            true
-        });
-    }
-    // Non-Windows: no caption retint to re-run, but navigations must
-    // still converge the cursor to the saved style (see windows.rs).
-    #[cfg(not(windows))]
-    {
-        let nav_app = window_app.clone();
-        let nav_label = args.label.to_string();
-        builder = builder.on_navigation(move |_nav_url: &url::Url| {
-            crate::windows::schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
-            true
-        });
-    }
-    // v0.16.4: unread badges — track the live document.title like
-    // standalone windows do (windows.rs). The group has ONE live webview
-    // showing its ACTIVE tab, so the title lands on the active entry.
-    // The callback only locks TabState briefly and makes no window
-    // calls, so it is safe on whatever thread Tauri invokes it from.
-    {
-        let title_app = app.clone();
-        let title_label = args.label.to_string();
-        builder = builder.on_document_title_changed(move |_window, title: String| {
-            let Some(group_id) = group_id_from_label(&title_label) else {
-                return;
-            };
-            if let Some(tabstate) = title_app.try_state::<TabState>() {
-                if let Ok(mut state) = tabstate.inner.lock() {
-                    if let Some(group) = state.get_mut(group_id) {
-                        // A late event from a dying generation must not
-                        // stamp its title onto the tab the rebuild now
-                        // shows.
-                        if group.label == title_label {
-                            if let Some(entry) = group.tabs.get_mut(group.active) {
-                                entry.page_title = title;
-                                entry.page_title_seen = false;
-                            }
-                        }
+    let needs_cursor_center = args.geometry.is_none() && args.placement.is_none();
+    let label_owned = args.label.to_string();
+    let geometry = args.geometry;
+    let placement = args.placement;
+
+    let build_tab_once = |attempt: u8| -> Result<WebviewWindow, String> {
+        let app_for_thread = app.clone();
+        let label = label_owned.clone();
+        let url = page.url.clone();
+        let session_dir = page.session_dir.clone();
+        let title = page.title.clone();
+        let popup_ctx = page.popup.clone();
+        let adblock_css = page.adblock_css.clone();
+        let adblock_scriptlet = page.adblock_scriptlet.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<WebviewWindow, String>>();
+
+        std::thread::Builder::new()
+            .name(format!("appmaka-tabbed-open-{label}-{attempt}"))
+            .spawn(move || {
+                let mut builder =
+                    WebviewWindowBuilder::new(&app_for_thread, &label, WebviewUrl::External(url.clone()))
+                        .data_directory(session_dir)
+                        .title(&title)
+                        .background_color(tauri::webview::Color(22, 23, 27, 255));
+                #[cfg(windows)]
+                {
+                    builder = builder.decorations(false);
+                    builder = builder.additional_browser_args(crate::windows::WEBVIEW2_BROWSER_ARGS);
+                }
+                if let Some(g) = geometry {
+                    if g.maximized {
+                        builder = builder.maximized(true);
+                    } else {
+                        builder = builder.position(g.x, g.y).inner_size(g.w, g.h);
+                    }
+                } else if let Some(p) = placement {
+                    builder = builder.position(p.x, p.y).inner_size(p.width, p.height);
+                } else {
+                    builder = builder.inner_size(1200.0, 800.0);
+                }
+                let window_app = app_for_thread.clone();
+                match popup_ctx {
+                    Some(mut ctx) => {
+                        ctx.parent_label = label.clone();
+                        builder = builder.on_new_window(crate::windows::make_popup_handler(ctx));
+                    }
+                    None => {
+                        builder = builder.on_new_window(|_url: url::Url, _f| {
+                            tauri::webview::NewWindowResponse::Deny
+                        });
                     }
                 }
-            }
-        });
-    }
-    // v0.16.4: per-account RAM attribution, the standalone pattern
-    // (windows.rs): snapshot descendants before the build so the browser
-    // process spawned for this tab's data directory can be claimed for
-    // its account after. The empty group has no account to claim.
+                builder = builder
+                    .on_download(crate::downloads::make_download_handler(window_app.clone()))
+                    .initialization_script(crate::windows::TARGET_BLANK_SHIM_JS)
+                    .initialization_script(crate::windows::NAV_KEYS_JS)
+                    .initialization_script(crate::windows::shortcuts_overlay_js(&window_app));
+                if !adblock_css.is_empty() {
+                    builder = builder
+                        .initialization_script(crate::windows::cosmetic_init_script(&adblock_css));
+                }
+                if !adblock_scriptlet.is_empty() {
+                    builder = builder.initialization_script(adblock_scriptlet);
+                }
+                let cursor_js = crate::windows::saved_cursor_js(&window_app);
+                if !cursor_js.is_empty() {
+                    builder = builder.initialization_script(cursor_js);
+                }
+                for js in crate::userscripts::user_scripts_init_scripts(&window_app, url.as_str()) {
+                    builder = builder.initialization_script(js);
+                }
+                #[cfg(windows)]
+                {
+                    let nav_app = window_app.clone();
+                    let nav_label = label.clone();
+                    builder = builder.on_navigation(move |nav_url: &url::Url| {
+                        let app = nav_app.clone();
+                        let lbl = nav_label.clone();
+                        let u = nav_url.clone();
+                        std::thread::Builder::new()
+                            .name(format!("appmaka-tabbed-retint-{lbl}"))
+                            .spawn(move || {
+                                tint_tabbed_caption(&app, &lbl, &u);
+                                crate::windows::schedule_cursor_reapply(app.clone(), lbl.clone());
+                            })
+                            .ok();
+                        true
+                    });
+                }
+                #[cfg(not(windows))]
+                {
+                    let nav_app = window_app.clone();
+                    let nav_label = label.clone();
+                    builder = builder.on_navigation(move |_nav_url: &url::Url| {
+                        crate::windows::schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
+                        true
+                    });
+                }
+                {
+                    let title_app = app_for_thread.clone();
+                    let title_label = label.clone();
+                    builder = builder.on_document_title_changed(move |_window, title: String| {
+                        let Some(group_id) = group_id_from_label(&title_label) else {
+                            return;
+                        };
+                        if let Some(tabstate) = title_app.try_state::<TabState>() {
+                            if let Ok(mut state) = tabstate.inner.lock() {
+                                if let Some(group) = state.get_mut(group_id) {
+                                    if group.label == title_label {
+                                        if let Some(entry) = group.tabs.get_mut(group.active) {
+                                            entry.page_title = title;
+                                            entry.page_title_seen = false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                let res = builder.build().map_err(|e| e.to_string());
+                let _ = tx.send(res);
+            })
+            .map_err(|e| format!("failed to spawn tabbed window builder thread: {e}"))?;
+
+        match rx.recv_timeout(crate::windows::WEBVIEW2_BUILD_TIMEOUT) {
+            Ok(Ok(w)) => Ok(w),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(format!(
+                "WebView2 window creation timed out after {}s for {}",
+                crate::windows::WEBVIEW2_BUILD_TIMEOUT.as_secs(),
+                label_owned
+            )),
+        }
+    };
+
     let pids_before = crate::procattr::descendant_pids();
-    let window = builder
-        .build()
-        .map_err(|e| format!("could not open tabbed window: {e}"))?;
+    let window = match build_tab_once(1) {
+        Ok(w) => w,
+        Err(first_err) => {
+            let (app_id, account_id) = args
+                .entry
+                .map(|e| (e.app_id.as_str(), e.account_id.as_str()))
+                .unwrap_or(("tabbed", args.group_id));
+            let _ = crate::windows::recover_webview2_user_data_dir(
+                app,
+                app_id,
+                account_id,
+                &page.session_dir,
+                args.label,
+            );
+            build_tab_once(2).map_err(|retry_err| {
+                format!("could not open tabbed window: {retry_err} (first attempt: {first_err})")
+            })?
+        }
+    };
+    if needs_cursor_center {
+        crate::windows::center_window_on_cursor_monitor(app, &window);
+    }
     crate::windows::ensure_on_visible_monitor(app, &window);
     if let Some(entry) = args.entry {
         crate::procattr::capture_new_processes(

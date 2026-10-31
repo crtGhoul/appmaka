@@ -365,8 +365,8 @@ function PreviewSignInForm({ onError }: { onError: (msg: string) => void }) {
       </form>
       {previewOpen && (
         <p className="muted small">
-          Preview opened — sign in on the real site, then click “Add to the
-          Forge” in its header. Nothing is kept until you do.
+          Preview opened — sign in on the real site, then click “Add as app” in
+          its header. Nothing is kept until you do.
         </p>
       )}
       <p className="muted small">
@@ -3924,25 +3924,6 @@ function AppShell() {
             </div>
           )}
           {banners}
-          <div className="restore-row">
-            <button
-              type="button"
-              className="text-button"
-              title="Reopen windows from your last session"
-              onClick={() => void handleRestoreSession()}
-            >
-              Restore session
-            </button>
-            <button
-              type="button"
-              className="text-button"
-              title="Open one window with tabs for several apps"
-              onClick={() => void handleOpenTabbedWindow()}
-              disabled={openingTabs}
-            >
-              {openingTabs ? "Opening…" : "Open tabbed window"}
-            </button>
-          </div>
           <div className="folder-grid-wrap">
             {command && (
               <LauncherCommandRows
@@ -4039,16 +4020,28 @@ function AppShell() {
             {tileMenuNode}
           </div>
           <footer className="launcher-foot">
-            <button className="text-button" onClick={() => setView("library")}>
-              Manage apps →
-            </button>
-            <button
-              className="text-button"
-              onClick={() => setPaletteOpen(true)}
-              title="Jump to any app or account (Ctrl+K)"
-            >
-              Quick switch (Ctrl+K)
-            </button>
+            <div className="launcher-foot-primary">
+              <button className="text-button" onClick={() => setView("library")}>
+                Manage apps
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                title="Open one window with tabs for several apps"
+                onClick={() => void handleOpenTabbedWindow()}
+                disabled={openingTabs}
+              >
+                {openingTabs ? "Opening…" : "Tabbed window"}
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                title="Reopen windows from your last session"
+                onClick={() => void handleRestoreSession()}
+              >
+                Restore session
+              </button>
+            </div>
             <span className="launcher-foot-actions">
               <DownloadToolbarButton onOpen={() => setView("downloads")} />
               <AddProgramButton
@@ -4062,10 +4055,6 @@ function AppShell() {
                 onRefreshed={setPrograms}
                 onError={setError}
               />
-            </span>
-            <span className="muted small">
-              {apps.length} {apps.length === 1 ? "web app" : "web apps"} ·{" "}
-              {programs.length} {programs.length === 1 ? "program" : "programs"}
             </span>
           </footer>
         </div>
