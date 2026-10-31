@@ -1,5 +1,7 @@
 # AppMaka
 
+**Current version: v0.18.6** — [Release](https://github.com/crtGhoul/appmaka/releases/tag/v0.18.6)
+
 Turn any website into a desktop web app. Add a site by name + URL, and it
 opens in its own dedicated window — no browser tabs, no address bar clutter.
 
@@ -137,3 +139,16 @@ cd src-tauri && AR_x86_64_pc_windows_msvc="$PWD/../msvc-ar-wrapper.sh" RC=x86_64
   Electron-based wrappers.
 - A few sites (notably Google) sometimes refuse sign-ins inside embedded
   webviews; the fallback is opening that site in the system browser.
+
+---
+
+## Velazquez Lab
+
+More free tools from Cesar Velazquez: [Velazquez Lab](https://velazquez-lab.pages.dev)
+
+- GitHub: https://github.com/crtGhoul
+- Codeberg: https://codeberg.org/crtGhoul
+- YouTube: https://www.youtube.com/@VelazquezLabs
+- Reddit: https://www.reddit.com/user/Manteqaada/
+
+> Have you used Muse? If not, you can earn a free 1B tokens when you sign up with my code: 0NS5DG — redeem it in Muse Settings > Redeem token within 48 hours of joining. Joining alone does not count.
