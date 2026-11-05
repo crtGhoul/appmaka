@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Save as app</title>
+<style>
+  /* Popup bar (v0.18.7): one quiet button docked under a popup window.
+     Same dark, one-accent treatment as the tab strip (tabstrip.html).
+     Bundled separately (vite.config.ts "popupbar" input, loaded by the
+     backend as popupbar.html). */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12.5px;
+    color: #e1e1e1;
+    background: #1b1b1b;
+    overflow: hidden;
+    user-select: none;
+  }
+  #root { height: 100%; display: flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 0 6px; }
+  button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: #a0a0a0;
+    font: inherit;
+    cursor: pointer;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  button:hover { background: #2e2e2e; color: #fff; }
+  button:focus-visible { outline: 2px solid #4f46e5; outline-offset: -2px; }
+  button:disabled { color: #666; cursor: default; background: none; }
+  .save { padding: 0 10px; height: 26px; }
+  .dismiss { width: 26px; height: 26px; font-size: 14px; line-height: 1; }
+  .note { padding: 0 8px; color: #8a8f98; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+<script type="module" src="./src/popupbar.tsx"></script>
+</body>
+</html>
