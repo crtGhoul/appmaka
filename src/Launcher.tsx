@@ -1169,6 +1169,11 @@ export function LauncherSettingsPanel({
   const [allowPopupsGlobally, setAllowPopupsGlobally] = useState(
     settings.allow_popups_globally ?? false
   );
+  // v0.18.7: hide the top bar until the mouse touches the top edge
+  // (Windows only — Linux keeps native decorations).
+  const [autoHideTopBar, setAutoHideTopBar] = useState(
+    settings.auto_hide_top_bar ?? false
+  );
   // v0.13.18: dictation compatibility (global keyboard hooks off).
   const [dictationCompat, setDictationCompat] = useState(
     settings.dictation_compat ?? false
@@ -1543,6 +1548,24 @@ export function LauncherSettingsPanel({
     }
   }
 
+  // v0.18.7: hide the top bar until the mouse touches the top edge —
+  // applies live to open windows, no reopen needed.
+  async function handleAutoHideTopBar(enabled: boolean) {
+    setAutoHideTopBar(enabled);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("set_auto_hide_top_bar", {
+        enabled,
+      });
+      onSaved(updated);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setAutoHideTopBar(settings.auto_hide_top_bar ?? false);
+    }
+  }
+
   async function handleOpacity(percent: number) {
     setOpacity(percent);
     setFormError(null);
@@ -1868,6 +1891,23 @@ export function LauncherSettingsPanel({
           can open windows too.
         </span>
       </label>
+
+      {isWindows && (
+        <label className="inline-form">
+          <span>Hide the top bar until the mouse reaches the top</span>
+          <input
+            type="checkbox"
+            checked={autoHideTopBar}
+            onChange={(e) => void handleAutoHideTopBar(e.target.checked)}
+            aria-label="Hide the top bar until the mouse reaches the top"
+          />
+          <span className="help">
+            App windows hide their top bar and show it again when the
+            mouse touches the top edge — the same reveal full-screen
+            windows already have. Applies to open windows right away.
+          </span>
+        </label>
+      )}
 
       <label className="slider-row">
         <span>
