@@ -517,6 +517,12 @@ pub fn write_session(app: &AppHandle) {
     let prev = load_session(app);
     let mut accounts = Vec::new();
     for (label, app_id, account_id, opened_at, _last_url) in windows::live_tracked_accounts(app) {
+        // v0.18.7: split panes belong to their split group, not the
+        // session — restoring them here would bring a split back as
+        // standalone windows. Splits restore separately.
+        if crate::split::is_split_pane(app, &label) {
+            continue;
+        }
         let rect = merge_rect(
             app.get_webview_window(&label)
                 .as_ref()
@@ -839,6 +845,8 @@ pub fn maybe_restore_on_launch(app: &AppHandle) {
         if n > 0 {
             eprintln!("[appmaka] restored {n} window(s) from last session");
         }
+        // v0.18.7: splits that were open at shutdown come back as splits.
+        crate::split::restore_open_splits(app);
     } else if crate::pin::pinned_restore_applies(forced, restore) {
         // Not in restore mode, but pinned windows come back anyway — unless
         // the crash-loop sentinel forced ask-mode (it outranks the pin).
@@ -846,6 +854,7 @@ pub fn maybe_restore_on_launch(app: &AppHandle) {
         if n > 0 {
             eprintln!("[appmaka] restored {n} pinned window(s)");
         }
+        crate::split::restore_open_splits(app);
     }
     spawn_sentinel_grace(app);
 }
