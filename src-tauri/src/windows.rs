@@ -392,6 +392,10 @@ pub(crate) const WEBVIEW2_BUILD_TIMEOUT: Duration = Duration::from_secs(6);
 /// Check whether a WebView2 creation failure is `0x8007139F`
 /// (`ERROR_INVALID_STATE`, decimal `-2147019873`) or a creation timeout or
 /// lock/sharing error that can be healed by unlocking the user-data folder.
+///
+/// Test-only: no production caller remains, so it stays compiled for
+/// `test` (a plain `pub fn` would warn as dead code in normal builds).
+#[cfg(test)]
 pub fn is_webview2_recoverable_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("0x8007139f")
@@ -1387,6 +1391,9 @@ pub fn open_account_placed(
                 // v0.9.6: the caption strip dies with its window (no-op
                 // off Windows).
                 crate::caption::page_window_closed(&track_label);
+                // v0.18.7: a split pane closing reflows its group (or
+                // dissolves it when one pane is left).
+                crate::split::on_pane_window_destroyed(&track_app, &track_label);
             }
             // Geometry changes feed the session (v0.9.5), debounced so a
             // drag doesn't hammer the disk.
@@ -2481,6 +2488,9 @@ fn build_contained_window(
             ensure_on_visible_monitor(&ctx.app, &window);
             if kind == "popup" {
                 crate::popup_chrome::setup_popup_chrome(&ctx.app, &window, &label, url);
+                // v0.18.7: visible "Save as app" button docked under
+                // the popup (the system-menu item is easy to miss).
+                crate::popup_bar::attach_popup_bar(&ctx.app, &window, &label);
             }
             // Close-lifecycle trace (see log_popup_lifecycle): a popup
             // that never logs "destroyed" after its close is the zombie.
@@ -2655,6 +2665,9 @@ fn spawn_contained_window(
                 let b_title = title.clone();
                 let b_popup_ctx = popup_ctx.clone();
                 let b_init_script = initialization_script.clone();
+                // Windows-only use (the nav-hook gate below is
+                // #[cfg(windows)]); ungated it warns on Linux.
+                #[cfg(windows)]
                 let b_label_prefix = label_prefix.clone();
 
                 std::thread::Builder::new()
@@ -2752,6 +2765,12 @@ fn spawn_contained_window(
                             &label,
                             &url,
                         );
+                    }
+                    // v0.18.7: visible "Save as app" button docked under
+                    // the popup. Cross-platform (the bar is a Tauri
+                    // window, unlike the Windows-only system-menu item).
+                    if label_prefix == "popup" {
+                        crate::popup_bar::attach_popup_bar(&window_app, &_window, &label);
                     }
                 }
                 Err(e) => {
