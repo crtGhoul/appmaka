@@ -26,6 +26,7 @@ import { RoutinesSection } from "./RoutinesSection";
 import { ClipboardSection } from "./ClipboardSection";
 import { UserScriptsSection } from "./UserScriptsSection";
 import WorkspacesSection from "./WorkspacesSection";
+import SplitSection from "./SplitSection";
 import { filterAppsByWorkspace } from "./WorkspacesSection";
 import type { WorkspaceList } from "./WorkspacesSection";
 import { useHotkeyDispatch } from "./useHotkeyDispatch";
@@ -4303,6 +4304,13 @@ function AppShell() {
           pinned={launcherSettings?.pinned ?? []}
           onTogglePin={(itemId) => void handleTogglePin(itemId)}
         />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>Split view</h2>
+        </div>
+        <SplitSection apps={apps} onError={setError} />
       </section>
 
       <section className="panel">
