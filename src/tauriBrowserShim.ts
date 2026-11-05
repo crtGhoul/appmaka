@@ -45,6 +45,7 @@ const DEFAULT_LAUNCHER_SETTINGS: LauncherSettings = {
   custom_cursor_color: "violet",
   open_as_tabbed: false,
   allow_popups_globally: false,
+  auto_hide_top_bar: false,
   accent: "indigo",
   theme: "system",
   tile_size: "cozy",
@@ -150,11 +151,18 @@ function isNativeAppMakaWindow(): boolean {
   }
   const label =
     getHostTauriInternals()?.metadata?.currentWindow?.label ?? "";
+  // Our own trusted windows get the real backend; anything else gets the
+  // browser mock. Every new trusted window MUST be listed here — a
+  // missing prefix silently mocks it: getCurrentWindow() reads "main"
+  // and invoke returns the mock's canned data (the split bar shipped
+  // like that in v0.18.7 dev until the live test caught it).
   return (
     label === "main" ||
     label === "clipboard" ||
     label === "dock" ||
     label.startsWith("tabstrip-") ||
+    label.startsWith("splitbar-") ||
+    label.startsWith("popupbar-") ||
     label.startsWith("preview-")
   );
 }
