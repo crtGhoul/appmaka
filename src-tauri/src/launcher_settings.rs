@@ -149,6 +149,12 @@ pub struct LauncherSettings {
     /// Old files migrate to false.
     #[serde(default)]
     pub allow_popups_globally: bool,
+    /// Hide the top bar on app windows until the mouse touches the top
+    /// edge (v0.18.7): the full-screen strip's reveal, extended to
+    /// windowed windows. Windows-only (Linux keeps native decorations);
+    /// old files migrate to false.
+    #[serde(default)]
+    pub auto_hide_top_bar: bool,
     /// Accent color for the launcher/manager UI (v0.13.17): "indigo"
     /// (default), "violet", "blue", "teal", "green", "amber", or "rose".
     /// The frontend maps the name to a palette of CSS variables.
@@ -293,6 +299,7 @@ impl Default for LauncherSettings {
             custom_cursor: default_custom_cursor(),
             open_as_tabbed: false,
             allow_popups_globally: false,
+            auto_hide_top_bar: false,
             accent: default_accent(),
             theme: default_theme(),
             tile_size: default_tile_size(),
@@ -737,6 +744,24 @@ pub fn set_allow_popups_globally(
         .map_err(|e| format!("settings state poisoned: {e}"))?;
     settings.allow_popups_globally = enabled;
     save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Hide the top bar until the mouse touches the top edge (v0.18.7). JS:
+/// `invoke("set_auto_hide_top_bar", { enabled })`. Applies live: the
+/// caption thread re-seats every strip immediately.
+#[tauri::command]
+pub fn set_auto_hide_top_bar(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.auto_hide_top_bar = enabled;
+    save(&app, &settings)?;
+    crate::caption::set_auto_hide_top_bar(&app, enabled);
     Ok(settings.clone())
 }
 
