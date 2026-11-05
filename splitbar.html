@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Split view</title>
+<style>
+  /* Split bar (v0.18.7): group controls docked above a split view's panes.
+     Same dark, one-accent treatment as the tab strip (tabstrip.html).
+     Bundled separately (vite.config.ts "splitbar" input, loaded by the
+     backend as splitbar.html). */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12.5px;
+    color: #e1e1e1;
+    background: #1b1b1b;
+    overflow: hidden;
+    user-select: none;
+  }
+  #root { height: 100%; display: flex; align-items: center; gap: 2px; padding: 0 6px; }
+  .panes { flex: 1 1 auto; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
+  button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    color: #a0a0a0;
+    font: inherit;
+    cursor: pointer;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  button:hover { background: #2e2e2e; color: #fff; }
+  button:focus-visible { outline: 2px solid #4f46e5; outline-offset: -2px; }
+  button:disabled { color: #555; cursor: default; background: none; }
+  button.active { background: #3e3e3e; color: #f1f1f1; }
+  .pane { padding: 0 10px; height: 26px; max-width: 168px; overflow: hidden; text-overflow: ellipsis; }
+  .layout { padding: 0 8px; height: 26px; }
+  .close { padding: 0 10px; height: 26px; }
+  .close:hover { background: #e81123; color: #fff; }
+  .sep { flex: none; width: 1px; height: 20px; background: #3a3a3a; margin: 0 4px; }
+  .loading { padding: 0 12px; color: #8a8f98; }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+<script type="module" src="./src/splitbar.tsx"></script>
+</body>
+</html>
