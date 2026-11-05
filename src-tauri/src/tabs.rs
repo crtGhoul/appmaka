@@ -384,6 +384,11 @@ fn tab_info(store: &AppStore, group: &TabGroup, group_closed: bool) -> TabInfo {
 // ---------------------------------------------------------------------------
 
 /// Logical-pixel geometry saved across a tab-switch rebuild.
+///
+/// Copy: the tab builder closes over it once per attempt (the retry
+/// rebuilds the window), so a move out of the closure would make the
+/// retry uncallable (E0382, from the 0.18.7 multi-monitor commit).
+#[derive(Clone, Copy)]
 struct SavedGeometry {
     x: f64,
     y: f64,
