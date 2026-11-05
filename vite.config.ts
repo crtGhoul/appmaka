@@ -55,6 +55,12 @@ export default defineConfig(async () => ({
         clipboard: "clipboard.html",
         // v0.10.0: Linux tab-strip window (Windows paints a native strip).
         tabstrip: "tabstrip.html",
+        // v0.18.7: popup bar — one "Save as app" button docked under a
+        // popup window (popups have no IPC, so the button is its own
+        // trusted window like the tab strip).
+        popupbar: "popupbar.html",
+        // v0.18.7: split bar — group controls docked above a split view.
+        splitbar: "splitbar.html",
       },
     },
   },
