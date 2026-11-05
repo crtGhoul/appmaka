@@ -44,6 +44,12 @@ mod caption;
 /// "Add to applications" for popup windows (v0.9.11): backend flow shared
 /// by the dashboard button, the system-menu item and Ctrl+Shift+A.
 mod popup_add;
+/// Popup bar (v0.18.7): one "Save as app" button docked under a popup
+/// window — popups have no IPC, so the button is its own trusted window.
+mod popup_bar;
+/// Split view (v0.18.7): up to four apps side by side in one window —
+/// a group of ordinary account windows tiled by a shared bar.
+mod split;
 /// Windows-only native popup tweaks (v0.9.11): system-menu item +
 /// title-bar theme-color tint. The module itself is cfg'd out elsewhere.
 #[cfg(windows)]
@@ -411,6 +417,124 @@ async fn switch_tab(
     index: usize,
 ) -> Result<tabs::TabInfo, String> {
     tabs::switch_tab(&app, &store, &adblock, &tabstate, &group_id, index)
+}
+
+// ---------------------------------------------------------------------------
+// v0.18.7: split view — command wrappers live here (like open_account
+// above); the core logic lives in split.rs.
+// ---------------------------------------------------------------------------
+
+/// Open a split view with two to four apps side by side. Async: builds
+/// windows (never on a sync IPC thread). JS:
+/// `invoke("open_split_window", { panes, layout })` — panes are
+/// `{ app_id, account_id }` (snake_case struct fields); layout is
+/// "vertical" | "horizontal" | "three" | "four" | null (null = from count).
+#[tauri::command]
+async fn open_split_window(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    winstate: State<'_, windows::WindowState>,
+    splitstate: State<'_, split::SplitState>,
+    panes: Vec<split::SplitPane>,
+    layout: Option<split::SplitLayout>,
+) -> Result<split::SplitInfo, String> {
+    split::open_split(&app, &store, &adblock, &winstate, &splitstate, panes, layout)
+}
+
+/// Reopen a saved split layout. Async: builds windows.
+/// JS: `invoke("open_split_layout", { layoutId })`
+#[tauri::command]
+async fn open_split_layout(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    winstate: State<'_, windows::WindowState>,
+    splitstate: State<'_, split::SplitState>,
+    layout_id: String,
+) -> Result<split::SplitInfo, String> {
+    split::open_saved_layout(&app, &store, &adblock, &winstate, &splitstate, &layout_id)
+}
+
+/// Close a split view (every pane, pin-aware, then the bar). Async: a
+/// pin confirm can block. JS: `invoke("close_split_window", { groupId })`
+#[tauri::command]
+async fn close_split_window(
+    app: AppHandle,
+    splitstate: State<'_, split::SplitState>,
+    group_id: String,
+) -> Result<(), String> {
+    split::close_split(&app, &splitstate, &group_id)
+}
+
+/// Switch a split's layout. Async: moves windows.
+/// JS: `invoke("set_split_layout", { groupId, layout })`
+#[tauri::command]
+async fn set_split_layout(
+    app: AppHandle,
+    splitstate: State<'_, split::SplitState>,
+    group_id: String,
+    layout: split::SplitLayout,
+) -> Result<split::SplitInfo, String> {
+    split::set_split_layout(&app, &splitstate, &group_id, layout)
+}
+
+/// Close one pane of a split (survivors reflow). Async: moves windows.
+/// JS: `invoke("remove_split_pane", { groupId, index })` — returns the
+/// group's info, or null when the group dissolved.
+#[tauri::command]
+async fn remove_split_pane(
+    app: AppHandle,
+    splitstate: State<'_, split::SplitState>,
+    group_id: String,
+    index: usize,
+) -> Result<Option<split::SplitInfo>, String> {
+    split::remove_split_pane(&app, &splitstate, &group_id, index)
+}
+
+/// Focus one pane (brings its window forward, in place).
+/// JS: `invoke("focus_split_pane", { groupId, index })`
+#[tauri::command]
+async fn focus_split_pane(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    winstate: State<'_, windows::WindowState>,
+    splitstate: State<'_, split::SplitState>,
+    group_id: String,
+    index: usize,
+) -> Result<(), String> {
+    split::focus_split_pane(&app, &store, &adblock, &winstate, &splitstate, &group_id, index)
+}
+
+/// Save an open split as a named layout.
+/// JS: `invoke("save_split_layout", { name, groupId })`
+#[tauri::command]
+fn save_split_layout(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    splitstate: State<'_, split::SplitState>,
+    name: String,
+    group_id: String,
+) -> Result<split::SplitList, String> {
+    split::save_split_layout(&app, &store, &splitstate, name, &group_id)
+}
+
+/// Delete a saved split layout (open groups are untouched).
+/// JS: `invoke("delete_split_layout", { layoutId })`
+#[tauri::command]
+fn delete_split_layout(
+    app: AppHandle,
+    layout_id: String,
+) -> Result<split::SplitList, String> {
+    split::delete_split_layout(&app, &layout_id)
+}
+
+/// List saved split layouts plus open split groups.
+/// JS: `invoke("list_splits")`
+#[tauri::command]
+fn list_splits(app: AppHandle) -> Result<split::SplitList, String> {
+    split::list_splits(&app)
 }
 
 /// Add an (app, account) tab and switch to it.
@@ -1113,6 +1237,8 @@ fn main() {
             app.manage(PreviewState::default());
             // Tabbed app windows (v0.10.0): live group bookkeeping.
             app.manage(tabs::TabState::default());
+            // Split view (v0.18.7): live group bookkeeping.
+            app.manage(split::SplitState::default());
             // Copyable error dialogs (v0.11.0): recent-errors ring buffer.
             app.manage(Mutex::new(errors::ErrorLog::default()));
             // Restore the persisted error log (v0.16.3) so a crash still
@@ -1222,6 +1348,9 @@ fn main() {
             // v0.10.0 tabbed-window E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_tabs_flow(app.handle());
+            // v0.18.7 split-view E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_split_flow(app.handle());
             // v0.11.0 error-dialog + tint E2E drivers (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_error_flow(app.handle());
@@ -1441,6 +1570,16 @@ fn main() {
             close_tab,
             close_tabbed_window,
             list_tabbed_windows,
+            // v0.18.7: split view
+            open_split_window,
+            open_split_layout,
+            close_split_window,
+            set_split_layout,
+            remove_split_pane,
+            focus_split_pane,
+            save_split_layout,
+            delete_split_layout,
+            list_splits,
             // v0.11.0: copyable error dialogs
             errors::get_recent_errors,
             errors::copy_error_details,
@@ -1492,6 +1631,7 @@ fn main() {
             launcher_settings::set_dictation_compat,
             launcher_settings::set_open_as_tabbed,
             launcher_settings::set_allow_popups_globally,
+            launcher_settings::set_auto_hide_top_bar,
             // v0.8.0: hidden-programs collapse state (polish)
             launcher_settings::set_hidden_section_collapsed,
             // v0.17.0: workspace dock
