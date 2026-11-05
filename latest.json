@@ -1,14 +1,14 @@
 {
   "version": "0.18.7",
-  "notes": "Fix 3-monitor desktop web app opening (unscoped WebView2 timeout + orphan lock cleanup + physical cursor monitor placement) and quiet UI pass.",
-  "pub_date": "2026-10-30T20:15:00Z",
+  "notes": "Split view (up to 4 apps in one window), popup Save as app button, auto-hide top bar, and multi-monitor stability.",
+  "pub_date": "2026-11-05T19:46:07Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1ZweEpZZGZRYmFmQjg0ek8wa3RHRkRNQVdGM3BsNmhPcGJaVXhWeUZiNmNaTmRjdFdHVmNUYWMzMkg1NEdDaHlOYUJXdUZ2TXBxQXJuVWFpOFIwbXcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzQzOTE4CWZpbGU6QXBwTWFrYV8wLjE4LjZfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguNgphUC85NVdhTkxtYjRsOWFtUlVYSk9ZLys4Yi9TMUdrY25HSGhBRS9DaTNJbGNvaFhXRmtmRVdEZVcycmZrOE95QitOaktRVUloa2Y1TXlhMTF2NitBZz09Cg==",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2JqVTEvNEo1Yy9TNTgzNDd5Q3RGT3krRTVWM2xnUnRGWUFHRXh3S3R0ZUlDaVhkYzI4RVQ1M0I2aEF5aWVsa3grOHBDeTJXZklFdkNCWVVjQWptUUFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTA3OTU5CWZpbGU6QXBwTWFrYV8wLjE4LjdfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguNwp6SFc2WHRybTlOc2ZvUmk1M1J6S3U0ZWJqbngrN1k5UUFIV0s4Z0tQbjhBT0tIaEk2OC9SWGlQc1dNeWlYSEtxV1ZxbEtOeEZMOUIwamxSdUJsTVpDUT09Cg==",
       "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.7/AppMaka_0.18.7_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1Z1MmcvVHhNMjRwNkhuUGF4MXZvM3h0UW5EMkg1clRaOC8yWmJRRU50WVh6b0FVM05NZzNlYTEvMis5V3ArQlpNRUw1dWR0QzVUMTZ5UlFXWitrMXdJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMzQzMTg0CWZpbGU6QXBwTWFrYV8wLjE4LjZfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjYKTURFYloydFNpMEJTa1hZUFhMN1NyWmw1czVhdWRabnI0Vi9RNHJObDhhVU1LdHJaZ2hJSngva08wSUZPcyswbHVORmlOb3lSNE52SDZLNUpuVmFTQ3c9PQo=",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2RDRFA4eENkNlI4ZndZWFA0Z0hOT2ZwQ0ROelprNGpCaVVsZldwT1FQRjg1d1JHTlZhOERzUERDVzNpUGZ5RUpCY2NiUWJ1VTQzdEZKcTBpOW9BRUFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTA3MTk5CWZpbGU6QXBwTWFrYV8wLjE4LjdfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjcKZVNvd3ltMmhpVUU1ZFJvYkxCS0paQVVqeEg0eDhIY3hhU1BNcVl1enh2U1EraTdxbFdxVkdNUEVjb3JRKzdCZzVwa2FvK2R5QTBBdko5Y3BCbld3QkE9PQo=",
       "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.7/AppMaka_0.18.7_amd64.AppImage"
     }
   }
