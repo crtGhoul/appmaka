@@ -305,6 +305,15 @@ fn run_flow(app: &AppHandle, url: &str, mode: &str) {
     std::thread::sleep(std::time::Duration::from_secs(10));
     log_rows(app, "after-open");
 
+    // v0.18.7: the popup bar window should be docked under the popup.
+    let bar_present = find_popup_label(app)
+        .and_then(|l| app.get_webview_window(&format!("popupbar-{l}")))
+        .is_some();
+    eprintln!(
+        "[e2e] popup-bar: {}",
+        if bar_present { "present" } else { "missing" }
+    );
+
     match mode {
         "add" => {
             let Some(label) = find_popup_label(app) else {
@@ -361,6 +370,164 @@ fn find_popup_label(app: &AppHandle) -> Option<String> {
         .into_iter()
         .find(|r| r.label.starts_with("popup-"))
         .map(|r| r.label)
+}
+
+// ---------------------------------------------------------------------------
+// v0.18.7 split view E2E driver (Xvfb smoke).
+//
+// Driven by `APPMAKA_DEBUG_SPLIT_MODE=split`. The shell script seeds four
+// apps (apps.json); this opens a four-pane split, verifies the bar window
+// exists and the panes are tiled 2x2, then removes one pane and verifies
+// the survivors reflow to the three-pane layout. Logs `[e2e]` lines for
+// the shell script to assert on. Same contract as the tabs flow above:
+// debug builds only, inert without the env var, detached thread, never
+// blocks startup.
+// ---------------------------------------------------------------------------
+
+/// Called once from setup. Returns immediately.
+pub fn maybe_run_split_flow(app: &AppHandle) {
+    let mode = std::env::var("APPMAKA_DEBUG_SPLIT_MODE").unwrap_or_default();
+    if mode != "split" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-split".to_string())
+        .spawn(move || run_split_flow(&app));
+}
+
+fn run_split_flow(app: &AppHandle) {
+    use crate::split;
+    // Let startup, state load, and the store settle.
+    std::thread::sleep(std::time::Duration::from_secs(6));
+
+    let store = match app.try_state::<crate::store::AppStore>() {
+        Some(s) => s,
+        None => {
+            eprintln!("[e2e] split: no AppStore state");
+            return;
+        }
+    };
+    let adblock = match app.try_state::<crate::adblock::AdblockState>() {
+        Some(s) => s,
+        None => {
+            eprintln!("[e2e] split: no AdblockState");
+            return;
+        }
+    };
+    let winstate = match app.try_state::<crate::windows::WindowState>() {
+        Some(s) => s,
+        None => {
+            eprintln!("[e2e] split: no WindowState");
+            return;
+        }
+    };
+    let splitstate = match app.try_state::<split::SplitState>() {
+        Some(s) => s,
+        None => {
+            eprintln!("[e2e] split: no SplitState");
+            return;
+        }
+    };
+    let apps: Vec<String> = match store.list() {
+        Ok(list) => list.iter().map(|a| a.id.clone()).collect(),
+        Err(e) => {
+            eprintln!("[e2e] split: store.list failed: {e}");
+            return;
+        }
+    };
+    eprintln!("[e2e] split: seeded apps: {}", apps.join(","));
+    if apps.len() < 4 {
+        eprintln!("[e2e] split: need 4 seeded apps");
+        return;
+    }
+    let first_account = |app_id: &str| -> Option<String> {
+        store
+            .get(app_id)
+            .ok()
+            .and_then(|a| a.accounts.first().map(|ac| ac.id.clone()))
+    };
+    let panes: Vec<split::SplitPane> = apps
+        .iter()
+        .take(4)
+        .map(|id| split::SplitPane {
+            app_id: id.clone(),
+            account_id: first_account(id).unwrap_or_default(),
+        })
+        .collect();
+
+    // 1. Open a four-pane split (layout defaults from the count).
+    let info = match split::open_split(app, &store, &adblock, &winstate, &splitstate, panes, None)
+    {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[e2e] split: open failed: {e}");
+            return;
+        }
+    };
+    let gid = info.id.clone();
+    eprintln!(
+        "[e2e] split: opened group {} panes={} layout={:?}",
+        gid,
+        info.panes.len(),
+        info.layout
+    );
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    // 2. The bar window exists, and all four pane windows are live.
+    let bar = app.get_webview_window(&format!("splitbar-{gid}"));
+    eprintln!(
+        "[e2e] split: bar {}",
+        if bar.is_some() { "present" } else { "missing" }
+    );
+    let mut live = 0;
+    for pane in &info.panes {
+        let label = crate::windows::account_window_label(&pane.app_id, &pane.account_id);
+        if let Some(w) = app.get_webview_window(&label) {
+            live += 1;
+            if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
+                eprintln!(
+                    "[e2e] split: pane {} at {},{} {}x{}",
+                    pane.app_id, pos.x, pos.y, size.width, size.height
+                );
+            }
+        }
+    }
+    eprintln!("[e2e] split: live panes {live}/4");
+
+    // 3. Remove one pane: the survivors reflow to the three-pane layout.
+    let info = match split::remove_split_pane(app, &splitstate, &gid, 3) {
+        Ok(Some(i)) => i,
+        Ok(None) => {
+            eprintln!("[e2e] split: group dissolved after one removal (expected reflow)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("[e2e] split: remove failed: {e}");
+            return;
+        }
+    };
+    eprintln!(
+        "[e2e] split: after remove panes={} layout={:?}",
+        info.panes.len(),
+        info.layout
+    );
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    // Log the survivors' rects: the reflow must have landed (Three layout
+    // in a 1280x800 frame = left tall 640x764, right two 640x382 each;
+    // outer sizes add the window decorations, ~+2w/+27h under openbox).
+    for pane in &info.panes {
+        let label = crate::windows::account_window_label(&pane.app_id, &pane.account_id);
+        if let Some(w) = app.get_webview_window(&label) {
+            if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
+                eprintln!(
+                    "[e2e] split: reflowed pane {} at {},{} {}x{}",
+                    pane.app_id, pos.x, pos.y, size.width, size.height
+                );
+            }
+        }
+    }
+    eprintln!("[e2e] split: flow done");
 }
 
 // ---------------------------------------------------------------------------
