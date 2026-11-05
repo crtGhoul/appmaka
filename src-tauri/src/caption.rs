@@ -204,6 +204,7 @@ mod imp {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::sync::mpsc;
+    use std::sync::Mutex;
     use std::sync::OnceLock;
     use tauri::{AppHandle, Manager, WebviewWindow};
     use windows::core::{w, PWSTR};
@@ -260,6 +261,8 @@ mod imp {
             /// strip so a plain page strip is a real title bar, not an
             /// empty black bar.
             title: String,
+            /// v0.18.7: hide the strip until the top-edge reveal.
+            auto_hide: bool,
         },
         RemoveCaption {
             label: String,
@@ -280,6 +283,9 @@ mod imp {
         /// v0.13.18: dictation compatibility toggled — re-evaluate the
         /// Esc hook against the current setting.
         RefreshEscHook,
+        /// v0.18.7: the auto-hide top bar setting changed — set
+        /// `auto_hide` on every plain page strip and re-seat them.
+        SetAutoHide { enabled: bool },
         // v0.10.0: tabbed windows. The strip paints tabs from a snapshot;
         // clicks/keys arrive as commands and are fanned out to tabs.rs on
         // worker threads (window building never happens in the proc).
@@ -376,6 +382,11 @@ mod imp {
         /// while fs_reveal placed it over a fullscreen owner). The first
         /// normal placement afterwards clears the band again.
         fs_topmost: bool,
+        /// v0.18.7: hide this strip until the mouse touches the top edge,
+        /// windowed as well as fullscreen (the fullscreen reveal
+        /// generalized). Plain page strips only; tabbed strips keep
+        /// their tab bar — hiding it would strand tab switching.
+        auto_hide: bool,
     }
 
     /// v0.13.20: poll timer on the strip window, running ONLY while its
@@ -2191,9 +2202,9 @@ mod imp {
             // Owner is minimized: hide the strip. It restores automatically
             // when the owner is un-minimized and reposition is called.
             Hide(HWND),
-            // v0.13.20: owner is fullscreen: hide the strip AND start the
-            // top-edge reveal poll (see FS_REVEAL_TIMER).
-            HideFs(HWND),
+            // v0.13.20: hide the strip AND start the top-edge reveal
+            // poll (see FS_REVEAL_TIMER). Fullscreen or auto-hide.
+            HideReveal(HWND),
             Place {
                 hwnd: HWND,
                 tx: i32,
@@ -2224,19 +2235,37 @@ mod imp {
             // follows the exit places it again. v0.13.20: while the
             // reveal poll has the strip up (mouse at the top edge), it
             // sits at the monitor's top over the fullscreen window.
-            if has_mi && owner_is_fullscreen(cp.owner) {
+            // v0.18.7: auto-hide does the same for a windowed owner —
+            // hidden until the poll reveals it, placed at the owner's
+            // top edge instead of the monitor's.
+            let fullscreen = has_mi && owner_is_fullscreen(cp.owner);
+            if fullscreen || cp.auto_hide {
                 if cp.fs_reveal {
-                    let w = mi.rcMonitor.right - mi.rcMonitor.left;
+                    if fullscreen {
+                        let w = mi.rcMonitor.right - mi.rcMonitor.left;
+                        return Some(Plan::Place {
+                            hwnd: cp.hwnd,
+                            tx: mi.rcMonitor.left,
+                            ty: mi.rcMonitor.top,
+                            w,
+                            h,
+                            z: Z::Top,
+                        });
+                    }
+                    let mut orc = RECT::default();
+                    if GetWindowRect(cp.owner, &mut orc).is_err() {
+                        return Some(Plan::Skip);
+                    }
                     return Some(Plan::Place {
                         hwnd: cp.hwnd,
-                        tx: mi.rcMonitor.left,
-                        ty: mi.rcMonitor.top,
-                        w,
+                        tx: orc.left,
+                        ty: orc.top,
+                        w: orc.right - orc.left,
                         h,
                         z: Z::Top,
                     });
                 }
-                return Some(Plan::HideFs(cp.hwnd));
+                return Some(Plan::HideReveal(cp.hwnd));
             }
             let z = if cp.fs_topmost { Z::UnTop } else { Z::Keep };
             if IsZoomed(cp.owner).as_bool() {
@@ -2286,9 +2315,9 @@ mod imp {
                 let _ = KillTimer(Some(hwnd), FS_REVEAL_TIMER);
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
-            Plan::HideFs(hwnd) => {
+            Plan::HideReveal(hwnd) => {
                 let _ = ShowWindow(hwnd, SW_HIDE);
-                // Poll for the top-edge reveal while fullscreen lasts.
+                // Poll for the top-edge reveal while hidden.
                 // SetTimer on an existing id just resets it.
                 let _ = SetTimer(Some(hwnd), FS_REVEAL_TIMER, FS_REVEAL_POLL_MS, None);
             }
@@ -2349,6 +2378,7 @@ mod imp {
             owner: HWND,
             scale: f64,
             revealed: bool,
+            auto_hide: bool,
         }
         let plan = with_chrome(|ch| {
             let label = ch.by_hwnd.get(&(hwnd.0 as isize))?.clone();
@@ -2358,16 +2388,19 @@ mod imp {
                 owner: cp.owner,
                 scale: cp.scale,
                 revealed: cp.fs_reveal,
+                auto_hide: cp.auto_hide,
             })
         });
         let Some(plan) = plan else {
             return;
         };
-        // Fullscreen is over (or the owner is gone/minimized): stand
-        // down — clear the flag, stop the poll, restore normal placing.
+        // Fullscreen is over and auto-hide is off (or the owner is
+        // gone/minimized): stand down — clear the flag, stop the poll,
+        // restore normal placing.
+        let fullscreen = owner_is_fullscreen(plan.owner);
         if !IsWindow(Some(plan.owner)).as_bool()
             || IsIconic(plan.owner).as_bool()
-            || !owner_is_fullscreen(plan.owner)
+            || (!fullscreen && !plan.auto_hide)
         {
             if plan.revealed {
                 with_chrome(|ch| {
@@ -2381,31 +2414,33 @@ mod imp {
             reposition_caption(&plan.label);
             return;
         }
-        let hmon = MonitorFromWindow(plan.owner, MONITOR_DEFAULTTONEAREST);
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
-            return;
-        }
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
-        let mon = mi.rcMonitor;
         let h = (BAR_H_LOGICAL * plan.scale).round() as i32;
-        let in_x = pt.x >= mon.left && pt.x < mon.right;
-        // Reveal only when the cursor truly touches the top edge; hide
-        // once it drops below the strip plus a small slack, so using
-        // the strip itself never flickers it away.
-        let want_show = in_x && pt.y <= mon.top + 2;
-        let want_hide = !in_x || pt.y > mon.top + h + 12;
-        let target = if want_show {
-            true
-        } else if want_hide {
-            false
+        // Reveal edge: the monitor's top in fullscreen, the owner's top
+        // edge under auto-hide (the strip covers the page's top, not the
+        // screen's). The show/hide/hold decision is the shared pure
+        // helper below, so it stays unit-tested.
+        let (edge, span_left, span_right) = if fullscreen {
+            let hmon = MonitorFromWindow(plan.owner, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                return;
+            }
+            let mon = mi.rcMonitor;
+            (mon.top, mon.left, mon.right)
         } else {
-            plan.revealed
+            let mut orc = RECT::default();
+            if GetWindowRect(plan.owner, &mut orc).is_err() {
+                return;
+            }
+            (orc.top, orc.left, orc.right)
         };
+        let in_span = pt.x >= span_left && pt.x < span_right;
+        let target = super::reveal_target(in_span, pt.y, edge, h, plan.revealed);
         if target != plan.revealed {
             with_chrome(|ch| {
                 if let Some(cp) = ch.captions.get_mut(&plan.label) {
@@ -2429,6 +2464,7 @@ mod imp {
         scale: f64,
         tabbed: Option<TabStripData>,
         page_title: String,
+        auto_hide: bool,
     ) {
         // Phase 1: duplicate check under a short borrow.
         let exists = with_chrome(|ch| Some(ch.captions.contains_key(label))).unwrap_or(false);
@@ -2511,6 +2547,7 @@ mod imp {
                     last_y: 0,
                     fs_reveal: false,
                     fs_topmost: false,
+                    auto_hide,
                 },
             );
             Some(())
@@ -2763,10 +2800,11 @@ mod imp {
                 label,
                 scale,
                 title,
+                auto_hide,
             } => {
                 // create_caption manages its own short borrows: the
                 // CreateWindowExW call must run with no borrow held.
-                create_caption(HWND(owner as *mut _), &label, scale, None, title);
+                create_caption(HWND(owner as *mut _), &label, scale, None, title, auto_hide);
             }
             ChromeCmd::RemoveCaption { label } => {
                 remove_caption(&label);
@@ -2852,6 +2890,30 @@ mod imp {
                     }
                 }
             }
+            ChromeCmd::SetAutoHide { enabled } => {
+                // Plain page strips only: tabbed strips keep their tab
+                // bar. Labels collected under one short borrow; the flag
+                // is set under the same borrow, and the repositions run
+                // after it (two-phase discipline).
+                let labels = with_chrome(|ch| {
+                    let labels: Vec<String> = ch
+                        .captions
+                        .iter()
+                        .filter(|(_, cp)| cp.tabbed.is_none())
+                        .map(|(label, _)| label.clone())
+                        .collect();
+                    for cp in ch.captions.values_mut() {
+                        if cp.tabbed.is_none() {
+                            cp.auto_hide = enabled;
+                        }
+                    }
+                    Some(labels)
+                })
+                .unwrap_or_default();
+                for label in labels {
+                    reposition_caption(&label);
+                }
+            }
             // v0.10.0: tabbed-window commands.
             ChromeCmd::AddTabbedCaption {
                 owner,
@@ -2859,12 +2921,15 @@ mod imp {
                 scale,
                 tabs,
             } => {
+                // Tabbed strips never auto-hide: the tab bar is the
+                // window's top bar, and hiding it strands tab switching.
                 create_caption(
                     HWND(owner as *mut _),
                     &label,
                     scale,
                     Some(tabs),
                     String::new(),
+                    false,
                 );
             }
             ChromeCmd::UpdateTabbedTabs { label, tabs } => {
@@ -3037,6 +3102,17 @@ mod imp {
         }
     }
 
+    /// v0.18.7: apply the auto-hide top bar setting to every plain page
+    /// strip, live. Called by the settings command after saving.
+    pub fn set_auto_hide_top_bar(_app: &AppHandle, enabled: bool) {
+        let Some((tx, wake)) = CHROME_CTL.get().cloned() else {
+            return;
+        };
+        if tx.send(ChromeCmd::SetAutoHide { enabled }).is_ok() {
+            let _ = unsafe { SetEvent(wake.0) };
+        }
+    }
+
     /// Infallible by contract (v0.9.7): any failure — including a panic —
     /// leaves a plain frameless window (minimizable from the taskbar,
     /// closable via Alt+F4). A dead strip never kills the process.
@@ -3060,6 +3136,13 @@ mod imp {
         // The window title ("App — Account") becomes the strip's title.
         // Empty titles fall back to no text (the pre-v0.12.0 look).
         let title = window.title().unwrap_or_default();
+        // v0.18.7: a strip created while auto-hide is on starts hidden;
+        // the reveal poll (started by reposition) brings it back on
+        // mouse-to-top. Missing state means the setting is off.
+        let auto_hide = app
+            .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+            .and_then(|s| s.lock().ok().map(|s| s.auto_hide_top_bar))
+            .unwrap_or(false);
         let Some((tx, wake)) = ensure_chrome(app) else {
             return;
         };
@@ -3068,6 +3151,7 @@ mod imp {
             label: label.to_string(),
             scale,
             title,
+            auto_hide,
         });
         unsafe {
             let _ = SetEvent(wake.0);
@@ -3191,8 +3275,8 @@ mod imp {
 #[cfg(windows)]
 pub use imp::{
     page_window_closed, page_window_moved, page_window_opened, page_window_set_tint,
-    refresh_esc_hook, tabbed_window_opened, tabbed_window_set_tint, tabbed_window_updated,
-    tint_log, TabStripData,
+    refresh_esc_hook, set_auto_hide_top_bar, tabbed_window_opened, tabbed_window_set_tint,
+    tabbed_window_updated, tint_log, TabStripData,
 };
 
 #[cfg(not(windows))]
@@ -3246,6 +3330,31 @@ pub fn tabbed_window_set_tint(_label: &str, _tint: Option<(u8, u8, u8)>) {}
 #[cfg(not(windows))]
 #[allow(dead_code)]
 pub fn page_window_set_tint(_label: &str, _tint: Option<(u8, u8, u8)>) {}
+
+/// v0.18.7 non-Windows stub: no caption strips on Linux, so there is
+/// nothing to hide.
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn set_auto_hide_top_bar(_app: &tauri::AppHandle, _enabled: bool) {}
+
+/// Pure top-edge reveal decision, shared by the fullscreen and auto-hide
+/// polls: show when the cursor touches the edge (within its span), hide
+/// once it drops below the strip plus a small slack, hold the current
+/// state in between — so using the strip itself never flickers it away.
+///
+/// Windows-only in production (the only caller lives in the Windows
+/// caption impl); the unit tests call it on every target, so it stays
+/// compiled for `test` too.
+#[cfg(any(windows, test))]
+fn reveal_target(in_span: bool, cursor_y: i32, edge_y: i32, strip_h: i32, revealed: bool) -> bool {
+    if !in_span || cursor_y > edge_y + strip_h + 12 {
+        false
+    } else if cursor_y <= edge_y + 2 {
+        true
+    } else {
+        revealed
+    }
+}
 
 #[cfg(not(windows))]
 #[allow(dead_code)]
@@ -3327,5 +3436,31 @@ mod tests {
         assert!(!esc_gesture_closes(gesture(true, false, false)));
         assert!(!esc_gesture_closes(gesture(false, true, false)));
         assert!(!esc_gesture_closes(gesture(false, false, true)));
+    }
+
+    #[test]
+    fn reveal_shows_when_cursor_touches_the_edge() {
+        // Edge at y=100 (a windowed owner's top), strip 30 tall.
+        assert!(reveal_target(true, 100, 100, 30, false));
+        assert!(reveal_target(true, 102, 100, 30, false));
+    }
+
+    #[test]
+    fn reveal_hides_below_the_strip_plus_slack() {
+        assert!(!reveal_target(true, 143, 100, 30, true));
+        assert!(!reveal_target(true, 200, 100, 30, true));
+    }
+
+    #[test]
+    fn reveal_holds_between_edge_and_hide_line() {
+        // On the strip itself (y=110-130): keep whatever state it had,
+        // so using the strip never flickers it away.
+        assert!(reveal_target(true, 115, 100, 30, true));
+        assert!(!reveal_target(true, 115, 100, 30, false));
+    }
+
+    #[test]
+    fn reveal_hides_outside_the_span() {
+        assert!(!reveal_target(false, 100, 100, 30, true));
     }
 }
