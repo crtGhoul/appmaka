@@ -1,31 +1,34 @@
-//! Split view (v0.18.7): up to four apps side by side in one window.
+//! Split view (v0.18.8): up to four apps side by side in ONE window.
 //!
-//! A split is a *group* of ordinary account windows, not one window with
-//! several webviews: Tauri's multi-webview API (`Window::add_child`)
-//! needs the `unstable` cargo feature, which this repo deliberately does
-//! not use, and tabbed windows already proved the one-live-webview-per-
-//! window design (tabs.rs). So each pane is a normal `acct-*` window —
-//! same session dir, same adblock, same caption strip — tiled by a
-//! shared bar window across the top, exactly like the tab strip docks
-//! above a tabbed window.
+//! A split is one frame window holding child webviews: the bar is a child
+//! webview across the top, each pane is a child webview below it, all
+//! added with Tauri's multi-webview API (`Window::add_child`, which
+//! needs the `unstable` cargo feature — enabled for this in Cargo.toml
+//! since v0.18.8; the runtime side of that feature is empty, it only
+//! gates Tauri's own unstable APIs). v0.18.7 tiled ordinary account
+//! windows under a shared bar window, but the user asked for a real
+//! single window — moving the frame moves every pane with it, one
+//! taskbar entry, one Alt+Tab entry — so the panes became children of
+//! the frame instead.
 //!
-//! The bar is the group's anchor: dragging it moves every pane,
-//! resizing it re-tiles them, minimizing it hides them, closing it
-//! closes them all (pin-aware, through the normal account-close path).
-//! Panes keep their own caption strips, so each pane navigates on its
-//! own; the bar holds only group controls (layout, close all).
+//! Each pane keeps its own session dir (the same per-account dir
+//! account windows use), the same adblock scripts, cursor, popup
+//! policy and downloads — the pane builder in windows.rs is the
+//! account-window builder with a different host. Panes have no caption
+//! strip: the frame's bar is the only chrome, with pane chips (click
+//! to focus, x to close one pane), layout buttons, and the window
+//! controls.
 //!
 //! Layout is a function of pane count, never a free choice: 2 panes are
 //! side-by-side or stacked, 3 panes are one tall + two stacked, 4 panes
 //! are a 2x2 grid. Removing a pane reflows the survivors and re-picks
-//! the layout; one pane left dissolves the group (the pane stays open
-//! as an ordinary window).
+//! the layout; one pane left dissolves the group (the pane reopens as
+//! an ordinary window).
 //!
 //! Saved layouts and open groups persist in `<app-data>/splits.json`
 //! (the workspaces.rs pattern: load-or-default, tmp+rename, file lock).
-//! Open groups restore at startup after the session restore — session
-//! writes skip split panes (session.rs), so a split never comes back as
-//! four small standalone windows.
+//! Open groups restore at startup after the session restore — panes
+//! are never tracked as windows, so the session never sees them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -33,11 +36,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager, Position, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    window::WindowBuilder, AppHandle, Emitter, Manager, Position, Rect, Size, Webview, WebviewUrl,
+    Window, WindowEvent,
+};
+use tauri::webview::WebviewBuilder;
 
 use crate::pin::CloseIntent;
 use crate::store::AppStore;
-use crate::windows::{account_window_label, WindowPlacement};
 
 /// Height of the split bar (logical px).
 pub const SPLIT_BAR_H: f64 = 36.0;
@@ -93,8 +99,10 @@ pub fn layouts_for_count(count: usize) -> Vec<SplitLayout> {
     }
 }
 
-/// One pane: an (app, account) pair. The live window label derives from
-/// it (`account_window_label`), exactly like standalone windows.
+/// One pane: an (app, account) pair. The live child-webview label
+/// derives from the group id and the pane's index, never from the
+/// account alone — the same account must never share a webview label
+/// with a standalone window.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SplitPane {
     #[serde(default)]
@@ -104,9 +112,27 @@ pub struct SplitPane {
 }
 
 impl SplitPane {
-    pub fn label(&self) -> String {
-        account_window_label(&self.app_id, &self.account_id)
+    /// The account's standalone-window label (pin state, session dir,
+    /// restore seeds are all keyed by it).
+    pub fn acct_label(&self) -> String {
+        crate::windows::account_window_label(&self.app_id, &self.account_id)
     }
+}
+
+/// Prefix for pane child-webview labels. The cursor code consults it
+/// (panes are webviews, not windows).
+pub const SPLIT_PANE_LABEL_PREFIX: &str = "splitpane-";
+
+/// Frame window label for a group.
+pub fn split_frame_label(group_id: &str) -> String {
+    format!("split-{group_id}")
+}
+
+/// Child-webview label for one pane. Derived from the account, not
+/// the pane's position: removing a pane shifts the survivors' indices,
+/// and a position-based label would strand them under stale labels.
+pub fn pane_webview_label(group_id: &str, app_id: &str, account_id: &str) -> String {
+    format!("{SPLIT_PANE_LABEL_PREFIX}{group_id}-{app_id}-{account_id}")
 }
 
 /// Logical-pixel rectangle. The group's frame includes the bar at its
@@ -161,28 +187,15 @@ fn split_rows(area: &FrameRect, n: usize) -> Vec<FrameRect> {
         .collect()
 }
 
-/// Merge a bar move/resize into the group frame: the bar spans the
-/// frame's top edge, so its x/y/w ARE the frame's — but its height (36)
-/// is not. Storing the bar's own rect as the frame collapses the pane
-/// area to zero height and strands the panes (GTK refuses a zero-height
-/// resize but still applies the move).
-fn frame_after_bar_move(frame: &FrameRect, bar_x: f64, bar_y: f64, bar_w: f64) -> FrameRect {
-    FrameRect {
-        x: bar_x,
-        y: bar_y,
-        w: bar_w,
-        h: frame.h,
-    }
-}
-
-/// Pure tiling: pane rects (logical, below the bar) for a frame. The
-/// rects tile the pane area exactly — no gaps, no overlap.
-pub fn pane_rects(layout: SplitLayout, frame: &FrameRect) -> Vec<FrameRect> {
+/// Pure tiling: pane rects for a frame of this size, relative to the
+/// frame's client area (x from 0, y from just below the bar). The rects
+/// tile the pane area exactly — no gaps, no overlap.
+pub fn pane_rects(layout: SplitLayout, w: f64, h: f64) -> Vec<FrameRect> {
     let area = FrameRect {
-        x: frame.x,
-        y: frame.y + SPLIT_BAR_H,
-        w: frame.w,
-        h: (frame.h - SPLIT_BAR_H).max(0.0),
+        x: 0.0,
+        y: SPLIT_BAR_H,
+        w,
+        h: (h - SPLIT_BAR_H).max(0.0),
     };
     match layout {
         SplitLayout::TwoVertical => split_cols(&area, 2),
@@ -215,6 +228,9 @@ pub struct SplitGroup {
     pub panes: Vec<SplitPane>,
     #[serde(default)]
     pub frame: FrameRect,
+    /// Index of the focused pane (the bar's highlighted chip).
+    #[serde(default)]
+    pub active_pane: usize,
 }
 
 /// A saved split layout: a name plus the panes to reopen.
@@ -238,6 +254,7 @@ pub struct SplitInfo {
     pub layout: SplitLayout,
     pub panes: Vec<SplitPaneInfo>,
     pub frame: FrameRect,
+    pub active_pane: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -382,6 +399,7 @@ fn info_for(store: &AppStore, group: &SplitGroup) -> SplitInfo {
         layout: group.layout,
         panes,
         frame: group.frame,
+        active_pane: group.active_pane,
     }
 }
 
@@ -406,19 +424,24 @@ fn list_splits_inner(app: &AppHandle) -> Result<SplitList, String> {
     })
 }
 
-/// Bar window label for a group.
-pub fn split_bar_label(group_id: &str) -> String {
-    format!("splitbar-{group_id}")
-}
-
-/// Reposition every pane of a group into the frame's current rect. No
-/// state lock is held here — the group is a snapshot.
+/// Reposition the bar and every pane of a group into the frame's
+/// current size. Child webviews move with the frame natively; only
+/// their bounds need setting, and only on resize. No state lock is
+/// held here — the group is a snapshot.
 fn retile(app: &AppHandle, group: &SplitGroup) {
-    let rects = pane_rects(group.layout, &group.frame);
+    if let Some(bar) = app.get_webview(&format!("splitbar-{}", group.id)) {
+        let _ = bar.set_bounds(Rect {
+            position: Position::Logical(tauri::LogicalPosition::new(0.0, 0.0)),
+            size: Size::Logical(tauri::LogicalSize::new(group.frame.w, SPLIT_BAR_H)),
+        });
+    }
+    let rects = pane_rects(group.layout, group.frame.w, group.frame.h);
     for (pane, rect) in group.panes.iter().zip(rects) {
-        if let Some(w) = app.get_webview_window(&pane.label()) {
-            let _ = w.set_position(Position::Logical(tauri::LogicalPosition::new(rect.x, rect.y)));
-            let _ = w.set_size(Size::Logical(tauri::LogicalSize::new(rect.w, rect.h)));
+        if let Some(w) = app.get_webview(&pane_webview_label(&group.id, &pane.app_id, &pane.account_id)) {
+            let _ = w.set_bounds(Rect {
+                position: Position::Logical(tauri::LogicalPosition::new(rect.x, rect.y)),
+                size: Size::Logical(tauri::LogicalSize::new(rect.w, rect.h)),
+            });
         }
     }
 }
@@ -467,87 +490,61 @@ fn default_frame_on_monitor(app: &AppHandle) -> FrameRect {
     frame
 }
 
-/// Build the bar window for a group and wire it to the group's lifetime:
-/// move/resize re-tiles the panes, minimize hides them, close closes the
-/// whole group (pin-aware, on a worker thread — a pin confirm can block).
-fn build_bar(app: &AppHandle, group: &SplitGroup) -> Result<WebviewWindow, String> {
-    let bar = WebviewWindowBuilder::new(
-        app,
-        split_bar_label(&group.id),
-        WebviewUrl::App("splitbar.html".into()),
-    )
-    .title("Split view")
-    .decorations(false)
-    .skip_taskbar(true)
-    .focused(false)
-    .inner_size(group.frame.w, SPLIT_BAR_H)
-    .position(group.frame.x, group.frame.y)
-    .build()
-    .map_err(|e| format!("could not open the split bar: {e}"))?;
+/// Build the frame window for a group and wire it to the group's
+/// lifetime: resize re-tiles the bar and panes, close closes the whole
+/// group (pin-aware, on a worker thread — a pin confirm can block).
+/// The frame starts hidden so the user never sees an empty window;
+/// open_split shows it once the bar and panes are built. Child
+/// webviews move with the frame natively, so Moved needs no handler.
+fn build_frame(app: &AppHandle, group: &SplitGroup) -> Result<Window, String> {
+    let frame = WindowBuilder::new(app, split_frame_label(&group.id))
+        .title("Split view")
+        .decorations(false)
+        .background_color(tauri::utils::config::Color(0x1b, 0x1b, 0x1b, 0xff))
+        .inner_size(group.frame.w, group.frame.h)
+        .min_inner_size(640.0, 400.0)
+        .position(group.frame.x, group.frame.y)
+        .visible(false)
+        .build()
+        .map_err(|e| format!("could not open the split window: {e}"))?;
+    // The bar is the frame's first child webview, across the top.
+    let bar = frame
+        .add_child(
+            WebviewBuilder::new(
+                format!("splitbar-{}", group.id),
+                WebviewUrl::App("splitbar.html".into()),
+            )
+            .focused(false),
+            Position::Logical(tauri::LogicalPosition::new(0.0, 0.0)),
+            Size::Logical(tauri::LogicalSize::new(group.frame.w, SPLIT_BAR_H)),
+        )
+        .map_err(|e| format!("could not open the split bar: {e}"))?;
+    let _ = bar;
     let ev_app = app.clone();
     let ev_group = group.id.clone();
-    bar.on_window_event(move |event| match event {
-        WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
-            // Read the bar's live x/y/w and re-tile. The bar spans the
-            // frame's top edge, so its x/y/w ARE the frame's — but its
-            // height (36) is NOT the frame's height. Storing the bar's
-            // own rect as the frame collapses the pane area to zero
-            // height (GTK then refuses every pane resize and the panes
-            // strand at their old sizes in their new positions), so
-            // only x/y/w move; the stored height stands.
-            let bar_xyw = ev_app
-                .get_webview_window(&split_bar_label(&ev_group))
-                .and_then(|b| {
-                    let scale = b.scale_factor().unwrap_or(1.0).max(0.1);
-                    match (b.outer_position(), b.outer_size()) {
-                        (Ok(p), Ok(s)) => Some((
-                            p.x as f64 / scale,
-                            p.y as f64 / scale,
-                            s.width as f64 / scale,
-                        )),
-                        _ => None,
-                    }
+    frame.on_window_event(move |event| match event {
+        WindowEvent::Resized(_) => {
+            // Read the frame's live size and re-tile. Position is the
+            // window manager's business; only w/h change the layout.
+            let size = ev_app
+                .get_window(&split_frame_label(&ev_group))
+                .and_then(|f| {
+                    let scale = f.scale_factor().unwrap_or(1.0).max(0.1);
+                    f.inner_size()
+                        .ok()
+                        .map(|s| (s.width as f64 / scale, s.height as f64 / scale))
                 });
-            if let Some((bx, by, bw)) = bar_xyw {
+            if let Some((w, h)) = size {
                 let group = ev_app.try_state::<SplitState>().and_then(|st| {
                     st.inner.lock().ok().and_then(|mut m| {
                         let g = m.get_mut(&ev_group)?;
-                        g.frame = frame_after_bar_move(&g.frame, bx, by, bw);
+                        g.frame.w = w;
+                        g.frame.h = h;
                         Some(g.clone())
                     })
                 });
                 if let Some(group) = group {
                     retile(&ev_app, &group);
-                }
-            }
-        }
-        WindowEvent::Focused(focused) => {
-            // Minimize hides the panes; plain focus loss keeps them.
-            // Same rule as the tab strip (tabs.rs).
-            let panes: Vec<String> = ev_app
-                .try_state::<SplitState>()
-                .and_then(|st| {
-                    st.inner.lock().ok().and_then(|m| {
-                        m.get(&ev_group)
-                            .map(|g| g.panes.iter().map(|p| p.label()).collect())
-                    })
-                })
-                .unwrap_or_default();
-            if *focused {
-                for label in panes {
-                    if let Some(w) = ev_app.get_webview_window(&label) {
-                        let _ = w.show();
-                    }
-                }
-            } else if ev_app
-                .get_webview_window(&split_bar_label(&ev_group))
-                .and_then(|w| w.is_minimized().ok())
-                .unwrap_or(false)
-            {
-                for label in panes {
-                    if let Some(w) = ev_app.get_webview_window(&label) {
-                        let _ = w.hide();
-                    }
                 }
             }
         }
@@ -567,13 +564,15 @@ fn build_bar(app: &AppHandle, group: &SplitGroup) -> Result<WebviewWindow, Strin
         }
         _ => {}
     });
-    Ok(bar)
+    Ok(frame)
 }
 
-/// Open a split group: bar plus panes. Panes open through the normal
-/// account path, so sessions, adblock, and caption strips all apply.
-/// An already-open account window is pulled into the grid (its
-/// placement moves it); closing the split closes its panes.
+/// Open a split group: one frame window, the bar across its top, one
+/// child webview per pane. An already-open account window is pulled
+/// into the split (closed first — two webviews must never share one
+/// session dir); a pinned one asks once, and a refusal stops the open
+/// before anything is built. An account already live in another split
+/// is refused outright. One failure rolls the whole group back.
 pub fn open_split(
     app: &AppHandle,
     store: &AppStore,
@@ -594,21 +593,48 @@ pub fn open_split(
         None => layout_for_count(panes.len())
             .ok_or_else(|| "A split view holds two to four apps.".to_string())?,
     };
+    // One account, one live webview: an account already in another
+    // split would share its session dir with this split's pane.
+    for pane in &panes {
+        if group_with_account(splitstate, &pane.app_id, &pane.account_id).is_some() {
+            return Err("One of those apps is already open in another split view.".to_string());
+        }
+    }
+    // Pull open standalone windows into the split. Pinned ones ask
+    // once (the close-all pattern: one dialog, approvals land in
+    // ConfirmedCloses for the close below); a refusal stops the open.
+    let open_labels: Vec<String> = panes
+        .iter()
+        .map(|p| p.acct_label())
+        .filter(|l| app.get_webview_window(l).is_some())
+        .collect();
+    if !open_labels.is_empty() {
+        let approved = crate::pin::confirm_batch_close(app, &open_labels);
+        for label in &open_labels {
+            if crate::pin::is_pinned(app, label) && !approved.contains(label) {
+                return Err("One of those apps is pinned in its own window. Unpin it first, then open the split view.".to_string());
+            }
+        }
+        for label in &open_labels {
+            crate::windows::close_tracked_window(app, label, CloseIntent::User);
+        }
+    }
     let group = SplitGroup {
         id: new_id(),
         layout,
         panes,
         frame: default_frame_on_monitor(app),
+        active_pane: 0,
     };
-    // Register first: panes opened below are already members for the
-    // Destroyed handler and the session skip.
+    // Register first: a pane built below is already a member for the
+    // duplicate check and the focus guard.
     splitstate
         .inner
         .lock()
         .map_err(|_| "split state lock poisoned".to_string())?
         .insert(group.id.clone(), group.clone());
-    let bar = match build_bar(app, &group) {
-        Ok(b) => b,
+    let frame = match build_frame(app, &group) {
+        Ok(f) => f,
         Err(e) => {
             splitstate
                 .inner
@@ -618,30 +644,28 @@ pub fn open_split(
             return Err(e);
         }
     };
-    let _ = bar;
-    // Panes, in order. One failure rolls the whole group back: opened
-    // panes close, the bar closes, the group is forgotten.
-    let rects = pane_rects(group.layout, &group.frame);
-    let mut opened: Vec<String> = Vec::new();
+    // Panes, in order. One failure rolls the whole group back: built
+    // panes close, the frame closes, the group is forgotten.
+    let rects = pane_rects(group.layout, group.frame.w, group.frame.h);
+    let mut opened: Vec<Webview> = Vec::new();
     for (pane, rect) in group.panes.iter().zip(rects) {
-        let placement = WindowPlacement {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-        };
-        match crate::windows::open_account_placed(
-            app, store, adblock, winstate, &pane.app_id, &pane.account_id, Some(placement), false,
-            false,
+        match crate::windows::open_split_pane_webview(
+            app,
+            store,
+            adblock,
+            winstate,
+            &frame,
+            &pane_webview_label(&group.id, &pane.app_id, &pane.account_id),
+            &pane.app_id,
+            &pane.account_id,
+            (rect.x, rect.y, rect.w, rect.h),
         ) {
-            Ok(()) => opened.push(pane.label()),
+            Ok(w) => opened.push(w),
             Err(e) => {
-                for label in opened {
-                    crate::windows::close_tracked_window(app, &label, CloseIntent::User);
+                for w in opened {
+                    let _ = w.close();
                 }
-                if let Some(b) = app.get_webview_window(&split_bar_label(&group.id)) {
-                    let _ = b.close();
-                }
+                let _ = frame.close();
                 splitstate
                     .inner
                     .lock()
@@ -649,6 +673,28 @@ pub fn open_split(
                     .map(|mut m| m.remove(&group.id));
                 return Err(format!("could not open a pane: {e}"));
             }
+        }
+    }
+    // Show the frame (it was built hidden) and focus the first pane.
+    let _ = frame.show();
+    // Re-apply the layout once the frame is visible and realized, in
+    // case showing clobbered a bound. Main thread: GTK calls from
+    // worker threads are not safe. NOTE (Linux): this changes nothing
+    // there — Tauri's Linux runtime packs every child webview into the
+    // frame's vertical box and ignores bounds entirely (wry
+    // `add_to_container`, GtkBox branch), so panes stack full-width at
+    // equal heights instead of tiling. Windows (SetWindowPos) and
+    // macOS honor bounds; only Linux is affected.
+    {
+        let retile_app = app.clone();
+        let retile_group = group.clone();
+        let _ = app.run_on_main_thread(move || {
+            retile(&retile_app, &retile_group);
+        });
+    }
+    if let Some(first) = group.panes.first() {
+        if let Some(w) = app.get_webview(&pane_webview_label(&group.id, &first.app_id, &first.account_id)) {
+            let _ = w.set_focus();
         }
     }
     let info = info_for(store, &group);
@@ -674,9 +720,10 @@ pub fn open_saved_layout(
     open_split(app, store, adblock, winstate, splitstate, saved.panes, Some(saved.layout))
 }
 
-/// Close a split: every pane through the normal pin-aware close, then
-/// the bar. Taking the group out of state first makes the panes'
-/// Destroyed handlers no-ops by construction.
+/// Close a split: pin-aware (one dialog for every pinned pane; a
+/// refusal leaves the whole group open), then the group leaves state,
+/// the panes close, and the frame closes. The snapshot is taken before
+/// the pin check, so a refusal leaves the group exactly as it was.
 pub fn close_split(
     app: &AppHandle,
     splitstate: &SplitState,
@@ -686,13 +733,35 @@ pub fn close_split(
         .inner
         .lock()
         .map_err(|_| "split state lock poisoned".to_string())?
+        .get(group_id)
+        .cloned()
+        .ok_or_else(|| "That split view is already gone.".to_string())?;
+    let labels: Vec<String> = group.panes.iter().map(|p| p.acct_label()).collect();
+    let approved = crate::pin::confirm_batch_close(app, &labels);
+    for label in &labels {
+        if crate::pin::is_pinned(app, label) && !approved.contains(label) {
+            return Err("One of those apps is pinned. Unpin it first, then close the split view.".to_string());
+        }
+    }
+    let group = splitstate
+        .inner
+        .lock()
+        .map_err(|_| "split state lock poisoned".to_string())?
         .remove(group_id)
         .ok_or_else(|| "That split view is already gone.".to_string())?;
+    // close_tracked_window consumes the pin approvals and prunes the
+    // pane's renderer processes (panes aren't windows, so its own
+    // window close is a no-op); the child webview closes after.
     for pane in &group.panes {
-        crate::windows::close_tracked_window(app, &pane.label(), CloseIntent::User);
+        crate::windows::close_tracked_window(app, &pane.acct_label(), CloseIntent::User);
     }
-    if let Some(bar) = app.get_webview_window(&split_bar_label(group_id)) {
-        let _ = bar.close();
+    for pane in &group.panes {
+        if let Some(w) = app.get_webview(&pane_webview_label(&group.id, &pane.app_id, &pane.account_id)) {
+            let _ = w.close();
+        }
+    }
+    if let Some(frame) = app.get_window(&split_frame_label(&group.id)) {
+        let _ = frame.close();
     }
     let _ = persist_open(app, splitstate);
     emit_changed(app);
@@ -729,19 +798,56 @@ pub fn set_split_layout(
     Ok(info_for(&store, &group))
 }
 
-/// Close one pane of a group. Survivors reflow; one pane left dissolves
-/// the group (the pane stays open as an ordinary window). Returns the
-/// group's info, or None when it dissolved.
+/// Close one pane of a group. Pin-aware: a pinned pane asks once, and
+/// a refusal leaves the group untouched (Ok with the current info).
+/// Survivors reflow; one pane left dissolves the group — the last pane
+/// reopens as an ordinary standalone window. Returns the group's info,
+/// or None when it dissolved.
 pub fn remove_split_pane(
     app: &AppHandle,
+    store: &AppStore,
+    adblock: &crate::adblock::AdblockState,
+    winstate: &crate::windows::WindowState,
     splitstate: &SplitState,
     group_id: &str,
     index: usize,
 ) -> Result<Option<SplitInfo>, String> {
-    let store = app
-        .try_state::<AppStore>()
-        .ok_or_else(|| "app store unavailable".to_string())?;
-    let (group, removed_label) = {
+    let group = splitstate
+        .inner
+        .lock()
+        .map_err(|_| "split state lock poisoned".to_string())?
+        .get(group_id)
+        .cloned()
+        .ok_or_else(|| "That split view is already gone.".to_string())?;
+    if index >= group.panes.len() {
+        return Err("That pane is already gone.".to_string());
+    }
+    let removed = group.panes[index].clone();
+    // Dissolving (2 -> 1) closes the survivor's pane too, so its pin
+    // counts: one batch dialog covers both, and a refusal is a no-op
+    // for the whole group.
+    let dissolving = group.panes.len() - 1 < MIN_PANES;
+    let survivor = if dissolving {
+        group
+            .panes
+            .iter()
+            .enumerate()
+            .find(|(i, _)| *i != index)
+            .map(|(_, p)| p.clone())
+    } else {
+        None
+    };
+    let mut confirm_labels = vec![removed.acct_label()];
+    if let Some(s) = &survivor {
+        confirm_labels.push(s.acct_label());
+    }
+    let approved = crate::pin::confirm_batch_close(app, &confirm_labels);
+    for label in &confirm_labels {
+        if crate::pin::is_pinned(app, label) && !approved.contains(label) {
+            return Ok(Some(info_for(store, &group)));
+        }
+    }
+    let group = {
         let mut state = splitstate
             .inner
             .lock()
@@ -749,25 +855,40 @@ pub fn remove_split_pane(
         let group = state
             .get_mut(group_id)
             .ok_or_else(|| "That split view is already gone.".to_string())?;
-        if index >= group.panes.len() {
-            return Err("That pane is already gone.".to_string());
-        }
-        let removed = group.panes.remove(index).label();
-        (group.clone(), removed)
+        group.panes.remove(index);
+        group.clone()
     };
-    crate::windows::close_tracked_window(app, &removed_label, CloseIntent::User);
-    if group.panes.len() < MIN_PANES {
-        // Dissolve: the last pane stays open as an ordinary window.
+    // close_tracked_window consumes the pin approval and prunes the
+    // pane's renderer processes; the child webview closes after.
+    crate::windows::close_tracked_window(app, &removed.acct_label(), CloseIntent::User);
+    if let Some(w) = app.get_webview(&pane_webview_label(&group.id, &removed.app_id, &removed.account_id)) {
+        let _ = w.close();
+    }
+    if dissolving {
+        // The group leaves state FIRST, so the focus guard in
+        // open_account_placed can't misfire on the closing pane.
+        let Some(last) = survivor else {
+            return Ok(None);
+        };
         splitstate
             .inner
             .lock()
             .ok()
             .map(|mut m| m.remove(group_id));
-        if let Some(bar) = app.get_webview_window(&split_bar_label(group_id)) {
-            let _ = bar.close();
+        crate::windows::close_tracked_window(app, &last.acct_label(), CloseIntent::User);
+        if let Some(w) = app.get_webview(&pane_webview_label(&group.id, &last.app_id, &last.account_id)) {
+            let _ = w.close();
+        }
+        if let Some(frame) = app.get_window(&split_frame_label(group_id)) {
+            let _ = frame.close();
         }
         let _ = persist_open(app, splitstate);
         emit_changed(app);
+        // Fresh standalone window for the last pane (lands on its home
+        // or last page — the same known restore limitation).
+        let _ = crate::windows::open_account_placed(
+            app, store, adblock, winstate, &last.app_id, &last.account_id, None, false, false,
+        );
         return Ok(None);
     }
     let group = {
@@ -779,34 +900,82 @@ pub fn remove_split_pane(
             .get_mut(group_id)
             .ok_or_else(|| "That split view is already gone.".to_string())?;
         group.layout = layout_for_count(group.panes.len()).unwrap_or(SplitLayout::TwoVertical);
+        group.active_pane = group.active_pane.min(group.panes.len() - 1);
         group.clone()
     };
     retile(app, &group);
     let _ = persist_open(app, splitstate);
     emit_changed(app);
-    Ok(Some(info_for(&store, &group)))
+    Ok(Some(info_for(store, &group)))
 }
 
-/// Focus one pane (brings its window forward, in place — no move).
+/// Focus one pane: show and focus the frame, focus the pane's child
+/// webview, mark it active. No rebuild — the pane is already live.
 pub fn focus_split_pane(
     app: &AppHandle,
-    store: &AppStore,
-    adblock: &crate::adblock::AdblockState,
-    winstate: &crate::windows::WindowState,
     splitstate: &SplitState,
     group_id: &str,
     index: usize,
 ) -> Result<(), String> {
-    let pane = splitstate
-        .inner
-        .lock()
-        .map_err(|_| "split state lock poisoned".to_string())?
-        .get(group_id)
-        .and_then(|g| g.panes.get(index).cloned())
-        .ok_or_else(|| "That pane is already gone.".to_string())?;
-    crate::windows::open_account_placed(
-        app, store, adblock, winstate, &pane.app_id, &pane.account_id, None, false, false,
-    )
+    let group = {
+        let mut state = splitstate
+            .inner
+            .lock()
+            .map_err(|_| "split state lock poisoned".to_string())?;
+        let group = state
+            .get_mut(group_id)
+            .ok_or_else(|| "That split view is already gone.".to_string())?;
+        if index >= group.panes.len() {
+            return Err("That pane is already gone.".to_string());
+        }
+        group.active_pane = index;
+        group.clone()
+    };
+    if let Some(frame) = app.get_window(&split_frame_label(group_id)) {
+        let _ = frame.show();
+        let _ = frame.set_focus();
+    }
+    let pane = &group.panes[index];
+    if let Some(w) = app.get_webview(&pane_webview_label(group_id, &pane.app_id, &pane.account_id)) {
+        let _ = w.set_focus();
+    }
+    let _ = persist_open(app, splitstate);
+    emit_changed(app);
+    Ok(())
+}
+
+/// The live split group holding this account, if any, with the pane's
+/// index. open_split refuses a duplicate; open_account_placed focuses
+/// it instead of building a second webview on the session dir.
+pub fn group_with_account(
+    splitstate: &SplitState,
+    app_id: &str,
+    account_id: &str,
+) -> Option<(String, usize)> {
+    let state = splitstate.inner.lock().ok()?;
+    for (id, group) in state.iter() {
+        if let Some(i) = group
+            .panes
+            .iter()
+            .position(|p| p.app_id == app_id && p.account_id == account_id)
+        {
+            return Some((id.clone(), i));
+        }
+    }
+    None
+}
+
+/// Focus the split pane holding this account, if one is live. True
+/// when a pane was focused (the caller must not open a second webview
+/// on the account's session dir).
+pub fn focus_pane_for_account(app: &AppHandle, app_id: &str, account_id: &str) -> bool {
+    let Some(splitstate) = app.try_state::<SplitState>() else {
+        return false;
+    };
+    let Some((group_id, index)) = group_with_account(&splitstate, app_id, account_id) else {
+        return false;
+    };
+    focus_split_pane(app, &splitstate, &group_id, index).is_ok()
 }
 
 /// Save an open group as a named layout. Re-saving the same group
@@ -870,74 +1039,6 @@ pub fn list_splits(app: &AppHandle) -> Result<SplitList, String> {
     list_splits_inner(app)
 }
 
-/// True when this window label belongs to a split pane. Session writes
-/// consult it so split panes never restore as standalone windows.
-pub fn is_split_pane(app: &AppHandle, label: &str) -> bool {
-    app.try_state::<SplitState>()
-        .and_then(|st| {
-            st.inner.lock().ok().map(|m| {
-                m.values()
-                    .any(|g| g.panes.iter().any(|p| p.label() == label))
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// A pane window was destroyed (its own X, or a close from elsewhere):
-/// drop it from its group, reflow the survivors, dissolve the group
-/// when one pane is left. Called from the account Destroyed handler.
-/// No state lock is held across any window call.
-pub fn on_pane_window_destroyed(app: &AppHandle, label: &str) {
-    let Some(splitstate) = app.try_state::<SplitState>() else {
-        return;
-    };
-    let plan = {
-        let mut state = match splitstate.inner.lock() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let mut found: Option<(String, SplitGroup)> = None;
-        for (id, group) in state.iter_mut() {
-            if let Some(idx) = group.panes.iter().position(|p| p.label() == label) {
-                group.panes.remove(idx);
-                found = Some((id.clone(), group.clone()));
-                break;
-            }
-        }
-        found
-    };
-    let Some((group_id, group)) = plan else {
-        return;
-    };
-    if group.panes.len() < MIN_PANES {
-        // Dissolve: remove the group, close the bar, leave the last
-        // pane (if any) open as an ordinary window.
-        if let Ok(mut state) = splitstate.inner.lock() {
-            state.remove(&group_id);
-        }
-        if let Some(bar) = app.get_webview_window(&split_bar_label(&group_id)) {
-            let _ = bar.close();
-        }
-        let _ = persist_open(app, &splitstate);
-        emit_changed(app);
-        return;
-    }
-    let group = {
-        let mut state = match splitstate.inner.lock() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let Some(group) = state.get_mut(&group_id) else {
-            return;
-        };
-        group.layout = layout_for_count(group.panes.len()).unwrap_or(SplitLayout::TwoVertical);
-        group.clone()
-    };
-    retile(app, &group);
-    let _ = persist_open(app, &splitstate);
-    emit_changed(app);
-}
-
 /// Reopen the splits that were open at shutdown, after the session
 /// restore. Best-effort per group: one bad group never stops the rest.
 pub fn restore_open_splits(app: &AppHandle) {
@@ -976,18 +1077,13 @@ mod tests {
         }
     }
 
-    fn frame() -> FrameRect {
-        FrameRect {
-            x: 100.0,
-            y: 100.0,
-            w: 1200.0,
-            h: 800.0,
-        }
-    }
-
     #[test]
-    fn bar_label_prefixes_group_id() {
-        assert_eq!(split_bar_label("sp-1"), "splitbar-sp-1");
+    fn frame_and_pane_labels_derive_from_group_id() {
+        assert_eq!(split_frame_label("sp-1"), "split-sp-1");
+        assert_eq!(
+            pane_webview_label("sp-1", "app-1", "main"),
+            "splitpane-sp-1-app-1-main"
+        );
     }
 
     #[test]
@@ -1001,60 +1097,47 @@ mod tests {
 
     #[test]
     fn two_vertical_tiles_side_by_side() {
-        let rects = pane_rects(SplitLayout::TwoVertical, &frame());
+        let rects = pane_rects(SplitLayout::TwoVertical, 1200.0, 800.0);
         assert_eq!(rects.len(), 2);
-        // Below the bar (y=136), equal halves, no gap.
-        assert_eq!(rects[0], FrameRect { x: 100.0, y: 136.0, w: 600.0, h: 764.0 });
-        assert_eq!(rects[1], FrameRect { x: 700.0, y: 136.0, w: 600.0, h: 764.0 });
+        // Below the bar (y=36), equal halves, no gap, frame-relative.
+        assert_eq!(rects[0], FrameRect { x: 0.0, y: 36.0, w: 600.0, h: 764.0 });
+        assert_eq!(rects[1], FrameRect { x: 600.0, y: 36.0, w: 600.0, h: 764.0 });
     }
 
     #[test]
     fn two_horizontal_tiles_stacked() {
-        let rects = pane_rects(SplitLayout::TwoHorizontal, &frame());
+        let rects = pane_rects(SplitLayout::TwoHorizontal, 1200.0, 800.0);
         assert_eq!(rects.len(), 2);
-        assert_eq!(rects[0], FrameRect { x: 100.0, y: 136.0, w: 1200.0, h: 382.0 });
-        assert_eq!(rects[1], FrameRect { x: 100.0, y: 518.0, w: 1200.0, h: 382.0 });
+        assert_eq!(rects[0], FrameRect { x: 0.0, y: 36.0, w: 1200.0, h: 382.0 });
+        assert_eq!(rects[1], FrameRect { x: 0.0, y: 418.0, w: 1200.0, h: 382.0 });
     }
 
     #[test]
     fn three_tiles_one_tall_plus_two_stacked() {
-        let rects = pane_rects(SplitLayout::Three, &frame());
+        let rects = pane_rects(SplitLayout::Three, 1200.0, 800.0);
         assert_eq!(rects.len(), 3);
-        assert_eq!(rects[0], FrameRect { x: 100.0, y: 136.0, w: 600.0, h: 764.0 });
-        assert_eq!(rects[1], FrameRect { x: 700.0, y: 136.0, w: 600.0, h: 382.0 });
-        assert_eq!(rects[2], FrameRect { x: 700.0, y: 518.0, w: 600.0, h: 382.0 });
-    }
-
-    #[test]
-    fn bar_move_keeps_frame_height() {
-        // Live-test regression (2026-11-05): the bar handler stored the
-        // bar's own 36px rect as the frame, collapsing the pane area to
-        // zero height — GTK refused the resizes, the panes stranded at
-        // their old sizes in their new positions.
-        let merged = frame_after_bar_move(&frame(), 120.0, 60.0, 1100.0);
-        assert_eq!(
-            merged,
-            FrameRect {
-                x: 120.0,
-                y: 60.0,
-                w: 1100.0,
-                h: 800.0
-            }
-        );
+        assert_eq!(rects[0], FrameRect { x: 0.0, y: 36.0, w: 600.0, h: 764.0 });
+        assert_eq!(rects[1], FrameRect { x: 600.0, y: 36.0, w: 600.0, h: 382.0 });
+        assert_eq!(rects[2], FrameRect { x: 600.0, y: 418.0, w: 600.0, h: 382.0 });
     }
 
     #[test]
     fn four_tiles_two_by_two() {
-        let rects = pane_rects(SplitLayout::Four, &frame());
+        let rects = pane_rects(SplitLayout::Four, 1200.0, 800.0);
         assert_eq!(rects.len(), 4);
-        assert_eq!(rects[0], FrameRect { x: 100.0, y: 136.0, w: 600.0, h: 382.0 });
-        assert_eq!(rects[1], FrameRect { x: 700.0, y: 136.0, w: 600.0, h: 382.0 });
-        assert_eq!(rects[2], FrameRect { x: 100.0, y: 518.0, w: 600.0, h: 382.0 });
-        assert_eq!(rects[3], FrameRect { x: 700.0, y: 518.0, w: 600.0, h: 382.0 });
+        assert_eq!(rects[0], FrameRect { x: 0.0, y: 36.0, w: 600.0, h: 382.0 });
+        assert_eq!(rects[1], FrameRect { x: 600.0, y: 36.0, w: 600.0, h: 382.0 });
+        assert_eq!(rects[2], FrameRect { x: 0.0, y: 418.0, w: 600.0, h: 382.0 });
+        assert_eq!(rects[3], FrameRect { x: 600.0, y: 418.0, w: 600.0, h: 382.0 });
     }
 
     #[test]
     fn pane_labels_derive_from_app_and_account() {
-        assert_eq!(pane("app-1", "main").label(), "acct-app-1-main");
+        assert_eq!(pane("app-1", "main").acct_label(), "acct-app-1-main");
+        assert_eq!(
+            pane_webview_label("sp-1", "app-1", "main"),
+            "splitpane-sp-1-app-1-main"
+        );
+        assert_eq!(split_frame_label("sp-1"), "split-sp-1");
     }
 }
