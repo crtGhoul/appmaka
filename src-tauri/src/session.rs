@@ -517,12 +517,9 @@ pub fn write_session(app: &AppHandle) {
     let prev = load_session(app);
     let mut accounts = Vec::new();
     for (label, app_id, account_id, opened_at, _last_url) in windows::live_tracked_accounts(app) {
-        // v0.18.7: split panes belong to their split group, not the
-        // session — restoring them here would bring a split back as
-        // standalone windows. Splits restore separately.
-        if crate::split::is_split_pane(app, &label) {
-            continue;
-        }
+        // Split panes are child webviews, never tracked windows, so
+        // they never reach this loop — no skip needed. Splits restore
+        // separately from splits.json.
         let rect = merge_rect(
             app.get_webview_window(&label)
                 .as_ref()
