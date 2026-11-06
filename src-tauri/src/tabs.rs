@@ -9,9 +9,12 @@
 //! exactly like separate windows do today. Switching reloads the page;
 //! there are no background-live tabs.
 //!
-//! Stable Tauri API only: `Window::add_child` (multi-webview) needs the
-//! `unstable` cargo feature, which this repo deliberately does not use, so
-//! there is no in-place webview swap — the whole window is rebuilt.
+//! Stable Tauri API only, except split view: `Window::add_child`
+//! (multi-webview) needs the `unstable` cargo feature, which split.rs
+//! uses since v0.18.8 (one frame window, child webviews per pane — the
+//! user asked for a real single window, not tiled separate windows).
+//! Tabbed windows keep the rebuild design below: there is no in-place
+//! webview swap — the whole window is rebuilt.
 //!
 //! Window labels are generation-suffixed (`tabbed-{group}-g{gen}`): closing
 //! is asynchronous, so rebuilding under the same label could collide with
