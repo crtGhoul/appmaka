@@ -155,13 +155,15 @@ function isNativeAppMakaWindow(): boolean {
   // browser mock. Every new trusted window MUST be listed here — a
   // missing prefix silently mocks it: getCurrentWindow() reads "main"
   // and invoke returns the mock's canned data (the split bar shipped
-  // like that in v0.18.7 dev until the live test caught it).
+  // like that in v0.18.7 dev until the live test caught it). The split
+  // frame's label is "split-{groupId}"; "split-" also matches the bar
+  // webview's own "splitbar-" label, whichever metadata reports.
   return (
     label === "main" ||
     label === "clipboard" ||
     label === "dock" ||
     label.startsWith("tabstrip-") ||
-    label.startsWith("splitbar-") ||
+    label.startsWith("split-") ||
     label.startsWith("popupbar-") ||
     label.startsWith("preview-")
   );
