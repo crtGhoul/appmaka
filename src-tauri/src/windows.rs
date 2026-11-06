@@ -16,7 +16,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
+};
+use tauri::webview::WebviewBuilder;
 
 use crate::adblock::AdblockState;
 use crate::store::AppStore;
@@ -955,6 +959,12 @@ pub fn open_account_placed(
         .ok_or_else(|| "Account not found.".to_string())?;
 
     let label = account_window_label(app_id, account_id);
+    // v0.18.8: an account live in a split pane has no standalone window —
+    // opening it again must focus its pane, not build a second webview on
+    // the same session dir.
+    if crate::split::focus_pane_for_account(app, app_id, account_id) {
+        return Ok(());
+    }
     if let Some(window) = app.get_webview_window(&label) {
         let had_pending = winstate
             .inner
@@ -1391,9 +1401,6 @@ pub fn open_account_placed(
                 // v0.9.6: the caption strip dies with its window (no-op
                 // off Windows).
                 crate::caption::page_window_closed(&track_label);
-                // v0.18.7: a split pane closing reflows its group (or
-                // dissolves it when one pane is left).
-                crate::split::on_pane_window_destroyed(&track_app, &track_label);
             }
             // Geometry changes feed the session (v0.9.5), debounced so a
             // drag doesn't hammer the disk.
@@ -1420,6 +1427,193 @@ pub fn open_account_placed(
     // v0.15.0: the account is awake again — drop its saved figure.
     crate::sleep::clear_sleep(app, app_id, account_id);
     Ok(())
+}
+
+/// Split-view pane (v0.18.8): one child webview inside a split frame
+/// window, built with `Window::add_child`.
+///
+/// Same session dir, adblock scripts, cursor, popup policy and downloads
+/// as an account window — the only differences are the host (a child
+/// webview, not a WebviewWindow) and the chrome (no caption strip: the
+/// frame's bar is the only chrome). Built on a spawned thread with the
+/// same 6s timeout and self-heal retry as account windows, and the same
+/// wry#583 rule applies: never call this from a sync command, an event
+/// handler, or the main thread — split opens run in async commands.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_split_pane_webview(
+    app: &AppHandle,
+    store: &AppStore,
+    adblock: &AdblockState,
+    winstate: &WindowState,
+    frame: &tauri::Window,
+    pane_label: &str,
+    app_id: &str,
+    account_id: &str,
+    bounds: (f64, f64, f64, f64),
+) -> Result<Webview, String> {
+    let web_app = store.get(app_id)?;
+    let account = web_app
+        .accounts
+        .iter()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| "Account not found.".to_string())?;
+    let acct_label = account_window_label(app_id, account_id);
+    let session_dir = store.session_dir_for(app_id, account_id)?;
+    prepare_session_dir_for_open(app, app_id, account_id, &session_dir);
+    let page_url: url::Url = web_app
+        .url
+        .parse()
+        .map_err(|_| format!("App URL is not valid: {}", web_app.url))?;
+    let target_url: url::Url = stored_last_url(app, winstate, app_id, account_id, &acct_label)
+        .as_deref()
+        .and_then(|u| u.parse().ok())
+        .unwrap_or_else(|| page_url.clone());
+    let popup_policy = account
+        .popup_policy
+        .clone()
+        .unwrap_or_else(|| web_app.settings.popup_policy.clone());
+    let popup_ctx = PopupContext {
+        app: app.clone(),
+        app_id: app_id.to_string(),
+        account_id: account_id.to_string(),
+        app_name: web_app.name.clone(),
+        app_url: web_app.url.clone(),
+        session_dir: session_dir.clone(),
+        popup_policy,
+        popup_allowlist: web_app.settings.popup_allowlist.clone(),
+        parent_label: frame.label().to_string(),
+        chain_allowed: false,
+    };
+    let shortcuts_js = shortcuts_overlay_js(app);
+    let cursor_js = saved_cursor_js(app);
+    let user_scripts = crate::userscripts::user_scripts_init_scripts(app, target_url.as_str());
+    let cosmetic_css = adblock.cosmetic_css_for(&web_app.url);
+    let scriptlets_js = adblock.scriptlet_js_for(&web_app.url);
+    let yt_skipper_js = adblock.yt_ad_skipper_js().to_string();
+
+    let build_once = || -> Result<Webview, String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Webview, String>>(1);
+        let b_app = app.clone();
+        let b_frame = frame.clone();
+        let b_label = pane_label.to_string();
+        let b_url = target_url.clone();
+        let b_session_dir = session_dir.clone();
+        let b_popup_ctx = popup_ctx.clone();
+        let b_shortcuts_js = shortcuts_js.clone();
+        let b_cursor_js = cursor_js.clone();
+        let b_user_scripts = user_scripts.clone();
+        let b_cosmetic_css = cosmetic_css.clone();
+        let b_scriptlets_js = scriptlets_js.clone();
+        let b_yt_skipper_js = yt_skipper_js.clone();
+        let (bx, by, bw, bh) = bounds;
+        std::thread::Builder::new()
+            .name(format!("appmaka-build-{b_label}"))
+            .spawn(move || {
+                let builder = WebviewBuilder::new(
+                    &b_label,
+                    WebviewUrl::External(b_url),
+                )
+                .data_directory(b_session_dir)
+                .focused(false);
+                #[cfg(windows)]
+                let builder = builder.additional_browser_args(WEBVIEW2_BROWSER_ARGS);
+                let mut builder = builder
+                    .on_new_window(make_popup_handler(b_popup_ctx))
+                    .on_download(crate::downloads::make_download_handler(b_app.clone()));
+                {
+                    let nav_app = b_app.clone();
+                    let nav_label = b_label.clone();
+                    builder = builder.on_navigation(move |_nav_url: &url::Url| {
+                        schedule_cursor_reapply_webview(nav_app.clone(), nav_label.clone());
+                        true
+                    });
+                }
+                builder = builder
+                    .initialization_script(TARGET_BLANK_SHIM_JS)
+                    .initialization_script(NAV_KEYS_JS)
+                    .initialization_script(b_shortcuts_js);
+                if !b_cursor_js.is_empty() {
+                    builder = builder.initialization_script(b_cursor_js);
+                }
+                for js in b_user_scripts {
+                    builder = builder.initialization_script(js);
+                }
+                if !b_cosmetic_css.is_empty() {
+                    builder = builder.initialization_script(cosmetic_init_script(&b_cosmetic_css));
+                }
+                if !b_scriptlets_js.is_empty() {
+                    builder = builder.initialization_script(b_scriptlets_js);
+                }
+                builder = builder.initialization_script(b_yt_skipper_js);
+                let res = b_frame
+                    .add_child(
+                        builder,
+                        LogicalPosition::new(bx, by),
+                        LogicalSize::new(bw, bh),
+                    )
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(res);
+            })
+            .map_err(|e| format!("failed to spawn pane builder thread: {e}"))?;
+        match rx.recv_timeout(WEBVIEW2_BUILD_TIMEOUT) {
+            Ok(res) => res,
+            Err(_) => Err(format!(
+                "WebView2 environment creation timed out after {}s for {pane_label}",
+                WEBVIEW2_BUILD_TIMEOUT.as_secs()
+            )),
+        }
+    };
+
+    let pids_before = crate::procattr::descendant_pids();
+    let webview = match build_once() {
+        Ok(w) => w,
+        Err(first_err) => {
+            let (killed, unlocked) =
+                recover_webview2_user_data_dir(app, app_id, account_id, &session_dir, &acct_label);
+            crate::errors::record(
+                app,
+                "window-open",
+                &format!(
+                    "Recovered locked session for \"{} — {}\" and retried.",
+                    web_app.name, account.label
+                ),
+                &format!(
+                    "initial error: {first_err}; terminated {killed} orphaned WebView2 process(es), removed {unlocked} stale lock/cache item(s)"
+                ),
+                false,
+            );
+            let pids_retry = crate::procattr::descendant_pids();
+            let w = build_once().map_err(|retry_err| {
+                let msg = format!(
+                    "could not open split pane after session unlock retry: {retry_err} (first attempt: {first_err})"
+                );
+                crate::errors::record(
+                    app,
+                    "window-open",
+                    "Could not open the split pane.",
+                    &msg,
+                    true,
+                );
+                msg
+            })?;
+            crate::procattr::capture_new_processes(
+                app.clone(),
+                app_id.to_string(),
+                account_id.to_string(),
+                pids_retry,
+            );
+            w
+        }
+    };
+    crate::procattr::capture_new_processes(
+        app.clone(),
+        app_id.to_string(),
+        account_id.to_string(),
+        pids_before,
+    );
+    store.touch_account(app_id, account_id);
+    crate::sleep::clear_sleep(app, app_id, account_id);
+    Ok(webview)
 }
 
 /// Enter fullscreen on the monitor the CURSOR is on (v0.13.13, the
@@ -1935,6 +2129,7 @@ fn cursor_window_label(label: &str) -> bool {
         || label.starts_with("tabbed-")
         || label.starts_with("popup-")
         || label.starts_with("oauth-")
+        || label.starts_with(crate::split::SPLIT_PANE_LABEL_PREFIX)
         || (label.starts_with("preview-") && label.ends_with("-site"))
         || label == crate::websearch::SEARCH_WINDOW_LABEL
 }
@@ -1948,6 +2143,14 @@ pub(crate) fn apply_cursor_live(app: &AppHandle, style: &str) {
     for (label, window) in app.webview_windows() {
         if cursor_window_label(&label) {
             let _ = window.eval(&js);
+        }
+    }
+    // Split panes are child webviews, not windows — they never appear in
+    // webview_windows(), so a style change would leave them on the old
+    // cursor until their next navigation.
+    for (label, webview) in app.webviews() {
+        if label.starts_with(crate::split::SPLIT_PANE_LABEL_PREFIX) {
+            let _ = webview.eval(&js);
         }
     }
 }
@@ -1979,6 +2182,29 @@ pub(crate) fn schedule_cursor_reapply(app: AppHandle, label: String) {
                 };
                 let (hex, rgb) = resolve_cursor_colors(&app);
                 let _ = window.eval(cursor_live_apply_js(&style, &hex, &rgb));
+            }
+        });
+}
+
+/// Split-pane twin of `schedule_cursor_reapply`: panes are child
+/// webviews, so the lookup is `get_webview`, not `get_webview_window`.
+/// Same widening delays, same detached thread, same early return when
+/// the pane is gone.
+pub(crate) fn schedule_cursor_reapply_webview(app: AppHandle, label: String) {
+    let _ = std::thread::Builder::new()
+        .name("appmaka-cursor-reapply".to_string())
+        .spawn(move || {
+            for delay_ms in [600, 2000, 4000, 9000] {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                let style = app
+                    .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+                    .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
+                    .unwrap_or_default();
+                let Some(webview) = app.get_webview(&label) else {
+                    return;
+                };
+                let (hex, rgb) = resolve_cursor_colors(&app);
+                let _ = webview.eval(cursor_live_apply_js(&style, &hex, &rgb));
             }
         });
 }
