@@ -47,8 +47,9 @@ mod popup_add;
 /// Popup bar (v0.18.7): one "Save as app" button docked under a popup
 /// window — popups have no IPC, so the button is its own trusted window.
 mod popup_bar;
-/// Split view (v0.18.7): up to four apps side by side in one window —
-/// a group of ordinary account windows tiled by a shared bar.
+/// Split view (v0.18.8): up to four apps side by side in one window —
+/// one frame window holding a bar and one child webview per pane, so
+/// the whole split moves, resizes, and closes as a single window.
 mod split;
 /// Windows-only native popup tweaks (v0.9.11): system-menu item +
 /// title-bar theme-color tint. The module itself is cfg'd out elsewhere.
@@ -479,23 +480,12 @@ async fn set_split_layout(
     split::set_split_layout(&app, &splitstate, &group_id, layout)
 }
 
-/// Close one pane of a split (survivors reflow). Async: moves windows.
+/// Close one pane of a split (survivors reflow; dissolving reopens the
+/// last pane as an ordinary window). Async: moves windows.
 /// JS: `invoke("remove_split_pane", { groupId, index })` — returns the
 /// group's info, or null when the group dissolved.
 #[tauri::command]
 async fn remove_split_pane(
-    app: AppHandle,
-    splitstate: State<'_, split::SplitState>,
-    group_id: String,
-    index: usize,
-) -> Result<Option<split::SplitInfo>, String> {
-    split::remove_split_pane(&app, &splitstate, &group_id, index)
-}
-
-/// Focus one pane (brings its window forward, in place).
-/// JS: `invoke("focus_split_pane", { groupId, index })`
-#[tauri::command]
-async fn focus_split_pane(
     app: AppHandle,
     store: State<'_, AppStore>,
     adblock: State<'_, AdblockState>,
@@ -503,8 +493,20 @@ async fn focus_split_pane(
     splitstate: State<'_, split::SplitState>,
     group_id: String,
     index: usize,
+) -> Result<Option<split::SplitInfo>, String> {
+    split::remove_split_pane(&app, &store, &adblock, &winstate, &splitstate, &group_id, index)
+}
+
+/// Focus one pane (shows and focuses the frame, focuses the pane).
+/// JS: `invoke("focus_split_pane", { groupId, index })`
+#[tauri::command]
+async fn focus_split_pane(
+    app: AppHandle,
+    splitstate: State<'_, split::SplitState>,
+    group_id: String,
+    index: usize,
 ) -> Result<(), String> {
-    split::focus_split_pane(&app, &store, &adblock, &winstate, &splitstate, &group_id, index)
+    split::focus_split_pane(&app, &splitstate, &group_id, index)
 }
 
 /// Save an open split as a named layout.
