@@ -13,8 +13,15 @@ serde_json = "1"
 # WebviewWindowBuilder::build() deadlocks in synchronous Tauri commands
 # (wry#583). Window-creating commands (open_account, preview_start) are
 # `async fn`, and the OAuth modal builds on a dedicated spawned thread.
-# Only the stable WebviewWindowBuilder API is used anywhere.
-tauri = { features = ["tray-icon", "protocol-asset"], version = "2" }
+# v0.18.8: split view uses `Window::add_child` (one frame window, child
+# webviews per pane — the user asked for a real single window, not tiled
+# separate windows). add_child needs the `unstable` cargo feature, which
+# only gates Tauri's own unstable APIs — tauri-runtime-wry's `unstable`
+# is an empty feature, so it pulls in no experimental runtime code.
+# The same wry#583 rule applies: add_child deadlocks in sync commands,
+# so split opens run in async commands or on a spawned builder thread
+# with the 6s timeout, never on the main thread.
+tauri = { features = ["tray-icon", "protocol-asset", "unstable"], version = "2" }
 # Async sleep for the 250ms stagger between routine item opens (routines.rs).
 # "rt" for spawn_blocking in the MSI updater path (msi_update.rs).
 tokio = { version = "1", features = ["time", "rt"] }
@@ -94,7 +101,7 @@ default = ["custom-protocol"]
 
 [package]
 authors = ["AppMaka"]
-version = "0.18.7"
+version = "0.18.8"
 edition = "2021"
 name = "appmaka"
 
