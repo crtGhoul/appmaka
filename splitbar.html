@@ -4,10 +4,12 @@
 <meta charset="utf-8" />
 <title>Split view</title>
 <style>
-  /* Split bar (v0.18.7): group controls docked above a split view's panes.
-     Same dark, one-accent treatment as the tab strip (tabstrip.html).
-     Bundled separately (vite.config.ts "splitbar" input, loaded by the
-     backend as splitbar.html). */
+  /* Split bar (v0.18.8): the one split window's top strip. The bar is
+     the frame's first child webview, 36px tall; the frame is
+     undecorated, so the bar is also its drag handle and its window
+     controls. Same dark, one-accent treatment as the tab strip
+     (tabstrip.html). Bundled separately (vite.config.ts "splitbar"
+     input, loaded by the backend as splitbar.html). */
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body {
@@ -18,7 +20,8 @@
     overflow: hidden;
     user-select: none;
   }
-  #root { height: 100%; display: flex; align-items: center; gap: 2px; padding: 0 6px; }
+  #root { height: 100%; }
+  .bar { height: 100%; display: flex; align-items: center; gap: 2px; padding: 0 6px; }
   .panes { flex: 1 1 auto; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
   button {
     display: inline-flex;
@@ -37,9 +40,17 @@
   button:disabled { color: #555; cursor: default; background: none; }
   button.active { background: #3e3e3e; color: #f1f1f1; }
   .pane { padding: 0 10px; height: 26px; max-width: 168px; overflow: hidden; text-overflow: ellipsis; }
+  .pane-wrap { display: inline-flex; align-items: center; border-radius: 4px; }
+  .pane-wrap.active { background: #3e3e3e; }
+  .pane-wrap.active .pane { color: #f1f1f1; }
+  .pane-close { padding: 0 6px; height: 26px; color: #777; font-size: 14px; line-height: 1; }
+  .pane-close:hover { background: #4a2b2b; color: #fff; }
   .layout { padding: 0 8px; height: 26px; }
   .close { padding: 0 10px; height: 26px; }
   .close:hover { background: #e81123; color: #fff; }
+  .win-controls { flex: none; display: flex; align-items: center; gap: 2px; }
+  .win-btn { padding: 0 10px; height: 26px; }
+  .win-close:hover { background: #e81123; color: #fff; }
   .sep { flex: none; width: 1px; height: 20px; background: #3a3a3a; margin: 0 4px; }
   .loading { padding: 0 12px; color: #8a8f98; }
 </style>
