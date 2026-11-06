@@ -373,15 +373,25 @@ fn find_popup_label(app: &AppHandle) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// v0.18.7 split view E2E driver (Xvfb smoke).
+// v0.18.8 split view E2E driver (Xvfb smoke).
 //
 // Driven by `APPMAKA_DEBUG_SPLIT_MODE=split`. The shell script seeds four
-// apps (apps.json); this opens a four-pane split, verifies the bar window
-// exists and the panes are tiled 2x2, then removes one pane and verifies
-// the survivors reflow to the three-pane layout. Logs `[e2e]` lines for
-// the shell script to assert on. Same contract as the tabs flow above:
-// debug builds only, inert without the env var, detached thread, never
-// blocks startup.
+// apps (apps.json); this opens one account standalone first (pull proof),
+// then a four-pane split in ONE frame window, verifies the frame, the
+// bar webview, and the four live child panes, removes one pane and
+// verifies the survivors reflow to the three-pane layout, then removes
+// down to dissolve and verifies the last pane reopens as an ordinary
+// window. Logs `[e2e]` lines for the shell script to assert on.
+//
+// NOTE (Linux): the panes are NOT tiled here — Tauri's Linux runtime
+// packs child webviews into the frame's vertical box and ignores bounds,
+// so the probes report full-width equal-height strips (1280x160 at four
+// panes) instead of 640x382 tiles. The state machine (open/pull/remove/
+// reflow/dissolve/restore) is what this driver proves on Linux; the
+// tiling itself is a Windows/macOS behavior, gated on the PC.
+//
+// Same contract as the tabs flow above: debug builds only, inert without
+// the env var, detached thread, never blocks startup.
 // ---------------------------------------------------------------------------
 
 /// Called once from setup. Returns immediately.
@@ -394,6 +404,19 @@ pub fn maybe_run_split_flow(app: &AppHandle) {
     let _ = std::thread::Builder::new()
         .name("appmaka-debug-split".to_string())
         .spawn(move || run_split_flow(&app));
+}
+
+/// Read a pane webview's inner size via JS (best-effort: the callback
+/// may never fire under Xvfb, so it times out instead of hanging).
+fn pane_inner_size(w: &tauri::Webview) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = w.eval_with_callback(
+        "JSON.stringify({w: window.innerWidth, h: window.innerHeight})",
+        move |v| {
+            let _ = tx.send(v.to_string());
+        },
+    );
+    rx.recv_timeout(std::time::Duration::from_secs(3)).ok()
 }
 
 fn run_split_flow(app: &AppHandle) {
@@ -456,6 +479,30 @@ fn run_split_flow(app: &AppHandle) {
         })
         .collect();
 
+    // 0. Pull proof: open the first account standalone, then open the
+    // split including it — the standalone window must be gone, replaced
+    // by a child webview on the same session.
+    let first = &panes[0];
+    let first_label = crate::windows::account_window_label(&first.app_id, &first.account_id);
+    match crate::windows::open_account_placed(
+        app, &store, &adblock, &winstate, &first.app_id, &first.account_id, None, false, false,
+    ) {
+        Ok(()) => eprintln!("[e2e] split: standalone {} opened", first.app_id),
+        Err(e) => {
+            eprintln!("[e2e] split: standalone open failed: {e}");
+            return;
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    eprintln!(
+        "[e2e] split: standalone window {}",
+        if app.get_webview_window(&first_label).is_some() {
+            "present"
+        } else {
+            "missing"
+        }
+    );
+
     // 1. Open a four-pane split (layout defaults from the count).
     let info = match split::open_split(app, &store, &adblock, &winstate, &splitstate, panes, None)
     {
@@ -474,29 +521,49 @@ fn run_split_flow(app: &AppHandle) {
     );
     std::thread::sleep(std::time::Duration::from_secs(5));
 
-    // 2. The bar window exists, and all four pane windows are live.
-    let bar = app.get_webview_window(&format!("splitbar-{gid}"));
+    // 2. ONE frame window exists, the bar webview is on it, and all four
+    // pane webviews are live — no standalone windows for the split's
+    // accounts (the pulled one included).
+    match app.get_window(&split::split_frame_label(&gid)) {
+        Some(f) => match f.inner_size() {
+            Ok(s) => eprintln!("[e2e] split: frame present {}x{}", s.width, s.height),
+            Err(_) => eprintln!("[e2e] split: frame present (size unreadable)"),
+        },
+        None => eprintln!("[e2e] split: frame missing"),
+    }
     eprintln!(
         "[e2e] split: bar {}",
-        if bar.is_some() { "present" } else { "missing" }
+        if app
+            .get_webview(&format!("splitbar-{gid}"))
+            .is_some()
+        {
+            "present"
+        } else {
+            "missing"
+        }
     );
     let mut live = 0;
     for pane in &info.panes {
-        let label = crate::windows::account_window_label(&pane.app_id, &pane.account_id);
-        if let Some(w) = app.get_webview_window(&label) {
+        let label = split::pane_webview_label(&gid, &pane.app_id, &pane.account_id);
+        if let Some(w) = app.get_webview(&label) {
             live += 1;
-            if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
-                eprintln!(
-                    "[e2e] split: pane {} at {},{} {}x{}",
-                    pane.app_id, pos.x, pos.y, size.width, size.height
-                );
+            match pane_inner_size(&w) {
+                Some(s) => eprintln!("[e2e] split: pane {} inner {s}", pane.app_id),
+                None => eprintln!("[e2e] split: pane {} inner unreadable", pane.app_id),
             }
+        }
+        let standalone = crate::windows::account_window_label(&pane.app_id, &pane.account_id);
+        if app.get_webview_window(&standalone).is_some() {
+            eprintln!("[e2e] split: pane {} still has a standalone window", pane.app_id);
         }
     }
     eprintln!("[e2e] split: live panes {live}/4");
 
-    // 3. Remove one pane: the survivors reflow to the three-pane layout.
-    let info = match split::remove_split_pane(app, &splitstate, &gid, 3) {
+    // 3. Remove one pane: the survivors reflow to the three-pane layout
+    // (left tall 640x764, right two 640x382 each in a 1280x800 frame on
+    // Windows/macOS; on Linux the probes show the stacked 1280x200
+    // strips instead — same state, runtime layout difference).
+    let info = match split::remove_split_pane(app, &store, &adblock, &winstate, &splitstate, &gid, 3) {
         Ok(Some(i)) => i,
         Ok(None) => {
             eprintln!("[e2e] split: group dissolved after one removal (expected reflow)");
@@ -513,20 +580,79 @@ fn run_split_flow(app: &AppHandle) {
         info.layout
     );
     std::thread::sleep(std::time::Duration::from_secs(3));
-    // Log the survivors' rects: the reflow must have landed (Three layout
-    // in a 1280x800 frame = left tall 640x764, right two 640x382 each;
-    // outer sizes add the window decorations, ~+2w/+27h under openbox).
+    let mut live = 0;
     for pane in &info.panes {
-        let label = crate::windows::account_window_label(&pane.app_id, &pane.account_id);
-        if let Some(w) = app.get_webview_window(&label) {
-            if let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) {
-                eprintln!(
-                    "[e2e] split: reflowed pane {} at {},{} {}x{}",
-                    pane.app_id, pos.x, pos.y, size.width, size.height
-                );
+        let label = split::pane_webview_label(&gid, &pane.app_id, &pane.account_id);
+        if let Some(w) = app.get_webview(&label) {
+            live += 1;
+            match pane_inner_size(&w) {
+                Some(s) => eprintln!("[e2e] split: reflowed pane {} inner {s}", pane.app_id),
+                None => eprintln!("[e2e] split: reflowed pane {} inner unreadable", pane.app_id),
             }
         }
     }
+    eprintln!("[e2e] split: live panes after remove {live}/3");
+    eprintln!(
+        "[e2e] split: frame {}",
+        if app.get_window(&split::split_frame_label(&gid)).is_some() {
+            "present"
+        } else {
+            "missing"
+        }
+    );
+
+    // 4. Remove down to dissolve: the last pane reopens as an ordinary
+    // standalone window and the frame closes.
+    let last = match info.panes.last() {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("[e2e] split: no panes left to dissolve");
+            return;
+        }
+    };
+    let last_label = crate::windows::account_window_label(&last.app_id, &last.account_id);
+    match split::remove_split_pane(app, &store, &adblock, &winstate, &splitstate, &gid, 1) {
+        Ok(Some(i)) => eprintln!("[e2e] split: after second remove panes={}", i.panes.len()),
+        Ok(None) => {
+            eprintln!("[e2e] split: group dissolved early (expected two panes)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("[e2e] split: second remove failed: {e}");
+            return;
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    match split::remove_split_pane(app, &store, &adblock, &winstate, &splitstate, &gid, 0) {
+        Ok(None) => eprintln!("[e2e] split: group dissolved"),
+        Ok(Some(_)) => {
+            eprintln!("[e2e] split: group did not dissolve (expected dissolve)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("[e2e] split: dissolve remove failed: {e}");
+            return;
+        }
+    }
+    // The dissolve rebuilds the last pane as a standalone window; give
+    // the builder thread time, then check both halves of the outcome.
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    eprintln!(
+        "[e2e] split: frame after dissolve {}",
+        if app.get_window(&split::split_frame_label(&gid)).is_some() {
+            "present (expected gone)"
+        } else {
+            "gone"
+        }
+    );
+    eprintln!(
+        "[e2e] split: last pane standalone {}",
+        if app.get_webview_window(&last_label).is_some() {
+            "present"
+        } else {
+            "missing"
+        }
+    );
     eprintln!("[e2e] split: flow done");
 }
 
