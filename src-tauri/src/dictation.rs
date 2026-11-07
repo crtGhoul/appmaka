@@ -39,6 +39,9 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::hotkeys::{self, BindingStatus, HotkeyKind};
 
+mod ring;
+use ring::CaptureRing;
+
 pub const BINDING_ID: &str = "dictation:toggle";
 /// Do NOT use Super+Alt+D here: Win+Alt+D is Windows' own clock/calendar
 /// shortcut, so the shell can claim it before the app can register it.
@@ -81,8 +84,17 @@ struct DictationFile {
     /// send. Off = toggle (press to start, press again or Esc to stop).
     #[serde(default = "default_hold_to_talk")]
     hold_to_talk: bool,
+    /// Whisper compute device: "cpu" or "cuda" (v0.18.0). "cuda"
+    /// downloads the CUDA whisper.cpp build (Windows, NVIDIA) on
+    /// demand; every failure path falls back to the CPU build.
+    #[serde(default = "default_device")]
+    device: String,
     #[serde(default)]
     transcripts: Vec<Transcript>,
+}
+
+fn default_device() -> String {
+    "cpu".to_string()
 }
 
 fn default_hold_to_talk() -> bool {
@@ -102,6 +114,7 @@ impl Default for DictationFile {
             hotkey: default_hotkey(),
             model: default_model(),
             hold_to_talk: default_hold_to_talk(),
+            device: default_device(),
             transcripts: Vec::new(),
         }
     }
@@ -144,10 +157,39 @@ fn model_path(app: &AppHandle, model: &str) -> Result<PathBuf, String> {
     Ok(dictation_dir(app)?.join("models").join(model_file_name(model)))
 }
 
-/// Find the extracted whisper-cli under bin/, tolerating the archive's
-/// internal folder layout (files land in a subfolder on some builds).
-fn binary_path(app: &AppHandle) -> Option<PathBuf> {
-    let bin = dictation_dir(app).ok()?.join("bin");
+/// Where a compute device's whisper build lives: bin/ for the standard
+/// build, bin-cuda/ for the CUDA build. The CUDA build is Windows-only
+/// (it needs an NVIDIA GPU); anywhere else "cuda" resolves to the
+/// standard build, exactly like "cpu".
+fn binary_subdir(device: &str) -> &'static str {
+    #[cfg(windows)]
+    if device == "cuda" {
+        return "bin-cuda";
+    }
+    let _ = device;
+    "bin"
+}
+
+/// The release archive a device downloads, from the same pinned
+/// whisper.cpp release as the standard build.
+fn archive_for(device: &str) -> &'static str {
+    #[cfg(windows)]
+    if device == "cuda" {
+        return "whisper-bin-win-cuda-11.8.0-x64.zip";
+    }
+    let _ = device;
+    WHISPER_ARCHIVE
+}
+
+fn configured_device(app: &AppHandle) -> String {
+    with_data(app, |d| d.device.clone()).unwrap_or_else(|_| default_device())
+}
+
+/// Find the extracted whisper-cli under the device's bin dir,
+/// tolerating the archive's internal folder layout (files land in a
+/// subfolder on some builds).
+fn binary_path_for(app: &AppHandle, device: &str) -> Option<PathBuf> {
+    let bin = dictation_dir(app).ok()?.join(binary_subdir(device));
     fn walk(dir: &Path, depth: usize) -> Option<PathBuf> {
         if depth > 3 {
             return None;
@@ -166,6 +208,12 @@ fn binary_path(app: &AppHandle) -> Option<PathBuf> {
         None
     }
     walk(&bin, 0)
+}
+
+/// The configured device's binary (what status reports and the
+/// recorder runs when nothing overrides it).
+fn binary_path(app: &AppHandle) -> Option<PathBuf> {
+    binary_path_for(app, &configured_device(app))
 }
 
 pub fn load(app: &AppHandle) -> DictationState {
@@ -225,13 +273,21 @@ pub struct DictationStatus {
     pub transcribing: bool,
     pub hotkey: String,
     pub hold_to_talk: bool,
+    pub device: String,
 }
 
 fn status(app: &AppHandle) -> DictationStatus {
-    let (model, hotkey, hold_to_talk) = with_data(app, |d| {
-        (d.model.clone(), d.hotkey.clone(), d.hold_to_talk)
+    let (model, hotkey, hold_to_talk, device) = with_data(app, |d| {
+        (d.model.clone(), d.hotkey.clone(), d.hold_to_talk, d.device.clone())
     })
-    .unwrap_or_else(|_| (default_model(), default_hotkey(), default_hold_to_talk()));
+    .unwrap_or_else(|_| {
+        (
+            default_model(),
+            default_hotkey(),
+            default_hold_to_talk(),
+            default_device(),
+        )
+    });
     let model_installed = model_path(app, &model).map(|p| p.exists()).unwrap_or(false);
     let binary_installed = binary_path(app).is_some();
     let state = app.try_state::<DictationState>();
@@ -252,6 +308,7 @@ fn status(app: &AppHandle) -> DictationStatus {
         transcribing,
         hotkey,
         hold_to_talk,
+           device,
     }
 }
 
@@ -296,6 +353,17 @@ pub fn set_dictation_model(app: AppHandle, model: String) -> Result<DictationSta
         return Err("Unknown speech model.".to_string());
     }
     with_data(&app, |d| d.model = model)?;
+    save(&app)?;
+    emit_state(&app);
+    Ok(status(&app))
+}
+
+#[tauri::command]
+pub fn set_dictation_device(app: AppHandle, device: String) -> Result<DictationStatus, String> {
+    if device != "cpu" && device != "cuda" {
+        return Err("Unknown dictation device.".to_string());
+    }
+    with_data(&app, |d| d.device = device)?;
     save(&app)?;
     emit_state(&app);
     Ok(status(&app))
@@ -368,17 +436,18 @@ fn download_to(url: &str, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_binary(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Some(p) = binary_path(app) {
+fn ensure_binary_for(app: &AppHandle, device: &str) -> Result<PathBuf, String> {
+    if let Some(p) = binary_path_for(app, device) {
         return Ok(p);
     }
     let dir = dictation_dir(app)?;
-    let archive = dir.join(WHISPER_ARCHIVE);
+    let archive_name = archive_for(device);
+    let archive = dir.join(archive_name);
     let url = format!(
-        "https://github.com/ggml-org/whisper.cpp/releases/download/{WHISPER_RELEASE}/{WHISPER_ARCHIVE}"
+        "https://github.com/ggml-org/whisper.cpp/releases/download/{WHISPER_RELEASE}/{archive_name}"
     );
     download_to(&url, &archive)?;
-    let bin_dir = dir.join("bin");
+    let bin_dir = dir.join(binary_subdir(device));
     fs::create_dir_all(&bin_dir).map_err(|e| format!("Couldn't create the bin folder: {e}"))?;
     // System tar (bsdtar on Windows 10+, GNU tar on Linux) reads both
     // .zip and .tar.gz — no archive crates needed.
@@ -392,7 +461,7 @@ fn ensure_binary(app: &AppHandle) -> Result<PathBuf, String> {
     // tar's exit code is not the verdict — some environments warn on
     // file ownership while extracting fine. The binary being present
     // is the verdict.
-    match binary_path(app) {
+    match binary_path_for(app, device) {
         Some(p) => Ok(p),
         None => match tar {
             Ok(out) => Err(format!(
@@ -424,7 +493,7 @@ pub async fn download_dictation(app: AppHandle) -> Result<DictationStatus, Strin
     let model = with_data(&app, |d| d.model.clone())?;
     let app2 = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        ensure_binary(&app2)?;
+        ensure_binary_for(&app2, &configured_device(&app2))?;
         ensure_model(&app2, &model)?;
         Ok::<(), String>(())
     })
@@ -687,6 +756,33 @@ fn finish_session(app: &AppHandle) {
     emit_state(app);
 }
 
+/// Run one whisper-cli transcription and return the cleaned text.
+/// Every failure mode (spawn error, nonzero exit) is an Err so the
+/// caller can apply the CUDA→CPU fallback policy.
+fn run_whisper(bin: &Path, model_bin: &Path, wav: &Path) -> Result<String, String> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("-m").arg(model_bin)
+        .arg("-f").arg(wav)
+        .arg("-l").arg("en")
+        .arg("-nt")
+        .arg("-t").arg("4");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("Couldn't run the speech engine: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "The speech engine failed on that recording ({}).",
+            out.status
+        ));
+    }
+    Ok(clean_transcript(&String::from_utf8_lossy(&out.stdout)))
+}
+
 fn record_and_transcribe(app: AppHandle, stop: Arc<AtomicBool>, hold_armed: bool, hotkey: String) {
     let result = run_session(&app, &stop, hold_armed, &hotkey);
     #[cfg(windows)]
@@ -716,32 +812,28 @@ fn run_session(
     let channels = supported.channels() as usize;
     let config: cpal::StreamConfig = supported.config();
 
-    let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = samples.clone();
+    // The callbacks write into a lock-free ring (see ring.rs): the
+    // audio thread must never wait on this thread or allocate. This
+    // thread drains the ring into `raw` on the poll below.
+    let capture = Arc::new(CaptureRing::new(ring::DEFAULT_CAPACITY));
+    let sink = capture.clone();
     let err_fn = |err| eprintln!("dictation mic error: {err}");
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &config,
-            move |data: &[f32], _| push_mono(&sink, data, channels),
+            move |data: &[f32], _| sink.push_f32(data, channels),
             err_fn,
             None,
         ),
         cpal::SampleFormat::I16 => device.build_input_stream(
             &config,
-            move |data: &[i16], _| {
-                let converted: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                push_mono(&sink, &converted, channels);
-            },
+            move |data: &[i16], _| sink.push_i16(data, channels),
             err_fn,
             None,
         ),
         cpal::SampleFormat::U16 => device.build_input_stream(
             &config,
-            move |data: &[u16], _| {
-                let converted: Vec<f32> =
-                    data.iter().map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0).collect();
-                push_mono(&sink, &converted, channels);
-            },
+            move |data: &[u16], _| sink.push_u16(data, channels),
             err_fn,
             None,
         ),
@@ -756,6 +848,7 @@ fn run_session(
     pill::show(hold_armed);
     let combo = parse_combo(hotkey);
 
+    let mut raw: Vec<f32> = Vec::new();
     let started = std::time::Instant::now();
     loop {
         // The hotkey and Esc end the take the same way (v0.14.1: Esc is
@@ -770,9 +863,26 @@ fn run_session(
         if started.elapsed().as_secs() >= MAX_RECORD_SECS {
             break;
         }
+        capture.drain_into(&mut raw);
         std::thread::sleep(std::time::Duration::from_millis(40));
     }
     drop(stream);
+    // Final drain: everything the callback wrote up to the stream
+    // stopping belongs to the take.
+    capture.drain_into(&mut raw);
+    let dropped = capture.dropped();
+    if dropped > 0 {
+        // Not user-facing copy — the take still transcribes what was
+        // captured; this lands in the error history for diagnosis.
+        eprintln!("dictation: mic ring dropped {dropped} samples (capture fell behind)");
+        crate::errors::record(
+            app,
+            "dictation",
+            &format!("Microphone capture dropped {dropped} samples — a slice of the recording is missing."),
+            "",
+            false,
+        );
+    }
     // Pin the paste target NOW, at stop time. Transcription takes a
     // few seconds; if the user's focus drifts in that window, delivery
     // restores this window before pasting instead of spraying the text
@@ -783,7 +893,6 @@ fn run_session(
     #[cfg(not(windows))]
     let target = 0isize;
 
-    let raw = samples.lock().unwrap().clone();
     // Under ~0.3 s of audio is a mis-tap, not dictation.
     if raw.len() < (sample_rate as usize) / 3 {
         return Ok(());
@@ -798,46 +907,34 @@ fn run_session(
     emit_state(app);
 
     let model = with_data(app, |d| d.model.clone())?;
-    let bin = ensure_binary(app)?;
+    let device_pref = with_data(app, |d| d.device.clone())?;
     let model_bin = ensure_model(app, &model)?;
-    let mut cmd = std::process::Command::new(&bin);
-    cmd.arg("-m").arg(&model_bin)
-        .arg("-f").arg(&wav)
-        .arg("-l").arg("en")
-        .arg("-nt")
-        .arg("-t").arg("4");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("Couldn't run the speech engine: {e}"))?;
-    if !out.status.success() {
-        return Err("The speech engine failed on that recording.".to_string());
-    }
-    let text = clean_transcript(&String::from_utf8_lossy(&out.stdout));
+    let bin = ensure_binary_for(app, &device_pref)?;
+    let text = match run_whisper(&bin, &model_bin, &wav) {
+        Ok(text) => text,
+        Err(e) if device_pref == "cuda" => {
+            // The CUDA build fails hard on machines without a working
+            // NVIDIA stack (missing driver/cudart, wrong arch) — the
+            // take matters more than the accelerator, so retry ONCE on
+            // the CPU build (downloading it if needed) and log the
+            // fallback in the error history.
+            crate::errors::record(
+                app,
+                "dictation",
+                "The GPU speech engine failed — this take was transcribed on the CPU instead.",
+                &e,
+                false,
+            );
+            let cpu_bin = ensure_binary_for(app, "cpu")?;
+            run_whisper(&cpu_bin, &model_bin, &wav)?
+        }
+        Err(e) => return Err(e),
+    };
     if text.is_empty() {
         crate::errors::record(app, "dictation", "Didn't catch that — try again.", "", true);
         return Ok(());
     }
     deliver(app, &text, target)
-}
-
-fn push_mono(sink: &Arc<Mutex<Vec<f32>>>, data: &[f32], channels: usize) {
-    if channels <= 1 {
-        if let Ok(mut buf) = sink.lock() {
-            buf.extend_from_slice(data);
-        }
-        return;
-    }
-    if let Ok(mut buf) = sink.lock() {
-        for frame in data.chunks(channels) {
-            let sum: f32 = frame.iter().sum();
-            buf.push(sum / frame.len() as f32);
-        }
-    }
 }
 
 /// Save the transcript, put it on the clipboard, and paste it into the
@@ -1109,6 +1206,23 @@ mod pill {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_layout_is_cpu_except_windows_cuda() {
+        assert_eq!(binary_subdir("cpu"), "bin");
+        assert_eq!(archive_for("cpu"), WHISPER_ARCHIVE);
+        #[cfg(windows)]
+        {
+            assert_eq!(binary_subdir("cuda"), "bin-cuda");
+            assert_eq!(archive_for("cuda"), "whisper-bin-win-cuda-11.8.0-x64.zip");
+        }
+        #[cfg(not(windows))]
+        {
+            // No NVIDIA build exists for this path: cuda behaves as cpu.
+            assert_eq!(binary_subdir("cuda"), "bin");
+            assert_eq!(archive_for("cuda"), WHISPER_ARCHIVE);
+        }
+    }
 
     #[test]
     fn combo_parses_modifiers_and_key() {

@@ -271,6 +271,17 @@ export function RamDashboard({
                     in focus
                   </span>
                 )}
+                {/* v0.16.4: open but frozen (Windows-only). A suspended
+                    window can't be the focused one — focusing resumes
+                    it — so this never sits next to "in focus". */}
+                {w.suspended && (
+                  <span
+                    className="ram-focused"
+                    title="Frozen to save memory — focusing the window wakes it, without reloading"
+                  >
+                    Suspended
+                  </span>
+                )}
                 <span className="ram-row-mem muted" title="Estimated share of memory">
                   {aboutMb(perWindowKb)} (estimated)
                 </span>

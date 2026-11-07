@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AppMaka dock</title>
+<style>
+  /* Workspace dock window (v0.17.0): the user's pinned tiles in a small
+     floating glass bar on one screen edge. Same frosted language as the
+     launcher folder panel; the window itself is transparent, frameless,
+     always on top, and destroyed (not hidden) when the dock is off, so
+     it costs no memory at rest. Tile markup reuses App.css classes via
+     src/dock.tsx; the layout rules below are dock-only. */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #f2f3f5;
+    background: transparent;
+    overflow: hidden;
+    user-select: none;
+  }
+  #root { height: 100%; }
+  .dock-root { height: 100%; display: flex; align-items: center; justify-content: center; }
+
+  .dock-bar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    max-width: calc(100% - 8px);
+    max-height: calc(100% - 8px);
+    padding: 8px;
+    border-radius: 22px;
+    background: rgba(22, 24, 31, 0.62);
+    -webkit-backdrop-filter: blur(28px) saturate(1.5);
+    backdrop-filter: blur(28px) saturate(1.5);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow:
+      0 18px 48px rgba(0, 0, 0, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    animation: dock-in 160ms ease-out;
+  }
+  @keyframes dock-in {
+    from { opacity: 0; transform: scale(0.97); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  .edge-bottom .dock-bar { flex-direction: row; overflow-x: auto; scrollbar-width: none; }
+  .edge-left .dock-bar, .edge-right .dock-bar { flex-direction: column; overflow-y: auto; scrollbar-width: none; }
+  .dock-bar::-webkit-scrollbar { display: none; }
+
+  /* Tiles inside the bar run smaller than the folder grid's. */
+  .dock-bar .icon-tile { padding: 6px 5px 5px; border-radius: 12px; flex: 0 0 auto; }
+  .dock-bar .tile-label { max-width: 76px; }
+
+  .dock-empty {
+    padding: 6px 12px;
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.6);
+    white-space: nowrap;
+  }
+  .dock-error {
+    padding: 6px 12px;
+    font-size: 12.5px;
+    color: #ffb4b4;
+    white-space: nowrap;
+  }
+  .dock-hide {
+    flex: 0 0 auto;
+    align-self: center;
+    margin: 0 2px;
+    padding: 5px 9px;
+    border: none;
+    border-radius: 9px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.55);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .dock-hide:hover { background: rgba(255, 255, 255, 0.09); color: #fff; }
+  .dock-hide:focus-visible { outline: 2px solid #a5b4fc; outline-offset: 1px; }
+
+  /* Light theme: same light glass as the launcher panel's variant. */
+  :root[data-theme="light"] body { color: #1d1f24; }
+  :root[data-theme="light"] .dock-bar {
+    background: rgba(248, 249, 251, 0.66);
+    border-color: rgba(15, 17, 21, 0.1);
+    box-shadow:
+      0 18px 48px rgba(15, 17, 21, 0.28),
+      inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  }
+  :root[data-theme="light"] .dock-empty { color: rgba(0, 0, 0, 0.55); }
+  :root[data-theme="light"] .dock-hide { color: rgba(0, 0, 0, 0.55); }
+  :root[data-theme="light"] .dock-hide:hover { background: rgba(0, 0, 0, 0.06); color: #16171a; }
+  :root[data-theme="light"] .dock-error { color: #8f1d1d; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .dock-bar { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+<script type="module" src="./src/dock.tsx"></script>
+</body>
+</html>
