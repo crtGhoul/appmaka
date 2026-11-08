@@ -265,6 +265,9 @@ fn win32_force_show_and_focus(window: &WebviewWindow) {
             let _ = SetForegroundWindow(hwnd);
         }
     }
+    // v0.18.9: focus the webview too — the window-level focus above does
+    // not reach a child webview (see focus_webview).
+    focus_webview(window.app_handle(), window.label());
 }
 
 /// Multi-Monitor Bounds Clamp + Unminimize (v0.18.6 / v0.18.7):
@@ -1105,6 +1108,7 @@ pub fn open_account_placed(
         let b_title = title.clone();
         let b_placement = placement;
         let b_popup_ctx = popup_ctx_proto.clone();
+        let b_guard_js = window_open_guard_js(&popup_ctx_proto.popup_allowlist);
         let b_shortcuts_js = shortcuts_js.clone();
         let b_cursor_js = cursor_js.clone();
         let b_user_scripts = user_scripts.clone();
@@ -1170,6 +1174,8 @@ pub fn open_account_placed(
                 }
                 builder = builder
                     .initialization_script(TARGET_BLANK_SHIM_JS)
+                    .initialization_script(b_guard_js)
+                    .initialization_script(GESTURE_REPORT_JS)
                     .initialization_script(NAV_KEYS_JS)
                     .initialization_script(b_shortcuts_js);
                 if !b_cursor_js.is_empty() {
@@ -1326,6 +1332,10 @@ pub fn open_account_placed(
         match event {
             WindowEvent::Focused(focused) => {
                 if *focused {
+                    // v0.18.9: focus the webview too — the window-level
+                    // focus above does not reach a child webview.
+                    #[cfg(windows)]
+                    focus_webview(&track_app, &track_label);
                     // Read the suspend flag BEFORE touch_window runs:
                     // touch clears it on focus, and the badge decision
                     // below needs the state the window was in when the
@@ -1486,6 +1496,7 @@ pub(crate) fn open_split_pane_webview(
     };
     let shortcuts_js = shortcuts_overlay_js(app);
     let cursor_js = saved_cursor_js(app);
+    let guard_js = window_open_guard_js(&web_app.settings.popup_allowlist);
     let user_scripts = crate::userscripts::user_scripts_init_scripts(app, target_url.as_str());
     let cosmetic_css = adblock.cosmetic_css_for(&web_app.url);
     let scriptlets_js = adblock.scriptlet_js_for(&web_app.url);
@@ -1499,6 +1510,7 @@ pub(crate) fn open_split_pane_webview(
         let b_url = target_url.clone();
         let b_session_dir = session_dir.clone();
         let b_popup_ctx = popup_ctx.clone();
+        let b_guard_js = guard_js.clone();
         let b_shortcuts_js = shortcuts_js.clone();
         let b_cursor_js = cursor_js.clone();
         let b_user_scripts = user_scripts.clone();
@@ -1530,6 +1542,8 @@ pub(crate) fn open_split_pane_webview(
                 }
                 builder = builder
                     .initialization_script(TARGET_BLANK_SHIM_JS)
+                    .initialization_script(b_guard_js)
+                    .initialization_script(GESTURE_REPORT_JS)
                     .initialization_script(NAV_KEYS_JS)
                     .initialization_script(b_shortcuts_js);
                 if !b_cursor_js.is_empty() {
@@ -2134,6 +2148,24 @@ fn cursor_window_label(label: &str) -> bool {
         || label == crate::websearch::SEARCH_WINDOW_LABEL
 }
 
+/// v0.18.9: focus a window's webview explicitly (Windows-only).
+///
+/// With Tauri's `unstable` feature on, every window's webview is a child
+/// webview (WindowChild), and child webviews skip wry's parent-subclass
+/// focus forwarding (WM_SETFOCUS -> MoveFocus). Without it the webview can
+/// sit unfocused while the window looks alive, and mouse clicks never reach
+/// the page — the 0.18.8 dead-clicks regression. `Webview::set_focus`
+/// routes to the WebView2 controller's MoveFocus, which is exactly the call
+/// the parent subclass used to make. Call it whenever a window gains focus
+/// and after show/focus paths that may not fire a Focused event.
+/// Best-effort: a missing webview (mid-teardown) is a silent no-op.
+#[cfg(windows)]
+pub(crate) fn focus_webview(app: &AppHandle, label: &str) {
+    if let Some(webview) = app.get_webview(label) {
+        let _ = webview.set_focus();
+    }
+}
+
 /// Push the cursor style into every open app window (settings-change
 /// broadcast). Best-effort: a window mid-navigation may drop the eval;
 /// the navigation re-apply below converges it on the next page load.
@@ -2322,6 +2354,61 @@ pub(crate) const TARGET_BLANK_SHIM_JS: &str = r#"(function () {
     window.open(a.href, '_blank');
   }, true);
 })();"#;
+
+/// v0.18.9: report user gestures to the backend for the drive-by download
+/// gate. pointerdown/keydown, capture phase, throttled to one invoke per
+/// second — the download handler only needs to know a gesture happened
+/// recently, not every keystroke. Uses __TAURI_INTERNALS__.invoke: the
+/// full __TAURI__ object is never injected (withGlobalTauri is false),
+/// but the internals transport is present in every webview. Guarded: if
+/// the transport is missing the script silently does nothing and the
+/// download gate fails closed for that window.
+pub(crate) const GESTURE_REPORT_JS: &str = r#"(function () {
+  var last = 0;
+  function note() {
+    var now = Date.now();
+    // Observable marker (set before the throttle): the E2E driver reads
+    // this to tell a fired listener apart from a failed invoke.
+    window.__appmakaGestureLast = now;
+    if (now - last < 1000) return;
+    last = now;
+    try {
+      var internals = window.__TAURI_INTERNALS__;
+      if (internals && internals.invoke) internals.invoke("note_user_gesture", {});
+    } catch (e) {}
+  }
+  document.addEventListener("pointerdown", note, true);
+  document.addEventListener("keydown", note, true);
+})();"#;
+
+/// v0.18.9: window.open guard. Popups the user didn't ask for come from
+/// timer/load-based window.open calls, not from clicks — the popup handler
+/// already denies policy-blocked popups, but a site the user allowed
+/// popups for would still get timer popups. This guard lets window.open
+/// through only while a user gesture is active (navigator.userActivation)
+/// or for a sign-in allowlist host, and returns null otherwise. Gesture
+/// calls fall through to the popup handler for the policy decision, so
+/// the target=_blank shim keeps working.
+pub(crate) fn window_open_guard_js(allowlist: &[String]) -> String {
+    let hosts = serde_json::to_string(allowlist).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        r#"(function () {{
+  var origOpen = window.open;
+  var allowHosts = {hosts};
+  window.open = function (url) {{
+    try {{
+      var activation = window.navigator.userActivation;
+      if (activation && activation.isActive) return origOpen.apply(window, arguments);
+      if (url) {{
+        var host = new URL(url, location.href).hostname.toLowerCase();
+        if (allowHosts.indexOf(host) !== -1) return origOpen.apply(window, arguments);
+      }}
+    }} catch (e) {{}}
+    return null;
+  }};
+}})();"#
+    )
+}
 
 /// Back/forward keyboard navigation for account windows. They are bare
 /// webviews with no browser chrome, so Alt+Left / Alt+Right would otherwise
@@ -4816,6 +4903,17 @@ mod tests {
         assert!(cookies_file.exists());
         assert!(storage_file.exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn window_open_guard_embeds_the_allowlist_and_checks_activation() {
+        let js = window_open_guard_js(&["accounts.google.com".to_string()]);
+        assert!(js.contains("accounts.google.com"));
+        assert!(js.contains("userActivation"));
+        assert!(js.contains("isActive"));
+        // No hosts: still a valid guard, empty allowlist.
+        let js = window_open_guard_js(&[]);
+        assert!(js.contains("allowHosts = []"));
     }
 }
 
