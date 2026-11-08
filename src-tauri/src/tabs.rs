@@ -571,6 +571,12 @@ fn build_tabbed_window(
                     builder = builder.inner_size(1200.0, 800.0);
                 }
                 let window_app = app_for_thread.clone();
+                let guard_js = crate::windows::window_open_guard_js(
+                    &popup_ctx
+                        .as_ref()
+                        .map(|c| c.popup_allowlist.clone())
+                        .unwrap_or_default(),
+                );
                 match popup_ctx {
                     Some(mut ctx) => {
                         ctx.parent_label = label.clone();
@@ -585,6 +591,8 @@ fn build_tabbed_window(
                 builder = builder
                     .on_download(crate::downloads::make_download_handler(window_app.clone()))
                     .initialization_script(crate::windows::TARGET_BLANK_SHIM_JS)
+                    .initialization_script(guard_js)
+                    .initialization_script(crate::windows::GESTURE_REPORT_JS)
                     .initialization_script(crate::windows::NAV_KEYS_JS)
                     .initialization_script(crate::windows::shortcuts_overlay_js(&window_app));
                 if !adblock_css.is_empty() {
@@ -721,6 +729,12 @@ fn build_tabbed_window(
                 #[cfg(windows)]
                 if let Some(w) = ev_app.get_webview_window(&ev_label) {
                     crate::windows::set_window_memory_target_low(&w, !*_focused);
+                }
+                // v0.18.9: focus the webview too — window focus does not
+                // reach a child webview.
+                #[cfg(windows)]
+                if *_focused {
+                    crate::windows::focus_webview(&ev_app, &ev_label);
                 }
                 // Linux strip minimize-sync: a minimized page loses
                 // focus, so hide the strip only when the page reports
