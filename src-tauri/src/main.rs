@@ -1255,6 +1255,9 @@ fn main() {
             // one-shot/dedupe sets for the confirm flow, seeded from the
             // saved session before any restore runs.
             app.manage(pin::PinState::default());
+            // v0.18.9: last user gesture per webview, for the drive-by
+            // download gate.
+            app.manage(crate::downloads::GestureState::default());
             app.manage(pin::ConfirmedCloses::default());
             app.manage(pin::PendingConfirms::default());
             pin::seed_from_session(app.handle());
@@ -1358,6 +1361,9 @@ fn main() {
             crate::debug_e2e::maybe_run_error_flow(app.handle());
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_tint_flow(app.handle());
+            // v0.18.9 popup/download-blocking E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_security_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
@@ -1451,6 +1457,12 @@ fn main() {
                     tauri::WindowEvent::Focused(focused) => {
                         if let Some(w) = window.app_handle().get_webview_window("main") {
                             crate::windows::set_window_memory_target_low(&w, !*focused);
+                        }
+                        if *focused {
+                            // v0.18.9: focus the webview too — window focus
+                            // does not reach a child webview.
+                            #[cfg(windows)]
+                            crate::windows::focus_webview(window.app_handle(), "main");
                         }
                     }
                     _ => {}
@@ -1587,6 +1599,8 @@ fn main() {
             errors::copy_error_details,
             errors::copy_diagnostics,
             errors::record_frontend_error,
+            // v0.18.9: user-gesture reports for the drive-by download gate
+            downloads::note_user_gesture,
             // v0.7.0: back/forward navigation command (the visible floating
             // toolbar was removed in v0.8.4; Alt+Left/Right drive history
             // in-page, and this command stays registered for compatibility)
