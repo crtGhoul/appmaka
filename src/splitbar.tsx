@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import "./tauriBrowserShim";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /**
@@ -75,6 +75,51 @@ function App() {
   const [groupId] = useState(() => groupIdFromLabel(getCurrentWindow().label));
   const [group, setGroup] = useState<SplitInfo | null>(null);
   const [maximized, setMaximized] = useState(false);
+  // v0.18.10: drag a pane to swap positions, or drag it out of the bar
+  // into its own window. The ref carries the source index into dragend
+  // (state may already have cleared by then); dragOver is the visual
+  // drop target.
+  const dragFromRef = useRef<number | null>(null);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
+  const [dragOver, setDragOver] = useState<number | null>(null);
+
+  const clearDrag = useCallback(() => {
+    dragFromRef.current = null;
+    setDragFrom(null);
+    setDragOver(null);
+  }, []);
+
+  const popOut = useCallback(
+    async (index: number) => {
+      try {
+        await invoke("pop_out_split_pane", { groupId, index });
+      } catch {
+        /* already gone */
+      }
+    },
+    [groupId],
+  );
+
+  const onDragEnd = useCallback(
+    (e: React.DragEvent) => {
+      const from = dragFromRef.current;
+      clearDrag();
+      if (from == null || e.dataTransfer.dropEffect !== "none") return;
+      // Dropped outside any chip. Inside the bar's own empty space is
+      // a cancelled drag, not a pop-out: only a pointer outside the
+      // 36px bar (or 0,0, which is how leaving the window reports)
+      // pops the pane out.
+      const { clientX, clientY } = e;
+      const outside =
+        (clientX === 0 && clientY === 0) ||
+        clientX < 0 ||
+        clientY < 0 ||
+        clientX > window.innerWidth ||
+        clientY > window.innerHeight;
+      if (outside) void popOut(from);
+    },
+    [clearDrag, popOut],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -113,12 +158,40 @@ function App() {
         {group.panes.map((p, i) => (
           <span
             key={`${p.appId}/${p.accountId}`}
-            className={`pane-wrap${i === group.activePane ? " active" : ""}`}
+            className={`pane-wrap${i === group.activePane ? " active" : ""}${dragFrom === i ? " dragging" : ""}${dragOver === i ? " drag-over" : ""}`}
+            draggable
+            onDragStart={(e) => {
+              dragFromRef.current = i;
+              setDragFrom(i);
+              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.setData("text/plain", String(i));
+            }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "move";
+              setDragOver(i);
+            }}
+            onDragLeave={() => {
+              setDragOver((prev) => (prev === i ? null : prev));
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              const from = dragFromRef.current;
+              clearDrag();
+              if (from != null && from !== i) {
+                void invoke("move_split_pane", {
+                  groupId,
+                  from,
+                  to: i,
+                }).catch(() => undefined);
+              }
+            }}
+            onDragEnd={onDragEnd}
           >
             <button
               type="button"
               className="pane"
-              title={paneDisplay(p)}
+              title={`${paneDisplay(p)} — drag to reorder, drag out to pop out`}
               onClick={() =>
                 void invoke("focus_split_pane", { groupId, index: i }).catch(
                   () => undefined,
@@ -126,6 +199,15 @@ function App() {
               }
             >
               {paneDisplay(p)}
+            </button>
+            <button
+              type="button"
+              className="pane-popout"
+              title="Open in its own window"
+              aria-label={`Open ${paneDisplay(p)} in its own window`}
+              onClick={() => void popOut(i)}
+            >
+              ⧉
             </button>
             <button
               type="button"
@@ -142,6 +224,19 @@ function App() {
             </button>
           </span>
         ))}
+        {group.panes.length < 4 && (
+          <button
+            type="button"
+            className="pane-add"
+            title="Add an app to this split view"
+            aria-label="Add an app to this split view"
+            onClick={() =>
+              void emit("appmaka:add-pane-to-split", { groupId })
+            }
+          >
+            +
+          </button>
+        )}
       </div>
       {layouts.length > 1 && <span className="sep" />}
       {layouts.map((l) => (
