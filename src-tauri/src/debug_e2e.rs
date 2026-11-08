@@ -352,6 +352,9 @@ fn run_flow(app: &AppHandle, url: &str, mode: &str) {
         _ => {}
     }
     // The shell script screenshots and kills the process; nothing to do.
+    // Signal completion so the script's wait loop exits promptly instead
+    // of burning its full timeout (it greps for "flow done").
+    eprintln!("[e2e] popup: flow done");
 }
 
 /// The exact rows the RAM dashboard renders, as JSON.
@@ -601,6 +604,115 @@ fn run_split_flow(app: &AppHandle) {
         }
     );
 
+    // 3.5 v0.18.10: drag-swap — move the first pane to the end. The
+    // active pane follows its account, not its index.
+    let first_before = info.panes[0].clone();
+    let info = match split::move_split_pane(app, &splitstate, &gid, 0, 2) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[e2e] split: move failed: {e}");
+            return;
+        }
+    };
+    let move_ok = info
+        .panes
+        .get(2)
+        .map(|p| p.app_id == first_before.app_id && p.account_id == first_before.account_id)
+        .unwrap_or(false)
+        && info
+            .panes
+            .get(info.active_pane)
+            .map(|p| p.app_id == first_before.app_id)
+            .unwrap_or(false);
+    eprintln!(
+        "[e2e] split: move order_ok={move_ok} active={}",
+        info.active_pane
+    );
+
+    // 3.6 v0.18.10: a gesture inside a page marks its pane active.
+    // Dispatch a pointerdown in pane 0's webview (the gesture init
+    // script's path) and check the highlight follows it.
+    if let Some(w) = app.get_webview(&split::pane_webview_label(
+        &gid,
+        &info.panes[0].app_id,
+        &info.panes[0].account_id,
+    )) {
+        let _ = eval_in(
+            &w,
+            "document.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true})); 'dispatched'",
+        );
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let gesture_active = split::list_splits(app)
+        .map(|l| {
+            l.open
+                .iter()
+                .find(|g| g.id == gid)
+                .map(|g| g.active_pane)
+                .unwrap_or(usize::MAX)
+        })
+        .unwrap_or(usize::MAX);
+    eprintln!("[e2e] split: gesture_active={gesture_active}");
+
+    // 3.7 v0.18.10: add the removed app back — pull its standalone
+    // window into the open split. The app removed in step 3 is the one
+    // missing from the pane list.
+    let removed_id = apps
+        .iter()
+        .find(|id| !info.panes.iter().any(|p| &p.app_id == *id))
+        .cloned()
+        .unwrap_or_default();
+    let removed_acct = format!("{removed_id}-a");
+    if removed_id.is_empty() {
+        eprintln!("[e2e] split: add skipped (no removed app found)");
+        return;
+    }
+    if let Err(e) = crate::windows::open_account_placed(
+        app, &store, &adblock, &winstate, &removed_id, &removed_acct, None, false, false,
+    ) {
+        eprintln!("[e2e] split: standalone reopen failed: {e}");
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let standalone_label = crate::windows::account_window_label(&removed_id, &removed_acct);
+    let standalone_before = app.get_webview_window(&standalone_label).is_some();
+    let info = match split::add_pane_to_split(
+        app, &store, &adblock, &winstate, &splitstate, &gid, &removed_id, &removed_acct,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[e2e] split: add failed: {e}");
+            return;
+        }
+    };
+    let pane_label = split::pane_webview_label(&gid, &removed_id, &removed_acct);
+    eprintln!(
+        "[e2e] split: add_pullin panes={} standalone_before={standalone_before} standalone_after={} pane={}",
+        info.panes.len(),
+        app.get_webview_window(&standalone_label).is_some(),
+        app.get_webview(&pane_label).is_some()
+    );
+
+    // 3.8 v0.18.10: pop the just-added pane back out. The group returns
+    // to three panes and the popped app has its own window again — the
+    // exact state step 4 expects.
+    let info = match split::pop_out_split_pane(app, &store, &adblock, &winstate, &splitstate, &gid, 3) {
+        Ok(Some(i)) => i,
+        Ok(None) => {
+            eprintln!("[e2e] split: popout dissolved the group (expected a group)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("[e2e] split: popout failed: {e}");
+            return;
+        }
+    };
+    eprintln!(
+        "[e2e] split: popout panes={} standalone={}",
+        info.panes.len(),
+        app.get_webview_window(&standalone_label).is_some()
+    );
+
     // 4. Remove down to dissolve: the last pane reopens as an ordinary
     // standalone window and the frame closes.
     let last = match info.panes.last() {
@@ -623,6 +735,26 @@ fn run_split_flow(app: &AppHandle) {
         }
     }
     std::thread::sleep(std::time::Duration::from_secs(2));
+    // v0.18.10: the dissolving survivor reopens where it was. Navigate
+    // its pane somewhere other than home first, then check the
+    // standalone window lands there.
+    let mut dissolve_target = String::new();
+    if let Some(w) = app.get_webview(&split::pane_webview_label(
+        &gid,
+        &last.app_id,
+        &last.account_id,
+    )) {
+        let current = w.url().map(|u| u.to_string()).unwrap_or_default();
+        let target = if current.contains("example.com") {
+            "https://example.org"
+        } else {
+            "https://example.com"
+        };
+        let _ = eval_in(&w, &format!("window.location.href='{target}'; 'navigated'"));
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        dissolve_target = w.url().map(|u| u.to_string()).unwrap_or_default();
+        eprintln!("[e2e] split: survivor pane now at {dissolve_target}");
+    }
     match split::remove_split_pane(app, &store, &adblock, &winstate, &splitstate, &gid, 0) {
         Ok(None) => eprintln!("[e2e] split: group dissolved"),
         Ok(Some(_)) => {
@@ -653,6 +785,91 @@ fn run_split_flow(app: &AppHandle) {
             "missing"
         }
     );
+    // v0.18.10: the survivor reopens where it was (step 4's navigation),
+    // not on its home page.
+    let standalone_url = app
+        .get_webview_window(&last_label)
+        .and_then(|w| w.url().ok())
+        .map(|u| u.to_string())
+        .unwrap_or_default();
+    eprintln!(
+        "[e2e] split: dissolve_url target={dissolve_target} standalone={standalone_url}"
+    );
+
+    // 5. v0.18.10: close-all closes standalone windows AND split
+    // groups. Rebuild one standalone plus a two-pane split, then count
+    // what close-all reports against what was live.
+    let others: Vec<String> = apps
+        .iter()
+        .filter(|id| **id != last.app_id)
+        .cloned()
+        .collect();
+    if others.len() >= 3 {
+        let _ = crate::windows::open_account_placed(
+            app,
+            &store,
+            &adblock,
+            &winstate,
+            &others[0],
+            &format!("{}-a", others[0]),
+            None,
+            false,
+            false,
+        );
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let split_panes: Vec<split::SplitPane> = others[1..3]
+            .iter()
+            .map(|id| split::SplitPane {
+                app_id: id.clone(),
+                account_id: format!("{id}-a"),
+            })
+            .collect();
+        match split::open_split(app, &store, &adblock, &winstate, &splitstate, split_panes, None)
+        {
+            Ok(i) => eprintln!("[e2e] split: closeall setup group {} panes={}", i.id, i.panes.len()),
+            Err(e) => eprintln!("[e2e] split: closeall setup failed: {e}"),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let live_acct = app
+            .webview_windows()
+            .keys()
+            .filter(|l| l.starts_with("acct-"))
+            .count();
+        let live_panes = splitstate.total_panes();
+        let closed =
+            tauri::async_runtime::block_on(crate::windows::close_all_account_windows(app.clone()));
+        let remaining_acct = app
+            .webview_windows()
+            .keys()
+            .filter(|l| l.starts_with("acct-"))
+            .count();
+        eprintln!(
+            "[e2e] split: closeall expected={} closed={closed:?} remaining_acct={remaining_acct} remaining_panes={}",
+            live_acct + live_panes,
+            splitstate.total_panes()
+        );
+    }
+
+    // 6. v0.18.10: idle panes shed memory. The seed sets the example
+    // apps' auto_suspend_minutes to 1; the watcher ticks every 60s, so
+    // a pane sheds on the second tick after it opens. Focus the launcher
+    // first (a focused frame never sheds), then wait out two ticks.
+    let shed_panes: Vec<split::SplitPane> = apps[..2]
+        .iter()
+        .map(|id| split::SplitPane {
+            app_id: id.clone(),
+            account_id: format!("{id}-a"),
+        })
+        .collect();
+    match split::open_split(app, &store, &adblock, &winstate, &splitstate, shed_panes, None) {
+        Ok(i) => eprintln!("[e2e] split: shed setup group {} panes={}", i.id, i.panes.len()),
+        Err(e) => eprintln!("[e2e] split: shed setup failed: {e}"),
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.set_focus();
+    }
+    std::thread::sleep(std::time::Duration::from_secs(85));
+    eprintln!("[e2e] split: shed_wait done");
     eprintln!("[e2e] split: flow done");
 }
 
@@ -893,6 +1110,23 @@ fn eval_in(w: &tauri::Webview, js: &str) -> Option<String> {
 fn run_security_flow(app: &AppHandle, dl_dir: &str) {
     use std::time::Duration;
     std::thread::sleep(Duration::from_secs(6));
+    // v0.18.9 regression check: the main window must get REAL backend data
+    // through the frontend shim, not the browser mock. If the ACL denies
+    // list_apps, the shim silently falls back to its canned localStorage
+    // data (empty in a fresh test profile), so a 0 here means the mock is
+    // active even though the window looks alive. The shell script seeds 5
+    // apps and asserts list_apps=5.
+    if let Some(main) = app.get_webview("main") {
+        let _ = eval_in(
+            &main,
+            "window.__e2eMainList = 'pending'; window.__APPMAKA_INTERNALS__.invoke('list_apps', {}).then(function(a){ window.__e2eMainList = 'ok:' + a.length; }).catch(function(e){ window.__e2eMainList = 'err:' + e; }); 'sent'",
+        );
+        std::thread::sleep(Duration::from_secs(2));
+        let main_list = eval_in(&main, "window.__e2eMainList").unwrap_or_default();
+        eprintln!("[e2e] main: list_apps={main_list}");
+    } else {
+        eprintln!("[e2e] main: list_apps=no-main-webview");
+    }
     let (Some(store), Some(adblock), Some(winstate)) = (
         app.try_state::<crate::store::AppStore>(),
         app.try_state::<crate::adblock::AdblockState>(),
