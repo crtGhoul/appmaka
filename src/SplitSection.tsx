@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { WebApp } from "./types";
 
 /**
@@ -74,6 +75,11 @@ export default function SplitSection({ apps, onError }: SplitSectionProps) {
   const [layout, setLayout] = useState<SplitLayout>("vertical");
   const [saveNames, setSaveNames] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  // v0.18.10: adding one app to an already-open split. The split bar's
+  // "+" button emits "appmaka:add-pane-to-split" with the group id;
+  // the picker switches to single-pick mode for that group.
+  const [addToGroup, setAddToGroup] = useState<string | null>(null);
+  const sectionRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -85,9 +91,24 @@ export default function SplitSection({ apps, onError }: SplitSectionProps) {
     const unlisten = listen<SplitList>("appmaka:split-changed", (e) => {
       if (alive) setList(e.payload);
     });
+    const unlistenAdd = listen<{ groupId: string }>(
+      "appmaka:add-pane-to-split",
+      (e) => {
+        if (!alive) return;
+        setAddToGroup(e.payload.groupId);
+        setSelected([]);
+        // The bar is in front; bring the launcher forward and scroll
+        // the picker into view so the pick is one click, not a hunt.
+        const win = getCurrentWindow();
+        void win.show().catch(() => undefined);
+        void win.setFocus().catch(() => undefined);
+        sectionRef.current?.scrollIntoView({ behavior: "smooth" });
+      },
+    );
     return () => {
       alive = false;
       void unlisten.then((f) => f());
+      void unlistenAdd.then((f) => f());
     };
   }, []);
 
@@ -125,6 +146,28 @@ export default function SplitSection({ apps, onError }: SplitSectionProps) {
     }
   };
 
+  // v0.18.10: add one app to the open group from the bar's "+" button.
+  // One pick, then back to normal mode; an error leaves add-mode on so
+  // another pick can be tried.
+  const addPane = async (pane: SplitPane) => {
+    if (!addToGroup || busy) return;
+    setBusy(true);
+    try {
+      await invoke("add_pane_to_split", {
+        groupId: addToGroup,
+        appId: pane.app_id,
+        accountId: pane.account_id,
+      });
+      const updated = await invoke<SplitList>("list_splits");
+      setList(updated);
+      setAddToGroup(null);
+    } catch (err) {
+      onError(errMsg(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const saveLayout = async (groupId: string) => {
     const name = (saveNames[groupId] ?? "").trim();
     if (!name) return;
@@ -140,12 +183,26 @@ export default function SplitSection({ apps, onError }: SplitSectionProps) {
     }
   };
 
+  const targetPanes = addToGroup
+    ? (list?.open.find((g) => g.id === addToGroup)?.panes ?? [])
+    : [];
+
   return (
-    <div>
-      <p className="muted">
-        Open two to four apps side by side in one window. Each pane keeps
-        its own login; drag the bar at the top to move them all together.
-      </p>
+    <div ref={sectionRef}>
+      {addToGroup ? (
+        <p className="muted">
+          Adding to the open split view ({targetPanes.length} of 4 apps) —
+          pick one app.{" "}
+          <button type="button" onClick={() => setAddToGroup(null)}>
+            Cancel
+          </button>
+        </p>
+      ) : (
+        <p className="muted">
+          Open two to four apps side by side in one window. Each pane keeps
+          its own login; drag the bar at the top to move them all together.
+        </p>
+      )}
 
       <div>
         {apps.flatMap((app) =>
@@ -155,18 +212,29 @@ export default function SplitSection({ apps, onError }: SplitSectionProps) {
               (p) =>
                 p.app_id === pane.app_id && p.account_id === pane.account_id,
             );
+            const alreadyInTarget = targetPanes.some(
+              (p) =>
+                p.app_id === pane.app_id && p.account_id === pane.account_id,
+            );
             return (
               <label key={`${app.id}/${account.id}`} className="inline-form">
                 <input
                   type="checkbox"
-                  checked={checked}
-                  disabled={!checked && selected.length >= 4}
-                  onChange={() => togglePane(pane)}
+                  checked={addToGroup ? alreadyInTarget : checked}
+                  disabled={
+                    addToGroup
+                      ? alreadyInTarget || busy
+                      : !checked && selected.length >= 4
+                  }
+                  onChange={() =>
+                    addToGroup ? void addPane(pane) : togglePane(pane)
+                  }
                   aria-label={`${app.name}${account.label ? ` ${account.label}` : ""}`}
                 />
                 <span>
                   {app.name}
                   {account.label ? ` — ${account.label}` : ""}
+                  {addToGroup && alreadyInTarget ? " (already in this split)" : ""}
                 </span>
               </label>
             );
@@ -191,13 +259,15 @@ export default function SplitSection({ apps, onError }: SplitSectionProps) {
         </label>
       )}
 
-      <button
-        type="button"
-        disabled={selected.length < 2 || busy}
-        onClick={() => void openSplit()}
-      >
-        Open split ({selected.length} selected)
-      </button>
+      {!addToGroup && (
+        <button
+          type="button"
+          disabled={selected.length < 2 || busy}
+          onClick={() => void openSplit()}
+        >
+          Open split ({selected.length} selected)
+        </button>
+      )}
 
       {list && list.layouts.length > 0 && (
         <div>

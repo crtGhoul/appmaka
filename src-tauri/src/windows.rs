@@ -804,6 +804,19 @@ impl WindowState {
             .and_then(|mut guard| guard.remove(label))
     }
 
+    /// Seed a restore URL for a window label (v0.18.10): the next
+    /// `open_account_placed` / `open_split_pane_webview` for that label
+    /// consumes it one-shot as its navigation target, so a pane that is
+    /// popped out of a split (or a dissolving split's survivor) reopens
+    /// exactly where it was instead of on its home page. Overwrites any
+    /// older seed for the label; a leftover seed is inert (labels are
+    /// per-account and the next restore re-seeds fresh values).
+    pub(crate) fn seed_restore_url(&self, label: &str, url: String) {
+        if let Ok(mut guard) = self.restore_urls.lock() {
+            guard.insert(label.to_string(), url);
+        }
+    }
+
     /// v0.15.0: does any tracked window belong to this account? Used by
     /// process attribution (procattr) so it never attributes browser
     /// processes to an account with nothing open.
@@ -834,7 +847,15 @@ fn enforce_account_window_cap(app: &AppHandle, winstate: &WindowState) {
             .iter()
             .filter(|(label, _)| label.starts_with("acct-"))
             .collect();
-        if labels.len() < MAX_OPEN_ACCOUNT_WINDOWS {
+        // v0.18.10: split panes are live webviews too — they count toward
+        // the cap, so a four-pane split leaves room for only two more
+        // windows. Eviction still only closes standalone windows (never
+        // panes, never the focused one).
+        let pane_count: usize = app
+            .try_state::<crate::split::SplitState>()
+            .map(|ss| ss.total_panes())
+            .unwrap_or(0);
+        if labels.len() + pane_count < MAX_OPEN_ACCOUNT_WINDOWS {
             return;
         }
         // Pinned windows ("Don't close this window", v0.9.9) are never
@@ -3238,6 +3259,35 @@ pub(crate) fn set_window_memory_target_low(window: &WebviewWindow, low: bool) {
 #[cfg(not(windows))]
 pub(crate) fn set_window_memory_target_low(_window: &WebviewWindow, _low: bool) {}
 
+/// v0.18.10: the same memory-target signal for a split pane's child
+/// webview (a pane has no WebviewWindow, so the window variant can't
+/// take it). WebView2-only; a no-op elsewhere, like the window variant.
+#[cfg(windows)]
+pub(crate) fn set_pane_memory_target_low(webview: &Webview, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows_core::Interface;
+
+    let target = if low {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+    } else {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+    };
+
+    let _ = webview.with_webview(move |platform| unsafe {
+        if let Ok(core) = platform.controller().CoreWebView2() {
+            if let Ok(core19) = core.cast::<ICoreWebView2_19>() {
+                let _ = core19.SetMemoryUsageTargetLevel(target);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub(crate) fn set_pane_memory_target_low(_webview: &Webview, _low: bool) {}
+
 /// Restore the pre-suspend title and wake the renderer. WebView2 auto-resumes
 /// a suspended page when its controller becomes visible again; the explicit
 /// Resume() covers the case where visibility didn't flip.
@@ -3333,6 +3383,10 @@ fn suspend_idle_windows(app: &AppHandle) {
         }
         suspend_one(app, &label, &window);
     }
+    // v0.18.10: idle split panes shed memory on the same tick (their
+    // pages stay live — a child webview cannot TrySuspend, so the
+    // watcher lowers the memory target instead).
+    crate::split::shed_idle_pane_memory(app, &store, now);
 }
 
 /// Close account windows idle longer than their app's `auto_close_minutes`
@@ -4192,6 +4246,14 @@ pub async fn close_all_account_windows(app: AppHandle) -> Result<usize, String> 
         .unwrap_or_default();
     let mut confirm_labels = labels.clone();
     confirm_labels.extend(tabbed.iter().map(|(_, key)| key.clone()));
+    // v0.18.10: split panes count as open windows — their labels join
+    // the one batch confirm, so close_split passes through on the same
+    // approval instead of asking again.
+    confirm_labels.extend(
+        app.try_state::<crate::split::SplitState>()
+            .map(|ss| ss.all_pane_labels())
+            .unwrap_or_default(),
+    );
     let approved = crate::pin::confirm_batch_close(&app, &confirm_labels);
     let mut closed = 0usize;
     for label in &labels {
@@ -4208,6 +4270,16 @@ pub async fn close_all_account_windows(app: AppHandle) -> Result<usize, String> 
         if let Some(ts) = app.try_state::<crate::tabs::TabState>() {
             crate::tabs::close_group(&app, &ts, id);
             closed += 1;
+        }
+    }
+    // v0.18.10: split groups close too. close_split refuses a group
+    // with an unapproved pinned pane (Err), so only closed groups count.
+    if let Some(ss) = app.try_state::<crate::split::SplitState>() {
+        let groups = ss.group_pane_counts();
+        for (id, panes) in groups {
+            if crate::split::close_split(&app, &ss, &id).is_ok() {
+                closed += panes;
+            }
         }
     }
     // Popups are not tracked in WindowState; sweep them by live-window

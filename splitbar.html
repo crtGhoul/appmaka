@@ -43,6 +43,13 @@
   .pane-wrap { display: inline-flex; align-items: center; border-radius: 4px; }
   .pane-wrap.active { background: #3e3e3e; }
   .pane-wrap.active .pane { color: #f1f1f1; }
+  /* v0.18.10: drag a pane to swap positions (accent outline on the
+     drop target), or out of the bar into its own window. */
+  .pane-wrap.dragging { opacity: 0.5; }
+  .pane-wrap.drag-over { outline: 2px solid #4f46e5; outline-offset: -2px; }
+  .pane-popout { padding: 0 6px; height: 26px; color: #777; font-size: 13px; line-height: 1; opacity: 0; }
+  .pane-wrap:hover .pane-popout, .pane-wrap.active .pane-popout, .pane-popout:focus-visible { opacity: 1; }
+  .pane-add { padding: 0 9px; height: 26px; color: #8a8f98; font-size: 15px; line-height: 1; }
   .pane-close { padding: 0 6px; height: 26px; color: #777; font-size: 14px; line-height: 1; }
   .pane-close:hover { background: #4a2b2b; color: #fff; }
   .layout { padding: 0 8px; height: 26px; }

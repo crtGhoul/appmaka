@@ -509,6 +509,53 @@ async fn focus_split_pane(
     split::focus_split_pane(&app, &splitstate, &group_id, index)
 }
 
+/// Reorder panes inside a split (v0.18.10: drag a pane to swap
+/// positions). JS: `invoke("move_split_pane", { groupId, from, to })`
+#[tauri::command]
+async fn move_split_pane(
+    app: AppHandle,
+    splitstate: State<'_, split::SplitState>,
+    group_id: String,
+    from: usize,
+    to: usize,
+) -> Result<split::SplitInfo, String> {
+    split::move_split_pane(&app, &splitstate, &group_id, from, to)
+}
+
+/// Pop one pane out of a split into its own window (v0.18.10: drag a
+/// pane out). JS: `invoke("pop_out_split_pane", { groupId, index })` —
+/// returns the group's info, or null when the group dissolved.
+#[tauri::command]
+async fn pop_out_split_pane(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    winstate: State<'_, windows::WindowState>,
+    splitstate: State<'_, split::SplitState>,
+    group_id: String,
+    index: usize,
+) -> Result<Option<split::SplitInfo>, String> {
+    split::pop_out_split_pane(&app, &store, &adblock, &winstate, &splitstate, &group_id, index)
+}
+
+/// Add one app to a live split view (v0.18.10: pull an already-open
+/// standalone window into an open split).
+/// JS: `invoke("add_pane_to_split", { groupId, appId, accountId })`
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // mirrors the split.rs signature
+async fn add_pane_to_split(
+    app: AppHandle,
+    store: State<'_, AppStore>,
+    adblock: State<'_, AdblockState>,
+    winstate: State<'_, windows::WindowState>,
+    splitstate: State<'_, split::SplitState>,
+    group_id: String,
+    app_id: String,
+    account_id: String,
+) -> Result<split::SplitInfo, String> {
+    split::add_pane_to_split(&app, &store, &adblock, &winstate, &splitstate, &group_id, &app_id, &account_id)
+}
+
 /// Save an open split as a named layout.
 /// JS: `invoke("save_split_layout", { name, groupId })`
 #[tauri::command]
@@ -1591,6 +1638,9 @@ fn main() {
             set_split_layout,
             remove_split_pane,
             focus_split_pane,
+            move_split_pane,
+            pop_out_split_pane,
+            add_pane_to_split,
             save_split_layout,
             delete_split_layout,
             list_splits,
@@ -1717,4 +1767,97 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod acl_tests {
+    // v0.18.9 regression: adding the first permission file (note-user-gesture)
+    // turned on Tauri's ACL gate for ALL app commands (has_app_acl), and every
+    // command without a permission entry was denied with "Command X not allowed
+    // by ACL" — which the frontend shim silently turns into browser-mock data,
+    // so the app looked alive with an empty library on both of the user's
+    // machines. This test fails the build if a command is ever added without
+    // a permission entry, so the trap cannot recur silently.
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn command_names() -> BTreeSet<String> {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut names = BTreeSet::new();
+        for entry in fs::read_dir(src).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().map(|e| e != "rs").unwrap_or(true) {
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap();
+            let mut lines = text.lines().peekable();
+            while let Some(line) = lines.next() {
+                // Only a real attribute (line-start, possibly indented) counts:
+                // the test's own string literals mention the attribute text.
+                if line.trim_start().starts_with("#[tauri::command]") {
+                    // The fn may follow on the next line (attributes in between
+                    // are not expected, but scan forward a few lines to be safe).
+                    for _ in 0..5 {
+                        match lines.next() {
+                            Some(next) => {
+                                if let Some(pos) = next.find("fn ") {
+                                    let rest = &next[pos + 3..];
+                                    let name: String =
+                                        rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                                    if !name.is_empty() {
+                                        names.insert(name);
+                                    }
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    fn allowed_commands() -> BTreeSet<String> {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("permissions");
+        let mut allowed = BTreeSet::new();
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().map(|e| e != "toml").unwrap_or(true) {
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap();
+            // Extract every quoted string inside each `commands.allow = [...]`.
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find("commands.allow") {
+                rest = &rest[at..];
+                let end = rest.find(']').unwrap_or(rest.len());
+                let list = &rest[..end];
+                let mut chars = list.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '"' {
+                        let s: String = chars.by_ref().take_while(|c| *c != '"').collect();
+                        allowed.insert(s);
+                    }
+                }
+                rest = &rest[end..];
+            }
+        }
+        allowed
+    }
+
+    #[test]
+    fn acl_commands_all_listed() {
+        let commands = command_names();
+        assert!(!commands.is_empty(), "no #[tauri::command] found — parser broke");
+        let allowed = allowed_commands();
+        let missing: Vec<&String> = commands.difference(&allowed).collect();
+        assert!(
+            missing.is_empty(),
+            "app commands with no ACL permission entry (invoke would be denied and the frontend would silently fall back to the browser mock): {:?}",
+            missing
+        );
+    }
 }

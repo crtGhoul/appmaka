@@ -569,7 +569,17 @@ impl GestureState {
 /// account windows. No args — the invoking webview's label is the key.
 #[tauri::command]
 pub fn note_user_gesture(webview: Webview, state: State<'_, GestureState>) {
-    state.note(webview.label());
+    let label = webview.label().to_string();
+    state.note(&label);
+    // v0.18.10: a gesture inside a split pane also makes it the active
+    // pane — the bar's highlight used to update only on bar clicks, so
+    // clicking inside a page left the wrong chip lit. Cheap: only split
+    // panes look up their group, and only an actual change writes.
+    if label.starts_with(crate::split::SPLIT_PANE_LABEL_PREFIX) {
+        crate::split::mark_pane_active_for_webview(webview.app_handle(), &label);
+        // Refresh the pane's idle clock; wakes a memory-shed pane.
+        crate::split::touch_pane_activity(webview.app_handle(), &label);
+    }
 }
 
 /// Build the `on_download` closure for a window's `WebviewWindowBuilder`

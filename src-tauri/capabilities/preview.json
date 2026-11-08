@@ -1,1 +1,1 @@
-{"$schema":"../gen/schemas/desktop-schema.json","description":"Preview sign-in header webviews (one accent, quiet UI)","identifier":"preview","permissions":["core:default"],"webviews":["preview-*-header"]}
+{"$schema": "../gen/schemas/desktop-schema.json", "description": "Preview sign-in header webviews (one accent, quiet UI)", "identifier": "preview", "permissions": ["core:default", "allow-app-commands"], "webviews": ["preview-*-header"]}

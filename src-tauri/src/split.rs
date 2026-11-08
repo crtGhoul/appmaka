@@ -278,6 +278,161 @@ pub struct SplitList {
 #[derive(Default)]
 pub struct SplitState {
     inner: Mutex<HashMap<String, SplitGroup>>,
+    /// Per-pane idle bookkeeping (v0.18.10): last gesture/focus time
+    /// and whether the watcher shed the pane's memory. Runtime-only,
+    /// never persisted — a restart starts every pane fresh.
+    pane_activity: Mutex<HashMap<String, PaneActivity>>,
+}
+
+impl SplitState {
+    /// Live split panes, total (v0.18.10): the window cap counts them.
+    pub fn total_panes(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|m| m.values().map(|g| g.panes.len()).sum())
+            .unwrap_or(0)
+    }
+
+    /// Every live pane's account-window label (v0.18.10): close-all's
+    /// one batch confirm covers them.
+    pub fn all_pane_labels(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|m| {
+                m.values()
+                    .flat_map(|g| g.panes.iter().map(|p| p.acct_label()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// (group id, pane count) for every live group (v0.18.10):
+    /// close-all closes each group and counts its panes.
+    pub fn group_pane_counts(&self) -> Vec<(String, usize)> {
+        self.inner
+            .lock()
+            .map(|m| {
+                m.iter()
+                    .map(|(id, g)| (id.clone(), g.panes.len()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Last gesture/focus time of a split pane, and whether the idle
+/// watcher lowered its memory target (see shed_idle_pane_memory).
+#[derive(Default, Clone, Copy)]
+struct PaneActivity {
+    last_active: u64,
+    low_memory: bool,
+}
+
+/// Record activity in a split pane (v0.18.10): every gesture inside a
+/// pane refreshes its idle clock, and a gesture in a shed pane wakes it
+/// (memory target back to NORMAL). No-op for non-pane labels. The COM
+/// call runs after the lock is released — never hold a Mutex across a
+/// Win32 call.
+pub fn touch_pane_activity(app: &AppHandle, webview_label: &str) {
+    if !webview_label.starts_with(SPLIT_PANE_LABEL_PREFIX) {
+        return;
+    }
+    let Some(splitstate) = app.try_state::<SplitState>() else {
+        return;
+    };
+    let was_low = {
+        let mut activity = match splitstate.pane_activity.lock() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+        let entry = activity.entry(webview_label.to_string()).or_insert(PaneActivity {
+            last_active: 0,
+            low_memory: false,
+        });
+        let was_low = entry.low_memory;
+        entry.last_active = crate::windows::unix_secs();
+        entry.low_memory = false;
+        was_low
+    };
+    if was_low {
+        if let Some(w) = app.get_webview(webview_label) {
+            crate::windows::set_pane_memory_target_low(&w, false);
+        }
+        eprintln!("[idle] split pane {webview_label} memory target normal (wake)");
+    }
+}
+
+/// v0.18.10: idle split panes shed memory like suspended windows. A
+/// child webview cannot TrySuspend (no WebviewWindow), so an idle pane
+/// gets WebView2's memory target LOW instead: the page stays live
+/// (audio keeps playing, scroll and form state intact), Chromium just
+/// drops its caches and working set. The frame's active pane and any
+/// pane in a focused frame never shed; a pane sheds only after a full
+/// idle interval of observed inactivity (first sighting starts the
+/// clock). Called from the suspend watcher, once a minute.
+pub fn shed_idle_pane_memory(app: &AppHandle, store: &crate::store::AppStore, now: u64) {
+    let Some(splitstate) = app.try_state::<SplitState>() else {
+        return;
+    };
+    let groups: Vec<SplitGroup> = match splitstate.inner.lock() {
+        Ok(m) => m.values().cloned().collect(),
+        Err(_) => return,
+    };
+    // Decide under the lock; apply outside it (no Win32 call under a
+    // Mutex — see AGENTS.md).
+    let mut to_shed: Vec<String> = Vec::new();
+    for group in &groups {
+        if let Some(frame) = app.get_window(&split_frame_label(&group.id)) {
+            if frame.is_focused().unwrap_or(false) {
+                continue;
+            }
+        }
+        for (i, pane) in group.panes.iter().enumerate() {
+            if i == group.active_pane {
+                continue;
+            }
+            let label = pane_webview_label(&group.id, &pane.app_id, &pane.account_id);
+            let minutes = match store.get(&pane.app_id) {
+                Ok(a) => a.effective_auto_suspend_minutes(&pane.account_id),
+                Err(_) => continue,
+            };
+            if minutes == 0 {
+                continue;
+            }
+            let mut activity = match splitstate.pane_activity.lock() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            match activity.get_mut(&label) {
+                None => {
+                    activity.insert(
+                        label,
+                        PaneActivity {
+                            last_active: now,
+                            low_memory: false,
+                        },
+                    );
+                }
+                Some(a) if a.low_memory => {}
+                Some(a) => {
+                    if now.saturating_sub(a.last_active) >= minutes * 60 {
+                        to_shed.push(label);
+                    }
+                }
+            }
+        }
+    }
+    for label in to_shed {
+        if let Some(w) = app.get_webview(&label) {
+            crate::windows::set_pane_memory_target_low(&w, true);
+        }
+        if let Ok(mut activity) = splitstate.pane_activity.lock() {
+            if let Some(a) = activity.get_mut(&label) {
+                a.low_memory = true;
+            }
+        }
+        eprintln!("[idle] split pane {label} memory target low (idle)");
+    }
 }
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -884,6 +1039,14 @@ pub fn remove_split_pane(
             .lock()
             .ok()
             .map(|mut m| m.remove(group_id));
+        // v0.18.10: the survivor reopens where it was, not on its home
+        // page. Capture the pane's live URL and seed it before the
+        // webview closes; open_account_placed consumes the seed one-shot.
+        if let Some(url) = pane_live_url(app, group_id, &last) {
+            if let Some(winstate) = app.try_state::<crate::windows::WindowState>() {
+                winstate.seed_restore_url(&last.acct_label(), url);
+            }
+        }
         crate::windows::close_tracked_window(app, &last.acct_label(), CloseIntent::User);
         if let Some(w) = app.get_webview(&pane_webview_label(&group.id, &last.app_id, &last.account_id)) {
             let _ = w.close();
@@ -916,6 +1079,211 @@ pub fn remove_split_pane(
     let _ = persist_open(app, splitstate);
     emit_changed(app);
     Ok(Some(info_for(store, &group)))
+}
+
+/// Reorder panes inside a group (v0.18.10: drag a pane to swap
+/// positions). The active pane follows its account, not its index.
+/// Layout is unchanged (the count is unchanged); survivors reflow.
+pub fn move_split_pane(
+    app: &AppHandle,
+    splitstate: &SplitState,
+    group_id: &str,
+    from: usize,
+    to: usize,
+) -> Result<SplitInfo, String> {
+    let store = app
+        .try_state::<AppStore>()
+        .ok_or_else(|| "app store unavailable".to_string())?;
+    let group = {
+        let mut state = splitstate
+            .inner
+            .lock()
+            .map_err(|_| "split state lock poisoned".to_string())?;
+        let group = state
+            .get_mut(group_id)
+            .ok_or_else(|| "That split view is already gone.".to_string())?;
+        if from >= group.panes.len() || to >= group.panes.len() {
+            return Err("That pane is already gone.".to_string());
+        }
+        if from == to {
+            return Ok(info_for(&store, group));
+        }
+        let active = group.panes.get(group.active_pane).cloned();
+        let pane = group.panes.remove(from);
+        group.panes.insert(to, pane);
+        group.active_pane = active
+            .and_then(|a| {
+                group
+                    .panes
+                    .iter()
+                    .position(|p| p.app_id == a.app_id && p.account_id == a.account_id)
+            })
+            .unwrap_or(0);
+        group.clone()
+    };
+    retile(app, &group);
+    let _ = persist_open(app, splitstate);
+    emit_changed(app);
+    Ok(info_for(&store, &group))
+}
+
+/// Pop one pane out of a group into its own standalone window
+/// (v0.18.10: drag a pane out of the split). The pane reopens where it
+/// was (live URL seeded before its webview closes); if the group had
+/// two panes it dissolves and the survivor reopens standalone too.
+pub fn pop_out_split_pane(
+    app: &AppHandle,
+    store: &AppStore,
+    adblock: &crate::adblock::AdblockState,
+    winstate: &crate::windows::WindowState,
+    splitstate: &SplitState,
+    group_id: &str,
+    index: usize,
+) -> Result<Option<SplitInfo>, String> {
+    let group = splitstate
+        .inner
+        .lock()
+        .map_err(|_| "split state lock poisoned".to_string())?
+        .get(group_id)
+        .cloned()
+        .ok_or_else(|| "That split view is already gone.".to_string())?;
+    if index >= group.panes.len() {
+        return Err("That pane is already gone.".to_string());
+    }
+    let pane = group.panes[index].clone();
+    // Seed the pane's live URL before anything closes, so the standalone
+    // window lands where the pane was.
+    if let Some(url) = pane_live_url(app, group_id, &pane) {
+        winstate.seed_restore_url(&pane.acct_label(), url);
+    }
+    let result = remove_split_pane(app, store, adblock, winstate, splitstate, group_id, index)?;
+    // remove_split_pane refuses pinned panes by returning the unchanged
+    // group: only reopen standalone when the pane is actually gone.
+    let popped = match &result {
+        None => true,
+        Some(info) => !info
+            .panes
+            .iter()
+            .any(|p| p.app_id == pane.app_id && p.account_id == pane.account_id),
+    };
+    if popped {
+        let _ = crate::windows::open_account_placed(
+            app, store, adblock, winstate, &pane.app_id, &pane.account_id, None, false, false,
+        );
+    }
+    Ok(result)
+}
+
+/// Add one app to a live split view (v0.18.10: pull an already-open
+/// standalone window into an open split). The account's live URL is
+/// seeded so the pane lands where its window was.
+#[allow(clippy::too_many_arguments)] // pane identity is two strings; the other split fns carry the same six context args
+pub fn add_pane_to_split(
+    app: &AppHandle,
+    store: &AppStore,
+    adblock: &crate::adblock::AdblockState,
+    winstate: &crate::windows::WindowState,
+    splitstate: &SplitState,
+    group_id: &str,
+    app_id: &str,
+    account_id: &str,
+) -> Result<SplitInfo, String> {
+    let pane = SplitPane {
+        app_id: app_id.to_string(),
+        account_id: account_id.to_string(),
+    };
+    let group = splitstate
+        .inner
+        .lock()
+        .map_err(|_| "split state lock poisoned".to_string())?
+        .get(group_id)
+        .cloned()
+        .ok_or_else(|| "That split view is already gone.".to_string())?;
+    if group.panes.len() >= MAX_PANES {
+        return Err("That split view is already full (four apps).".to_string());
+    }
+    if group
+        .panes
+        .iter()
+        .any(|p| p.app_id == app_id && p.account_id == account_id)
+    {
+        return Err("That app is already in this split view.".to_string());
+    }
+    if let Some((other, _)) = group_with_account(splitstate, app_id, account_id) {
+        if other != group_id {
+            return Err("That app is already open in another split view.".to_string());
+        }
+    }
+    // Validate the RESULTING pane list (count, existence, no repeats).
+    // NOTE: do not validate the single new pane on its own — validate_panes
+    // requires at least two panes, so a one-pane slice always fails with
+    // "Pick at least two apps" (live-test catch, 2026-11-08).
+    let mut candidate = group.panes.clone();
+    candidate.push(pane.clone());
+    validate_panes(store, &candidate)?;
+    // Pull an open standalone window in: capture where it was, ask once
+    // if pinned, then close it before building the pane (one account,
+    // one live webview).
+    let acct_label = pane.acct_label();
+    if app.get_webview_window(&acct_label).is_some() {
+        if let Some(window) = app.get_webview_window(&acct_label) {
+            if let Ok(url) = window.url() {
+                let url = url.to_string();
+                if url != "about:blank" {
+                    winstate.seed_restore_url(&acct_label, url);
+                }
+            }
+        }
+        let approved = crate::pin::confirm_batch_close(app, std::slice::from_ref(&acct_label));
+        if crate::pin::is_pinned(app, &acct_label) && !approved.contains(&acct_label) {
+            return Err("That app is pinned in its own window. Unpin it first, then add it to the split view.".to_string());
+        }
+        crate::windows::close_tracked_window(app, &acct_label, CloseIntent::User);
+    }
+    let frame_label = split_frame_label(group_id);
+    let Some(frame) = app.get_window(&frame_label) else {
+        return Err("That split view is already gone.".to_string());
+    };
+    let group = {
+        let mut state = splitstate
+            .inner
+            .lock()
+            .map_err(|_| "split state lock poisoned".to_string())?;
+        let group = state
+            .get_mut(group_id)
+            .ok_or_else(|| "That split view is already gone.".to_string())?;
+        group.panes.push(pane.clone());
+        group.layout = layout_for_count(group.panes.len()).unwrap_or(SplitLayout::TwoVertical);
+        group.active_pane = group.panes.len() - 1;
+        group.clone()
+    };
+    let rects = pane_rects(group.layout, group.frame.w, group.frame.h);
+    let rect = rects[group.panes.len() - 1];
+    if let Err(e) = crate::windows::open_split_pane_webview(
+        app,
+        store,
+        adblock,
+        winstate,
+        &frame,
+        &pane_webview_label(&group.id, &pane.app_id, &pane.account_id),
+        &pane.app_id,
+        &pane.account_id,
+        (rect.x, rect.y, rect.w, rect.h),
+    ) {
+        // Roll back the append; the group keeps its old layout and panes.
+        if let Ok(mut state) = splitstate.inner.lock() {
+            if let Some(g) = state.get_mut(group_id) {
+                g.panes.retain(|p| !(p.app_id == pane.app_id && p.account_id == pane.account_id));
+                g.layout = layout_for_count(g.panes.len()).unwrap_or(SplitLayout::TwoVertical);
+                g.active_pane = g.active_pane.min(g.panes.len().saturating_sub(1));
+            }
+        }
+        return Err(format!("could not add the pane: {e}"));
+    }
+    retile(app, &group);
+    let _ = persist_open(app, splitstate);
+    emit_changed(app);
+    Ok(info_for(store, &group))
 }
 
 /// Focus one pane: show and focus the frame, focus the pane's child
@@ -968,9 +1336,61 @@ pub fn focus_split_pane(
     if let Some(w) = app.get_webview(&pane_webview_label(group_id, &pane.app_id, &pane.account_id)) {
         let _ = w.set_focus();
     }
+    // Focusing a pane refreshes its idle clock and wakes it if the
+    // watcher shed its memory.
+    touch_pane_activity(
+        app,
+        &pane_webview_label(group_id, &pane.app_id, &pane.account_id),
+    );
     let _ = persist_open(app, splitstate);
     emit_changed(app);
     Ok(())
+}
+
+/// The live URL of a pane's webview, if it has navigated somewhere
+/// readable. about:blank is not a destination — callers must not seed
+/// it as a restore URL, or the reopened window lands blank.
+fn pane_live_url(app: &AppHandle, group_id: &str, pane: &SplitPane) -> Option<String> {
+    let label = pane_webview_label(group_id, &pane.app_id, &pane.account_id);
+    let url = app.get_webview(&label).and_then(|w| w.url().ok())?;
+    let url = url.to_string();
+    if url == "about:blank" {
+        return None;
+    }
+    Some(url)
+}
+
+/// v0.18.10: mark the pane holding this webview active, if it isn't
+/// already. Called from the gesture transport (a pointerdown/keydown
+/// inside a pane), so the bar's highlight follows clicks inside pages,
+/// not just bar clicks. Writes only on a real change.
+pub fn mark_pane_active_for_webview(app: &AppHandle, webview_label: &str) {
+    let Some(splitstate) = app.try_state::<SplitState>() else {
+        return;
+    };
+    let changed = {
+        let mut state = match splitstate.inner.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut changed = false;
+        for group in state.values_mut() {
+            if let Some(i) = group.panes.iter().position(|p| {
+                pane_webview_label(&group.id, &p.app_id, &p.account_id) == webview_label
+            }) {
+                if group.active_pane != i {
+                    group.active_pane = i;
+                    changed = true;
+                }
+                break;
+            }
+        }
+        changed
+    };
+    if changed {
+        let _ = persist_open(app, &splitstate);
+        emit_changed(app);
+    }
 }
 
 /// The live split group holding this account, if any, with the pane's
