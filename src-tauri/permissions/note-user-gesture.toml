@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-note-user-gesture"
+description = "Enables the note_user_gesture command, which records a last-gesture timestamp for the calling webview and nothing else. Granted to account, tabbed, and split-pane webviews by the gesture capability so the drive-by download gate can tell a clicked download from one a page started on its own."
+commands.allow = ["note_user_gesture"]
