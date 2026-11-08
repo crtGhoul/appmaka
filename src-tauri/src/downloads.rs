@@ -25,7 +25,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::webview::{DownloadEvent, Webview};
 use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
@@ -494,6 +494,84 @@ fn plan_destination(
     }
 }
 
+/// v0.18.9: drive-by download gate. A download counts as user-initiated
+/// for this long after the last pointer/key gesture in the same window.
+/// Long enough for a slow server to answer a clicked download; the
+/// drive-bys this stops fire on page load, with no gesture at all.
+const GESTURE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Contained-popup window labels never download legitimately — sign-in
+/// flows don't download files — so any download from one is a drive-by
+/// by definition. Matches spawn_contained_window's "popup-"/"oauth-"
+/// labels. Retry windows ("appmaka-retry-") are NOT in this list: they
+/// re-fire a download the user already asked for.
+const POPUP_LABEL_PREFIXES: [&str; 2] = ["popup-", "oauth-"];
+
+/// Throttle for the blocked-download notice: one per minute, so a spammy
+/// page can't flood the notice bar. Same shape as the popup-block
+/// throttle in windows.rs.
+static LAST_DOWNLOAD_BLOCK_NOTICE_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// Pure gate decision, unit-tested: popup windows never download, retries
+/// are exempt, anything else needs a recent gesture.
+fn download_block_reason(label: &str, is_retry: bool, gestured: bool) -> Option<&'static str> {
+    if POPUP_LABEL_PREFIXES.iter().any(|p| label.starts_with(p)) {
+        return Some("it came from a popup window");
+    }
+    if !is_retry && !gestured {
+        return Some("no click started it");
+    }
+    None
+}
+
+fn notify_download_blocked(app: &AppHandle, filename: &str, reason: &str) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_DOWNLOAD_BLOCK_NOTICE_SECS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < 60 {
+        return;
+    }
+    LAST_DOWNLOAD_BLOCK_NOTICE_SECS.store(now, Ordering::Relaxed);
+    crate::popup_add::emit_notice(
+        app,
+        &format!("Blocked an automatic download of \"{filename}\" — {reason}."),
+    );
+}
+
+/// v0.18.9: last user gesture (pointerdown/keydown) per webview label,
+/// for the drive-by download gate. Recorded by the `note_user_gesture`
+/// command, which a tiny init script invokes from the page. Process-local
+/// only, never persisted.
+#[derive(Default)]
+pub struct GestureState {
+    last: Mutex<HashMap<String, Instant>>,
+}
+
+impl GestureState {
+    pub fn note(&self, label: &str) {
+        if let Ok(mut m) = self.last.lock() {
+            m.insert(label.to_string(), Instant::now());
+        }
+    }
+
+    pub fn recent(&self, label: &str, within: Duration) -> bool {
+        self.last
+            .lock()
+            .ok()
+            .and_then(|m| m.get(label).map(|t| t.elapsed() <= within))
+            .unwrap_or(false)
+    }
+}
+
+/// v0.18.9: called by the gesture init script (pointerdown/keydown) in
+/// account windows. No args — the invoking webview's label is the key.
+#[tauri::command]
+pub fn note_user_gesture(webview: Webview, state: State<'_, GestureState>) {
+    state.note(webview.label());
+}
+
 /// Build the `on_download` closure for a window's `WebviewWindowBuilder`
 /// chain. The webview itself performs the download (WebView2's
 /// DownloadStarting on Windows, WebKitGTK's download-started on Linux), so
@@ -540,6 +618,24 @@ pub fn make_download_handler(
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "download".to_string()),
             );
+
+            // v0.18.9: drive-by downloads. A download from a popup window
+            // is never legitimate, and a download with no recent gesture
+            // in this window wasn't started by the user. Retries are
+            // exempt — the retry window re-fires a download the user
+            // already asked for, and it never sees gestures.
+            let is_retry = retry_of.is_some();
+            let gestured = if is_retry {
+                true
+            } else {
+                app.try_state::<GestureState>()
+                    .map(|g| g.recent(webview.label(), GESTURE_WINDOW))
+                    .unwrap_or(false)
+            };
+            if let Some(reason) = download_block_reason(webview.label(), is_retry, gestured) {
+                notify_download_blocked(&app, &suggested, reason);
+                return false;
+            }
 
             // Snapshot what the dialog needs, then release the lock: the
             // dialog is modal and must never run under our mutex.
@@ -1244,5 +1340,32 @@ mod tests {
         // outside the download folder.
         assert!(validated_entry_path(&mk(false), "e").is_err());
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn download_gate_blocks_popups_and_ungestured_downloads() {
+        // Popup windows never download legitimately.
+        assert!(download_block_reason("popup-3", false, true).is_some());
+        assert!(download_block_reason("oauth-1", true, true).is_some());
+        // No gesture, no retry: blocked.
+        assert!(download_block_reason("acct-x-y", false, false).is_some());
+        // A recent gesture allows it.
+        assert!(download_block_reason("acct-x-y", false, true).is_none());
+        // Retries re-fire a user-requested download: exempt even without
+        // a gesture in the retry window.
+        assert!(download_block_reason("appmaka-retry-dl-1", true, false).is_none());
+        // Other windows are unaffected by the popup prefixes.
+        assert!(download_block_reason("tabbed-1", false, true).is_none());
+    }
+
+    #[test]
+    fn gesture_state_tracks_recency() {
+        let g = GestureState::default();
+        assert!(!g.recent("acct-x-y", Duration::from_secs(10)));
+        g.note("acct-x-y");
+        assert!(g.recent("acct-x-y", Duration::from_secs(10)));
+        assert!(!g.recent("acct-other", Duration::from_secs(10)));
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(!g.recent("acct-x-y", Duration::from_millis(1)));
     }
 }
