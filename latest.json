@@ -1,15 +1,15 @@
 {
-  "version": "0.18.9",
-  "notes": "Split view clicks fixed, and downloads a page starts on its own are now blocked.",
-  "pub_date": "2026-11-08T15:34:17Z",
+  "version": "0.18.7",
+  "notes": "Split view (up to 4 apps in one window), popup Save as app button, auto-hide top bar, and multi-monitor stability.",
+  "pub_date": "2026-11-05T19:46:07Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2YyYU85eVY5OVlvakd5dXQyeXZsd0JWdjBtajVjdlFvU1NIN1BYbmJGcTFkS3YvOTYrY1htNWJJYmo4MkN6cTM2emhtTXlqQ0Vsa2dqbENBN0ZtV0FZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTUyMDQ3CWZpbGU6QXBwTWFrYV8wLjE4LjlfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguOQpwUW4xb0NuWlNCL1pmMzF0MFE2Z2Q1VVAvSFhDUS9pSDBJWVhFOHpSSm9LL1lzK29EMnI2WVprSi8yaCtJajlOM0pXMXE1VU94U01pSkJHNytDb2hCQT09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.9/AppMaka_0.18.9_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2JqVTEvNEo1Yy9TNTgzNDd5Q3RGT3krRTVWM2xnUnRGWUFHRXh3S3R0ZUlDaVhkYzI4RVQ1M0I2aEF5aWVsa3grOHBDeTJXZklFdkNCWVVjQWptUUFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTA3OTU5CWZpbGU6QXBwTWFrYV8wLjE4LjdfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMTguNwp6SFc2WHRybTlOc2ZvUmk1M1J6S3U0ZWJqbngrN1k5UUFIV0s4Z0tQbjhBT0tIaEk2OC9SWGlQc1dNeWlYSEtxV1ZxbEtOeEZMOUIwamxSdUJsTVpDUT09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.7/AppMaka_0.18.7_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2RsaVdsc2JEbU0vSENHTFFacGIwdW5Mbm1raTBwbDdtVklVbFpGbnpyNjFLL2RudUJaT0E4clRYdk1nb2pSTWNFT2M1NUdaancwSlhCM1FTV1VrcFE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MTUxODI1CWZpbGU6QXBwTWFrYV8wLjE4LjlfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjkKbXlGSTQzakd0VnhrVnNCN2swZGI0VHVmN2VyYk4rdGNJTjlXSkQ2ekh4WVR6NDRLYnlKakJTenExRitCb3hEdXVLajhTdUc4MnZybTU1SlJ5SEtyRFE9PQo=",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.9/AppMaka_0.18.9_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2RDRFA4eENkNlI4ZndZWFA0Z0hOT2ZwQ0ROelprNGpCaVVsZldwT1FQRjg1d1JHTlZhOERzUERDVzNpUGZ5RUpCY2NiUWJ1VTQzdEZKcTBpOW9BRUFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzOTA3MTk5CWZpbGU6QXBwTWFrYV8wLjE4LjdfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjowLjE4LjcKZVNvd3ltMmhpVUU1ZFJvYkxCS0paQVVqeEg0eDhIY3hhU1BNcVl1enh2U1EraTdxbFdxVkdNUEVjb3JRKzdCZzVwa2FvK2R5QTBBdko5Y3BCbld3QkE9PQo=",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.7/AppMaka_0.18.7_amd64.AppImage"
     }
   }
 }
