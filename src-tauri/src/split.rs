@@ -523,6 +523,15 @@ fn build_frame(app: &AppHandle, group: &SplitGroup) -> Result<Window, String> {
     let ev_app = app.clone();
     let ev_group = group.id.clone();
     frame.on_window_event(move |event| match event {
+        WindowEvent::Focused(focused) => {
+            // v0.18.9: the frame is a plain Window whose bar and panes are
+            // child webviews — window focus does not reach them. Focus the
+            // active pane's webview so clicks land in the page.
+            if *focused {
+                #[cfg(windows)]
+                focus_active_pane_webview(&ev_app, &ev_group);
+            }
+        }
         WindowEvent::Resized(_) => {
             // Read the frame's live size and re-tile. Position is the
             // window manager's business; only w/h change the layout.
@@ -911,6 +920,26 @@ pub fn remove_split_pane(
 
 /// Focus one pane: show and focus the frame, focus the pane's child
 /// webview, mark it active. No rebuild — the pane is already live.
+/// v0.18.9: focus the active pane's webview without touching anything
+/// else — no show, no state write, no emit. Used when the frame window
+/// itself gains focus (Alt+Tab, taskbar): no pane-click happened, so no
+/// pane has focus yet. Windows-only (see `windows::focus_webview`).
+#[cfg(windows)]
+fn focus_active_pane_webview(app: &AppHandle, group_id: &str) {
+    let active = app.try_state::<SplitState>().and_then(|st| {
+        st.inner.lock().ok().and_then(|m| {
+            let g = m.get(group_id)?;
+            g.panes
+                .get(g.active_pane)
+                .map(|p| (p.app_id.clone(), p.account_id.clone()))
+        })
+    });
+    if let Some((app_id, account_id)) = active {
+        let label = pane_webview_label(group_id, &app_id, &account_id);
+        crate::windows::focus_webview(app, &label);
+    }
+}
+
 pub fn focus_split_pane(
     app: &AppHandle,
     splitstate: &SplitState,
