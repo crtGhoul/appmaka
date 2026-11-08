@@ -850,3 +850,129 @@ fn run_tint_flow(app: &AppHandle, base: &str) {
     }
     eprintln!("[e2e] tint: flow done");
 }
+
+// Driven by `APPMAKA_DEBUG_SECURITY_MODE=security` plus
+// `APPMAKA_DEBUG_SECURITY_BASE=http://127.0.0.1:PORT` and
+// `APPMAKA_DEBUG_SECURITY_DL_DIR=<download dir>`. The shell script seeds
+// one "sec" app at {base}/sec.html (a page with a download link) and a
+// downloads.json pointing at the dl dir, then this proves the 0.18.9
+// popup/download blocking:
+//   1. the window.open guard is injected and a no-gesture window.open
+//      returns null;
+//   2. a download triggered with no gesture is blocked (no file lands);
+//   3. after a dispatched pointerdown (the gesture script reports it),
+//      the same download is allowed (the file lands).
+// Logs `[e2e] security: ...` lines for the shell script to assert on.
+// Same contract as the other flows: debug builds only, inert without the
+// env vars, detached thread, never blocks startup.
+pub fn maybe_run_security_flow(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_SECURITY_MODE").unwrap_or_default() != "security" {
+        return;
+    }
+    let base = std::env::var("APPMAKA_DEBUG_SECURITY_BASE").unwrap_or_default();
+    let dl_dir = std::env::var("APPMAKA_DEBUG_SECURITY_DL_DIR").unwrap_or_default();
+    if base.is_empty() || dl_dir.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-security".to_string())
+        .spawn(move || run_security_flow(&app, &dl_dir));
+}
+
+/// Eval JS in a webview and return the callback value (best-effort, 3s
+/// timeout — the callback may never fire under Xvfb).
+fn eval_in(w: &tauri::Webview, js: &str) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = w.eval_with_callback(js, move |v| {
+        let _ = tx.send(v.to_string());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(3)).ok()
+}
+
+fn run_security_flow(app: &AppHandle, dl_dir: &str) {
+    use std::time::Duration;
+    std::thread::sleep(Duration::from_secs(6));
+    let (Some(store), Some(adblock), Some(winstate)) = (
+        app.try_state::<crate::store::AppStore>(),
+        app.try_state::<crate::adblock::AdblockState>(),
+        app.try_state::<crate::windows::WindowState>(),
+    ) else {
+        eprintln!("[e2e] security: missing state");
+        return;
+    };
+    if let Err(e) =
+        crate::windows::open_account(app, &store, &adblock, &winstate, "sec", "sec-a", false)
+    {
+        eprintln!("[e2e] security: open failed: {e}");
+        return;
+    }
+    let label = crate::windows::account_window_label("sec", "sec-a");
+    std::thread::sleep(Duration::from_secs(8));
+    let Some(wv) = app.get_webview(&label) else {
+        eprintln!("[e2e] security: no webview for {label}");
+        return;
+    };
+    // 1. Guard injected, and a no-gesture window.open returns null.
+    let guard = eval_in(
+        &wv,
+        "window.open.toString().indexOf('userActivation') !== -1",
+    )
+    .unwrap_or_default();
+    let open_null = eval_in(&wv, "window.open('https://example.com') === null")
+        .unwrap_or_default();
+    eprintln!("[e2e] security: guard={guard} openNull={open_null}");
+    // Diagnostics for the gesture transport: is the internals object
+    // present, is invoke a function, and does a dispatched pointerdown
+    // reach a document capture listener at all?
+    let internals = eval_in(&wv, "typeof window.__TAURI_INTERNALS__").unwrap_or_default();
+    let invoke_fn = eval_in(
+        &wv,
+        "typeof (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke)",
+    )
+    .unwrap_or_default();
+    let pointer_event = eval_in(&wv, "typeof PointerEvent").unwrap_or_default();
+    eprintln!("[e2e] security: internals={internals} invokeFn={invoke_fn} pointerEvent={pointer_event}");
+    // 2. No-gesture download is blocked: the file must not land.
+    let file = std::path::Path::new(dl_dir).join("file.txt");
+    let _ = eval_in(&wv, "document.getElementById('dl').click(); 'clicked'");
+    std::thread::sleep(Duration::from_secs(3));
+    let blocked = !file.exists();
+    eprintln!("[e2e] security: no-gesture download blocked={blocked}");
+    // 3. After a gesture, the same download is allowed.
+    let _ = eval_in(
+        &wv,
+        "document.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true})); 'dispatched'",
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    let recorded = app
+        .try_state::<crate::downloads::GestureState>()
+        .map(|g| g.recent(&label, Duration::from_secs(10)))
+        .unwrap_or(false);
+    // The script's marker tells a fired listener apart from a failed invoke.
+    let listener_fired = eval_in(
+        &wv,
+        "typeof window.__appmakaGestureLast !== 'undefined' && window.__appmakaGestureLast > 0",
+    )
+    .unwrap_or_default();
+    eprintln!("[e2e] security: gesture recorded={recorded} listenerFired={listener_fired}");
+    let _ = eval_in(&wv, "document.getElementById('dl').click(); 'clicked'");
+    std::thread::sleep(Duration::from_secs(4));
+    let allowed = file.exists();
+    eprintln!("[e2e] security: gestured download allowed={allowed}");
+    // Direct invoke, bypassing the listener: if this records, the listener
+    // is the broken link; if not, the invoke/command is. Capture the
+    // promise outcome on the window so the exact error is visible.
+    let _ = eval_in(
+        &wv,
+        "window.__invokeResult = 'pending'; window.__TAURI_INTERNALS__.invoke('note_user_gesture', {}).then(function(){ window.__invokeResult = 'ok'; }).catch(function(e){ window.__invokeResult = 'err:' + e; }); 'sent'",
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let invoke_result = eval_in(&wv, "window.__invokeResult").unwrap_or_default();
+    let direct = app
+        .try_state::<crate::downloads::GestureState>()
+        .map(|g| g.recent(&label, Duration::from_secs(10)))
+        .unwrap_or(false);
+    eprintln!("[e2e] security: direct invoke recorded={direct} invokeResult={invoke_result}");
+    eprintln!("[e2e] security: flow done");
+}
