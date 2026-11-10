@@ -45,6 +45,27 @@ fn search_engine(app: &AppHandle) -> String {
         .unwrap_or_else(|| "duckduckgo".to_string())
 }
 
+/// True when `url` is a search-engine results page (Google `/search?q=…`
+/// or DuckDuckGo `/?q=…`). Adding one as an app would create a broken
+/// "Google Search" tile, so the add flow refuses these — the user must
+/// open a result first. Pure so it stays unit-testable.
+pub(crate) fn is_search_results_url(raw: &str) -> bool {
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    let is_engine = host == "google.com"
+        || host.ends_with(".google.com")
+        || host == "duckduckgo.com"
+        || host.ends_with(".duckduckgo.com");
+    if !is_engine {
+        return false;
+    }
+    let is_results_path = (host.ends_with("google.com") && url.path() == "/search")
+        || (host.ends_with("duckduckgo.com") && url.path() == "/");
+    is_results_path && url.query_pairs().any(|(k, _)| k == "q")
+}
+
 /// Labels of contained popups currently open from the search window.
 /// They share the search data dir, so the on-close wipe must not run
 /// while any of them is alive. Populated on Windows, where the
@@ -564,6 +585,26 @@ mod tests {
         // Unknown engine falls back to DuckDuckGo, matching build_search_url.
         let bing = search_chrome_js("bing");
         assert!(bing.contains("https://duckduckgo.com/?q="));
+    }
+
+    #[test]
+    fn search_results_guard() {
+        assert!(is_search_results_url(
+            "https://www.google.com/search?q=cinehd.vc"
+        ));
+        assert!(is_search_results_url(
+            "https://www.google.com/search?q=x&oq=y"
+        ));
+        assert!(is_search_results_url("https://duckduckgo.com/?q=cinehd.vc"));
+        assert!(!is_search_results_url("https://www.google.com/"));
+        assert!(!is_search_results_url(
+            "https://www.google.com/maps?q=cinehd"
+        ));
+        assert!(!is_search_results_url("https://duckduckgo.com/"));
+        assert!(!is_search_results_url("https://cinehd.vc/"));
+        assert!(!is_search_results_url("https://cinehd.vc/?q=x"));
+        assert!(!is_search_results_url("not a url"));
+        assert!(!is_search_results_url(""));
     }
 
     #[test]
