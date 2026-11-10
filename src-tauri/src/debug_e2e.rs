@@ -838,13 +838,18 @@ fn run_split_flow(app: &AppHandle) {
         let live_panes = splitstate.total_panes();
         let closed =
             tauri::async_runtime::block_on(crate::windows::close_all_account_windows(app.clone()));
-        let remaining_acct = app
+        // Window destruction lands on the event loop: give WebKitGTK a
+        // beat before counting, or a window mid-destroy reads as alive.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let remaining_labels: Vec<String> = app
             .webview_windows()
             .keys()
             .filter(|l| l.starts_with("acct-"))
-            .count();
+            .cloned()
+            .collect();
+        let remaining_acct = remaining_labels.len();
         eprintln!(
-            "[e2e] split: closeall expected={} closed={closed:?} remaining_acct={remaining_acct} remaining_panes={}",
+            "[e2e] split: closeall expected={} closed={closed:?} remaining_acct={remaining_acct} remaining_panes={} remaining_labels={remaining_labels:?}",
             live_acct + live_panes,
             splitstate.total_panes()
         );
@@ -1209,4 +1214,101 @@ fn run_security_flow(app: &AppHandle, dl_dir: &str) {
         .unwrap_or(false);
     eprintln!("[e2e] security: direct invoke recorded={direct} invokeResult={invoke_result}");
     eprintln!("[e2e] security: flow done");
+}
+
+// Driven by `APPMAKA_DEBUG_MEDIA_MODE=media`. The shell script seeds the
+// "sec" app; this proves the 0.18.11 media arms through the same invoke
+// path the launcher tile toggle uses:
+//   1. `media_play_pause` toggles the window's audio/paused state
+//      (optimistic: the state flips from the pre-eval value, since the
+//      test page has no real media element for the JS to control);
+//   2. `media_next` / `media_prev` arms return ok;
+//   3. after the second pause toggle the Now Playing bar renders in the
+//      main window (it shows for playingAudio || mediaPaused).
+// Logs `[e2e] media: ...` lines for the shell script to assert on.
+// Same contract as the other flows: debug builds only, inert without the
+// env var, detached thread, never blocks startup.
+pub fn maybe_run_media_flow(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_MEDIA_MODE").unwrap_or_default() != "media" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-media".to_string())
+        .spawn(move || run_media_flow(&app));
+}
+
+fn media_cmd(main: &tauri::Webview, action: &str) -> String {
+    let _ = eval_in(
+        main,
+        &format!(
+            "window.__e2eMedia = 'pending'; window.__APPMAKA_INTERNALS__.invoke('account_window_command', {{appId: 'sec', accountId: 'sec-a', action: '{action}'}}).then(function(v){{ window.__e2eMedia = 'ok:' + v; }}).catch(function(e){{ window.__e2eMedia = 'err:' + e; }}); 'sent'"
+        ),
+    );
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    eval_in(main, "window.__e2eMedia").unwrap_or_default()
+}
+
+fn media_row(main: &tauri::Webview) -> String {
+    let _ = eval_in(
+        main,
+        "window.__e2eMediaList = 'pending'; window.__APPMAKA_INTERNALS__.invoke('list_open_account_windows', {}).then(function(ws){ var w = ws.find(function(x){ return x.label === 'acct-sec-sec-a'; }); window.__e2eMediaList = w ? ('playing:' + w.playingAudio + ' paused:' + w.mediaPaused) : 'missing'; }).catch(function(e){ window.__e2eMediaList = 'err:' + e; }); 'sent'",
+    );
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    eval_in(main, "window.__e2eMediaList").unwrap_or_default()
+}
+
+fn run_media_flow(app: &AppHandle) {
+    use std::time::Duration;
+    std::thread::sleep(Duration::from_secs(6));
+    let (Some(store), Some(adblock), Some(winstate)) = (
+        app.try_state::<crate::store::AppStore>(),
+        app.try_state::<crate::adblock::AdblockState>(),
+        app.try_state::<crate::windows::WindowState>(),
+    ) else {
+        eprintln!("[e2e] media: missing state");
+        return;
+    };
+    if let Err(e) =
+        crate::windows::open_account(app, &store, &adblock, &winstate, "sec", "sec-a", false)
+    {
+        eprintln!("[e2e] media: open failed: {e}");
+        return;
+    }
+    let label = crate::windows::account_window_label("sec", "sec-a");
+    std::thread::sleep(Duration::from_secs(8));
+    if app.get_webview(&label).is_none() {
+        eprintln!("[e2e] media: no webview for {label}");
+        return;
+    }
+    let Some(main) = app.get_webview("main") else {
+        eprintln!("[e2e] media: no-main-webview");
+        return;
+    };
+    // 1. First pause toggle: optimistic state flips to playing.
+    let first = media_cmd(&main, "media_play_pause");
+    let row1 = media_row(&main);
+    eprintln!("[e2e] media: toggle1={first} row1={row1}");
+    // 2. Second toggle: playing -> paused, so the bar must appear.
+    let second = media_cmd(&main, "media_play_pause");
+    let row2 = media_row(&main);
+    eprintln!("[e2e] media: toggle2={second} row2={row2}");
+    // The bar polls every 2s and listens for appmaka:media-changed; give
+    // it a beat, then check the DOM.
+    std::thread::sleep(Duration::from_secs(3));
+    let bar = eval_in(
+        &main,
+        "document.querySelector('.now-playing-bar') !== null",
+    )
+    .unwrap_or_default();
+    eprintln!("[e2e] media: bar_present={bar}");
+    // 3. Next / prev arms return ok.
+    let next = media_cmd(&main, "media_next");
+    let prev = media_cmd(&main, "media_prev");
+    eprintln!("[e2e] media: next={next} prev={prev}");
+    // 4. Toggle back so the window leaves the test unpaused.
+    let third = media_cmd(&main, "media_play_pause");
+    let row3 = media_row(&main);
+    eprintln!("[e2e] media: toggle3={third} row3={row3}");
+    eprintln!("[e2e] media: flow done");
 }

@@ -15,8 +15,120 @@
 //! Everything here is best-effort and infallible by contract: any failure
 //! leaves the popup exactly as it was, without a bar.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
 use crate::windows::WindowPlacement;
 use tauri::{AppHandle, Manager, Position, Size, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+
+/// Labels of popups with a teardown already in flight. A second close
+/// request for the same label is a no-op — destroying a window twice is
+/// how the close path used to re-enter itself.
+static CLOSING_POPUPS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn closing_set() -> &'static Mutex<HashSet<String>> {
+    CLOSING_POPUPS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Claim a label for teardown. False means a close is already in flight
+/// (dedup, silent) or the set lock stayed contended after one retry
+/// (logged loudly — the caller must not silently swallow a stuck close).
+fn begin_closing(label: &str) -> bool {
+    // try_lock only: a window-proc thread may hold this set while a
+    // re-entrant close arrives, and blocking here would deadlock it.
+    match closing_set().try_lock() {
+        Ok(mut set) => set.insert(label.to_string()),
+        Err(_) => {
+            std::thread::sleep(Duration::from_millis(2));
+            match closing_set().try_lock() {
+                Ok(mut set) => set.insert(label.to_string()),
+                Err(_) => {
+                    eprintln!("[appmaka] popup close lock contended for {label}; close abandoned, retry by closing again");
+                    false
+                }
+            }
+        }
+    }
+}
+
+fn finish_closing(label: &str) {
+    match closing_set().try_lock() {
+        Ok(mut set) => {
+            set.remove(label);
+        }
+        Err(_) => {
+            std::thread::sleep(Duration::from_millis(2));
+            if let Ok(mut set) = closing_set().try_lock() {
+                set.remove(label);
+            } else {
+                // The entry leaks: the next close of this label dedups
+                // away. Loud, because a stuck label is a stuck window.
+                eprintln!("[appmaka] popup close lock contended finishing {label}; label stays marked closing");
+            }
+        }
+    }
+}
+
+/// Destroy a window's webview controller before its native window.
+/// Closing a sign-in popup the other way round — DestroyWindow while
+/// WebView2's controller is still live — re-enters the window proc and
+/// freezes the whole app (the close event pumps while the controller
+/// waits on its own UI thread). Hide first so nothing paints mid-teardown,
+/// unhook the Win32 subclass so DestroyWindow never re-enters it, then
+/// close the controller, then the window. No lock is held across any of it.
+pub fn destroy_webview_then_window(window: &WebviewWindow) {
+    let _ = window.hide();
+    // popup_chrome is Windows-only (main.rs gates the module); elsewhere
+    // there is no subclass to unhook.
+    #[cfg(windows)]
+    crate::popup_chrome::unhook_popup_chrome(window);
+
+    #[cfg(windows)]
+    {
+        let _ = window.with_webview(|wv| unsafe {
+            let controller = wv.controller();
+            let _ = controller.SetIsVisible(false);
+            let _ = controller.Close();
+        });
+    }
+
+    let _ = window.destroy();
+}
+
+/// Tear a popup down off the UI thread. The close event that triggers
+/// this runs inside the window proc's message dispatch — destroying the
+/// webview synchronously there is the freeze. The bar goes first (it is
+/// owned by the popup), then the popup itself.
+pub fn close_popup_async(app: &AppHandle, raw_label: &str) {
+    let popup_label = raw_label
+        .strip_prefix("popupbar-")
+        .unwrap_or(raw_label)
+        .to_string();
+
+    if !begin_closing(&popup_label) {
+        return;
+    }
+
+    let app_handle = app.clone();
+    let _ = std::thread::Builder::new()
+        .name(format!("appmaka-popup-close-{popup_label}"))
+        .spawn(move || {
+            let bar_label = popup_bar_label(&popup_label);
+
+            // 1. Destroy the companion bar webview + window first.
+            if let Some(bar) = app_handle.get_webview_window(&bar_label) {
+                destroy_webview_then_window(&bar);
+            }
+
+            // 2. Destroy the popup's webview controller before its HWND.
+            if let Some(popup) = app_handle.get_webview_window(&popup_label) {
+                destroy_webview_then_window(&popup);
+            }
+
+            finish_closing(&popup_label);
+        });
+}
 
 /// Bar height in logical pixels.
 pub const POPUP_BAR_H: f64 = 36.0;
@@ -163,6 +275,13 @@ pub fn attach_popup_bar(app: &AppHandle, popup: &WebviewWindow, popup_label: &st
     let ev_app = app.clone();
     let ev_label = popup_label.to_string();
     popup.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
+            // Never destroy the webview synchronously inside the close
+            // dispatch — that is the popup-close freeze. Hand it to the
+            // detached teardown thread instead.
+            api.prevent_close();
+            close_popup_async(&ev_app, &ev_label);
+        }
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
             reposition_bar(&ev_app, &ev_label);
         }
@@ -185,6 +304,11 @@ pub fn attach_popup_bar(app: &AppHandle, popup: &WebviewWindow, popup_label: &st
             if let Some(b) = ev_app.get_webview_window(&popup_bar_label(&ev_label)) {
                 let _ = b.close();
             }
+            // The popup itself is already gone; this only matters when
+            // the close arrived without a CloseRequested (or the async
+            // teardown raced it) — the dedup set makes a second call a
+            // no-op, so this is safe to run unconditionally.
+            close_popup_async(&ev_app, &ev_label);
         }
         _ => {}
     });

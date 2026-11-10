@@ -144,6 +144,36 @@ pub fn tint_popup_caption(app: &AppHandle, label: &str, url: &url::Url) {
     crate::tint::request_retint(app, label, url, crate::tint::TintTarget::NativeCaption);
 }
 
+/// Unhook the subclass proc ahead of a window destroy: drop the
+/// bookkeeping entry under a short try_lock, release the lock, then
+/// restore the original proc — DestroyWindow must never re-enter a
+/// subclass whose entry is already gone (two-phase rule, file header).
+/// Called from the async popup teardown (popup_bar); the WM_NCDESTROY
+/// path in the proc itself stays the backstop when the lock is contended
+/// or the window is already gone.
+pub fn unhook_popup_chrome(window: &tauri::WebviewWindow) {
+    let hwnd = match window.hwnd() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let hwnd_raw = hwnd.0 as isize;
+    // Phase 1 — decide under a short, non-blocking lock. Released before
+    // the Win32 call below. On contention we leave the subclass in place:
+    // without the entry we don't know the original proc, and the proc's
+    // own WM_NCDESTROY arm restores it.
+    let old_proc = match subclasses().try_lock() {
+        Ok(mut map) => map.remove(&hwnd_raw).map(|e| e.old_proc),
+        Err(_) => return,
+    };
+    unsafe {
+        if let Some(old) = old_proc {
+            if old != 0 {
+                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, old);
+            }
+        }
+    }
+}
+
 /// The subclass proc. See the re-entrancy analysis at the top of this
 /// file: `catch_unwind` outside everything, `try_lock` only, no lock
 /// held across any Win32 call, real work on detached threads.

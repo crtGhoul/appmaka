@@ -13,10 +13,10 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body {
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    font-size: 12.5px;
-    color: #e1e1e1;
-    background: #1b1b1b;
+    font-family: "Inter", "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    color: #f3f4f8;
+    background: #0d0f16;
     overflow: hidden;
     user-select: none;
   }
@@ -29,28 +29,28 @@
     justify-content: center;
     background: none;
     border: none;
-    color: #a0a0a0;
+    color: #cbd5e1;
     font: inherit;
     cursor: pointer;
     border-radius: 4px;
     white-space: nowrap;
   }
-  button:hover { background: #2e2e2e; color: #fff; }
-  button:focus-visible { outline: 2px solid #4f46e5; outline-offset: -2px; }
+  button:hover { background: rgba(139, 92, 246, 0.18); color: #fff; }
+  button:focus-visible { outline: 2px solid #8b5cf6; outline-offset: -2px; }
   button:disabled { color: #555; cursor: default; background: none; }
-  button.active { background: #3e3e3e; color: #f1f1f1; }
+  button.active { background: rgba(139, 92, 246, 0.16); color: #fff; }
   .pane { padding: 0 10px; height: 26px; max-width: 168px; overflow: hidden; text-overflow: ellipsis; }
   .pane-wrap { display: inline-flex; align-items: center; border-radius: 4px; }
-  .pane-wrap.active { background: #3e3e3e; }
+  .pane-wrap.active { background: rgba(139, 92, 246, 0.16); }
   .pane-wrap.active .pane { color: #f1f1f1; }
   /* v0.18.10: drag a pane to swap positions (accent outline on the
      drop target), or out of the bar into its own window. */
   .pane-wrap.dragging { opacity: 0.5; }
-  .pane-wrap.drag-over { outline: 2px solid #4f46e5; outline-offset: -2px; }
-  .pane-popout { padding: 0 6px; height: 26px; color: #777; font-size: 13px; line-height: 1; opacity: 0; }
+  .pane-wrap.drag-over { outline: 2px solid #8b5cf6; outline-offset: -2px; }
+  .pane-popout { padding: 0 6px; height: 26px; color: #94a3b8; font-size: 13px; line-height: 1; opacity: 0; }
   .pane-wrap:hover .pane-popout, .pane-wrap.active .pane-popout, .pane-popout:focus-visible { opacity: 1; }
-  .pane-add { padding: 0 9px; height: 26px; color: #8a8f98; font-size: 15px; line-height: 1; }
-  .pane-close { padding: 0 6px; height: 26px; color: #777; font-size: 14px; line-height: 1; }
+  .pane-add { padding: 0 9px; height: 26px; color: #94a3b8; font-size: 15px; line-height: 1; }
+  .pane-close { padding: 0 6px; height: 26px; color: #94a3b8; font-size: 14px; line-height: 1; }
   .pane-close:hover { background: #4a2b2b; color: #fff; }
   .layout { padding: 0 8px; height: 26px; }
   .close { padding: 0 10px; height: 26px; }
@@ -58,8 +58,8 @@
   .win-controls { flex: none; display: flex; align-items: center; gap: 2px; }
   .win-btn { padding: 0 10px; height: 26px; }
   .win-close:hover { background: #e81123; color: #fff; }
-  .sep { flex: none; width: 1px; height: 20px; background: #3a3a3a; margin: 0 4px; }
-  .loading { padding: 0 12px; color: #8a8f98; }
+  .sep { flex: none; width: 1px; height: 20px; background: rgba(255, 255, 255, 0.08); margin: 0 4px; }
+  .loading { padding: 0 12px; color: #94a3b8; }
 </style>
 </head>
 <body>

@@ -1195,6 +1195,14 @@ fn main() {
                     if event.state
                         == tauri_plugin_global_shortcut::ShortcutState::Pressed
                     {
+                        // Hardware media keys route first: they target the
+                        // currently playing (or most recent) media window.
+                        if let Some(media_action) =
+                            crate::windows::media_action_for_shortcut(shortcut.id())
+                        {
+                            crate::windows::handle_global_media_key(app, media_action);
+                            return;
+                        }
                         // v0.9.11: fixed "add to applications" shortcut.
                         // Fires only when a popup or account window is
                         // focused; ignored silently anywhere else. The
@@ -1390,6 +1398,10 @@ fn main() {
             // Skipped silently when the keys are already claimed (a user's
             // own binding always wins).
             crate::popup_add::ensure_add_shortcut_registered(app.handle());
+            // Register hardware media keys (MediaPlayPause, MediaTrackNext,
+            // MediaTrackPrevious) best-effort so keyboard media keys control
+            // active web app playback.
+            crate::windows::register_media_shortcuts(app.handle());
             // Debug-only E2E driver (Xvfb smoke): inert without the env var,
             // compiled out of release builds.
             #[cfg(debug_assertions)]
@@ -1411,6 +1423,9 @@ fn main() {
             // v0.18.9 popup/download-blocking E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_security_flow(app.handle());
+            // v0.18.11 media-arms E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_media_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
@@ -1524,11 +1539,20 @@ fn main() {
                 }
             } else if window.label().starts_with("preview-") {
                 // A preview window closed by hand (X button on either the
-                // site or the control window): close its sibling, drop the
-                // session, delete the temp dir. preview_add/preview_discard
-                // already removed their entries, so those paths no-op here.
-                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // site or the control window): prevent synchronous close,
+                // tear down both webviews before their windows asynchronously,
+                // and delete the temp dir off the UI thread.
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
                     preview::window_closed(window.app_handle(), window.label());
+                }
+            } else if window.label().starts_with("popup-")
+                || window.label().starts_with("oauth-")
+                || window.label().starts_with("popupbar-")
+            {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    crate::popup_bar::close_popup_async(window.app_handle(), window.label());
                 }
             } else if !pin::is_shutting_down() {
                 // Page windows (v0.9.9): Alt+F4 / the X button / a taskbar

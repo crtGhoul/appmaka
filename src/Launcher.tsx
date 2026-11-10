@@ -674,8 +674,40 @@ export function IconGrid({
             if (title == null) return null;
             const short = title.length > 26 ? `${title.slice(0, 25)}…` : title;
             return (
-              <span className="tile-now-playing" title={title || "Playing audio"}>
-                {title ? `♪ ${short}` : "♪ Playing"}
+              <span
+                className="tile-now-playing"
+                title={
+                  title
+                    ? `${title} — playing in ${r.title}`
+                    : `Playing audio in ${r.title}`
+                }
+                onClick={(e) => e.stopPropagation()}
+              >
+                {onTileAction && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    className="tile-now-playing-toggle"
+                    title="Play or pause media in this app"
+                    aria-label={`Play or pause ${r.title}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onTileAction(r, "media_play_pause");
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onTileAction(r, "media_play_pause");
+                      }
+                    }}
+                  >
+                    ⏸
+                  </span>
+                )}
+                <span className="tile-now-playing-label">
+                  {title ? short : "Playing"}
+                </span>
               </span>
             );
           })()}

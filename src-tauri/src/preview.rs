@@ -123,12 +123,34 @@ fn take_session(app: &AppHandle, preview_id: &str) -> Option<PreviewSession> {
     sessions.remove(preview_id)
 }
 
-fn close_preview_windows(app: &AppHandle, preview_id: &str) {
-    for label in [site_window_label(preview_id), control_window_label(preview_id)] {
-        if let Some(window) = app.get_webview_window(&label) {
-            let _ = window.close();
-        }
-    }
+/// Close both preview windows (site + control) on a detached thread:
+/// destroying a WebView2 controller synchronously — inside a close event
+/// or a command running on the UI thread — re-enters the window proc and
+/// freezes the app, so the controller goes first via
+/// `popup_bar::destroy_webview_then_window` and the window only after.
+/// When `cleanup_dir` is given, the temp session dir is deleted from that
+/// same thread after a beat: WebView2 still holds the user-data dir
+/// briefly after the controller closes, and an early delete just fails.
+fn close_preview_windows(
+    app: &AppHandle,
+    preview_id: &str,
+    cleanup_dir: Option<PathBuf>,
+) {
+    let app = app.clone();
+    let labels = [site_window_label(preview_id), control_window_label(preview_id)];
+    let _ = std::thread::Builder::new()
+        .name(format!("appmaka-preview-close-{preview_id}"))
+        .spawn(move || {
+            for label in labels {
+                if let Some(window) = app.get_webview_window(&label) {
+                    crate::popup_bar::destroy_webview_then_window(&window);
+                }
+            }
+            if let Some(dir) = cleanup_dir {
+                std::thread::sleep(Duration::from_millis(160));
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        });
 }
 
 /// Open the preview for `url`: the site window (throwaway session) plus the
@@ -290,7 +312,7 @@ pub fn start_preview(
         Ok(())
     })();
     if let Err(e) = build_result {
-        close_preview_windows(app, &id);
+        close_preview_windows(app, &id, None);
         let _ = std::fs::remove_dir_all(&session_dir);
         return Err(e);
     }
@@ -321,11 +343,12 @@ pub fn start_preview(
 /// must not fail the command); leftovers are swept at startup.
 pub fn discard_preview(app: &AppHandle, preview_id: &str) -> Result<(), String> {
     let session = take_session(app, preview_id);
-    // Close first so WebView2 releases its file locks, then delete.
-    close_preview_windows(app, preview_id);
-    if let Some(s) = session {
-        let _ = std::fs::remove_dir_all(&s.session_dir);
-    }
+    // Windows close first (off the UI thread) so WebView2 releases its
+    // file locks; the temp dir follows from the same thread. The closed
+    // event stays synchronous — the library window clears its preview
+    // notice on it.
+    let cleanup_dir = session.map(|s| s.session_dir);
+    close_preview_windows(app, preview_id, cleanup_dir);
     let _ = app.emit(PREVIEW_CLOSED_EVENT, preview_id);
     Ok(())
 }
@@ -356,6 +379,12 @@ pub fn add_preview_as_app(
     let session = take_session(app, preview_id).ok_or_else(|| "Preview not found.".to_string())?;
     let label = label.unwrap_or_default().trim().to_string();
 
+    // Destroy the preview webviews on a detached thread, then give
+    // WebView2 a beat to release the temp dir before it is moved into
+    // place as the new account's session dir.
+    close_preview_windows(app, preview_id, None);
+    std::thread::sleep(Duration::from_millis(200));
+
     // Name: the live document.title wins (it sees JS-rendered titles), then
     // the plain HTTP title fetch, then a prettified domain.
     let name = match session.title.as_deref().map(str::trim) {
@@ -366,7 +395,6 @@ pub fn add_preview_as_app(
         },
     };
 
-    close_preview_windows(app, preview_id);
     let AddAppOutcome {
         app: created,
         created: is_new,
@@ -397,10 +425,12 @@ pub fn window_closed(app: &AppHandle, label: &str) {
     let Some(id) = preview_id_from_label(label) else {
         return;
     };
-    close_preview_windows(app, &id);
-    if let Some(session) = take_session(app, &id) {
-        let _ = std::fs::remove_dir_all(&session.session_dir);
-    }
+    // Take the session first: the teardown thread owns the temp-dir
+    // delete, and the state entry must be gone before it runs.
+    let cleanup_dir = take_session(app, &id).map(|s| s.session_dir);
+    close_preview_windows(app, &id, cleanup_dir);
+    // The closed event stays synchronous — the library window clears its
+    // preview notice on it, and the windows are already gone or going.
     let _ = app.emit(PREVIEW_CLOSED_EVENT, id);
 }
 
