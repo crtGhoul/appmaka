@@ -300,6 +300,8 @@ export interface OpenAccountWindow {
   suspended: boolean;
   /** v0.18.5: WebView2 reports the document is playing audio. */
   playingAudio: boolean;
+  /** True when media playback in this window was paused from Now Playing / media keys. */
+  mediaPaused?: boolean;
   /** v0.18.5: the account's Keep Awake lock. */
   keepAwake: boolean;
   /** v0.18.5: live document.title (the track title for music apps). */
