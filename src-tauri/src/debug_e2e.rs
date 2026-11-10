@@ -1418,3 +1418,325 @@ fn run_launcher_flow(app: &AppHandle) {
     eprintln!("[e2e] launcher: tiles_before={tiles_before} typed={typed} tiles_after={tiles_after}");
     eprintln!("[e2e] launcher: flow done");
 }
+
+// ---------------------------------------------------------------------------
+// Websearch "add this site" E2E driver (Xvfb smoke).
+//
+// Driven by `APPMAKA_DEBUG_WEBSEARCH_MODE=add` (+ optional
+// `APPMAKA_DEBUG_WEBSEARCH_QUERY`, default "example domain", and
+// `APPMAKA_DEBUG_WEBSEARCH_TARGET`, default "https://example.com").
+// Opens a real web search, proves the results-page guard refuses the add
+// while the window is still showing results, navigates the window to the
+// target (standing in for clicking a result — WebKitGTK webviews under
+// Xvfb don't take scripted clicks), focuses it, and waits for the shell
+// script to press Ctrl+Shift+A via xdotool; then polls the library until
+// the target appears as an app. Logs `[e2e] websearch:` lines for the
+// shell script to assert on.
+//
+// Same contract as the other flows: debug builds only, inert without the
+// env var, detached thread, never blocks startup.
+// ---------------------------------------------------------------------------
+
+/// Called once from setup. Returns immediately.
+pub fn maybe_run_websearch_add_flow(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_WEBSEARCH_MODE").unwrap_or_default() != "add" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-websearch".to_string())
+        .spawn(move || run_websearch_add_flow(&app));
+}
+
+fn run_websearch_add_flow(app: &AppHandle) {
+    use std::time::Duration;
+    let query = std::env::var("APPMAKA_DEBUG_WEBSEARCH_QUERY")
+        .unwrap_or_else(|_| "example domain".to_string());
+    let target = std::env::var("APPMAKA_DEBUG_WEBSEARCH_TARGET")
+        .unwrap_or_else(|_| "https://example.com".to_string());
+    std::thread::sleep(Duration::from_secs(5));
+    let (Some(store), Some(adblock), Some(winstate)) = (
+        app.try_state::<crate::store::AppStore>(),
+        app.try_state::<crate::adblock::AdblockState>(),
+        app.try_state::<crate::windows::WindowState>(),
+    ) else {
+        eprintln!("[e2e] websearch: missing state");
+        return;
+    };
+    if let Err(e) = crate::websearch::open_search_window(app, &adblock, &query) {
+        eprintln!("[e2e] websearch: open failed: {e}");
+        return;
+    }
+    let mut window = None;
+    for _ in 0..20 {
+        if let Some(w) = app.get_webview_window(crate::websearch::SEARCH_WINDOW_LABEL) {
+            window = Some(w);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let Some(window) = window else {
+        eprintln!("[e2e] websearch: no window");
+        return;
+    };
+    let mut results_url = String::new();
+    for _ in 0..30 {
+        if let Ok(u) = window.url() {
+            let s = u.to_string();
+            if s.contains("q=") {
+                results_url = s;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if results_url.is_empty() {
+        eprintln!("[e2e] websearch: results never committed");
+        return;
+    }
+    eprintln!("[e2e] websearch: results url {results_url}");
+    // Guard: adding the results page itself must be refused.
+    match crate::popup_add::run_add(
+        app,
+        &store,
+        &adblock,
+        &winstate,
+        crate::websearch::SEARCH_WINDOW_LABEL,
+    ) {
+        Err(e) if e == crate::popup_add::MSG_SEARCH_RESULTS => {
+            eprintln!("[e2e] websearch: guard ok");
+        }
+        Err(e) => {
+            eprintln!("[e2e] websearch: guard FAIL wrong error: {e}");
+            return;
+        }
+        Ok(_) => {
+            eprintln!("[e2e] websearch: guard FAIL results page was added");
+            return;
+        }
+    }
+    // Stand in for clicking a result: navigate to the target.
+    // Compare hosts, not full strings: url::Url normalizes
+    // "https://example.com" to "https://example.com/" on commit, so an
+    // exact-string match could never fire even after a good landing.
+    let target_host = url::Url::parse(&target)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_default();
+    let js = format!(
+        "window.location.href={};",
+        serde_json::to_string(&target).unwrap_or_default()
+    );
+    if let Err(e) = window.eval(&js) {
+        eprintln!("[e2e] websearch: navigate failed: {e}");
+        return;
+    }
+    let mut landed = false;
+    for _ in 0..30 {
+        if let Ok(u) = window.url() {
+            if u.host_str().map(|h| h.to_string()) == Some(target_host.clone()) {
+                landed = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if !landed {
+        eprintln!("[e2e] websearch: target never landed");
+        return;
+    }
+    eprintln!("[e2e] websearch: landed {target}");
+    // Focus the window so the hotkey dispatch finds it, then wait for the
+    // shell script to press Ctrl+Shift+A for real (xdotool).
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    std::thread::sleep(Duration::from_secs(1));
+    eprintln!("[e2e] websearch: ready-for-hotkey");
+    // Poll the library until the target appears as an app.
+    let mut added = false;
+    for _ in 0..30 {
+        let found = store
+            .list()
+            .map(|apps| {
+                apps.iter().any(|a| {
+                    url::Url::parse(&a.url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(|h| h.to_string()))
+                        == Some(target_host.clone())
+                })
+            })
+            .unwrap_or(false);
+        if found {
+            added = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if added {
+        eprintln!("[e2e] websearch: added {target_host}");
+    } else {
+        eprintln!("[e2e] websearch: NOT added (timeout)");
+    }
+    eprintln!("[e2e] websearch: flow done");
+}
+
+// Driven by `APPMAKA_DEBUG_POPUP_PERMS_MODE=panel`.
+// Proves the Popup permissions panel in the main window: reads each row's
+// policy select + allowlist + accounts line straight from the DOM, flips
+// one app's policy through the panel's own controls (native select setter
+// + change event, then the row's Save button click — the same
+// update_app_settings command the panel uses), and confirms the stored
+// setting via the AppStore. Also reports whether the global-override
+// banner shows and the rows are disabled, so the same flow covers a
+// global-on run. WebKitGTK webviews under Xvfb don't take scripted mouse
+// clicks, so the flip goes through DOM evaluation instead.
+//
+// Same contract as the other flows: debug builds only, inert without the
+// env var, detached thread, never blocks startup.
+// ---------------------------------------------------------------------------
+
+/// Called once from setup. Returns immediately.
+pub fn maybe_run_popup_permissions_flow(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_POPUP_PERMS_MODE").unwrap_or_default() != "panel" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-popup-perms".to_string())
+        .spawn(move || run_popup_permissions_flow(&app));
+}
+
+/// eval_in returns JS strings JSON-quoted ("flipped"); strip the quotes
+/// so log lines and comparisons see the bare value. Numbers come back
+/// unquoted, so this is a no-op for them.
+fn unquote(s: String) -> String {
+    s.trim_matches('"').to_string()
+}
+
+fn run_popup_permissions_flow(app: &AppHandle) {
+    use std::time::Duration;
+    std::thread::sleep(Duration::from_secs(6));
+    let Some(main) = app.get_webview("main") else {
+        eprintln!("[e2e] popup-perms: no-main-webview");
+        return;
+    };
+    let Some(store) = app.try_state::<crate::store::AppStore>() else {
+        eprintln!("[e2e] popup-perms: missing store");
+        return;
+    };
+    // The panel lives in the library view (the default is the launcher
+    // tiles); switch to it — this also shows and focuses the main window.
+    if let Err(e) = crate::show_library_view(app) {
+        eprintln!("[e2e] popup-perms: show-library failed: {e}");
+        return;
+    }
+    // Wait for the panel rows to mount (React renders after list_apps).
+    let mut mounted = false;
+    for _ in 0..20 {
+        let n = eval_in(
+            &main,
+            "document.querySelectorAll('.popup-permissions-row').length",
+        )
+        .unwrap_or_default();
+        if !n.is_empty() && n != "0" {
+            mounted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if !mounted {
+        eprintln!("[e2e] popup-perms: rows never mounted");
+        return;
+    }
+    let state = unquote(eval_in(
+        &main,
+        r#"(() => {
+          const rows = Array.from(document.querySelectorAll('.popup-permissions-row')).map(r => {
+            const name = r.querySelector('h3')?.textContent ?? '';
+            const policy = r.querySelector('select')?.value ?? '';
+            const allow = (r.querySelector('textarea')?.value ?? '').split('\n').filter(Boolean).join(',');
+            const acc = Array.from(r.querySelectorAll('p.muted.small')).map(p => p.textContent).find(t => t.startsWith('Accounts:')) ?? '';
+            return name + '=' + policy + '|' + allow + '|' + acc;
+          });
+          const banner = document.body.innerText.includes('Popups are allowed in all apps right now');
+          const disabled = document.querySelector('.popup-permissions-row select')?.disabled ?? false;
+          return 'rows=' + rows.length + ' state=[' + rows.join(';') + '] banner=' + banner + ' disabled=' + disabled;
+        })()"#,
+    )
+    .unwrap_or_default());
+    eprintln!("[e2e] popup-perms: {state}");
+    // When the global override is on the rows are disabled: there is
+    // nothing to flip. Still prove the Save button refuses the click below.
+    let rows_disabled = state.contains("disabled=true");
+    let flipped = if rows_disabled {
+        "skipped-disabled".to_string()
+    } else {
+        // Flip Example Two from block to allow through the panel's own controls.
+        unquote(eval_in(
+            &main,
+            r#"(() => {
+          const row = Array.from(document.querySelectorAll('.popup-permissions-row')).find(r => r.querySelector('h3')?.textContent === 'Example Two');
+          if (!row) return 'no-row';
+          const sel = row.querySelector('select');
+          if (!sel) return 'no-select';
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+          setter.call(sel, 'allow');
+          sel.dispatchEvent(new Event('change', {bubbles: true}));
+          return 'flipped';
+        })()"#,
+        )
+        .unwrap_or_default())
+    };
+    eprintln!("[e2e] popup-perms: flip={flipped}");
+    if !rows_disabled && flipped != "flipped" {
+        return;
+    }
+    // Let React re-render so the Save button enables, then click it.
+    std::thread::sleep(Duration::from_secs(1));
+    let clicked = unquote(eval_in(
+        &main,
+        r#"(() => {
+          const row = Array.from(document.querySelectorAll('.popup-permissions-row')).find(r => r.querySelector('h3')?.textContent === 'Example Two');
+          const btn = row?.querySelector('button[type="submit"]');
+          if (!btn) return 'no-btn';
+          if (btn.disabled) return 'btn-disabled';
+          btn.click();
+          return 'clicked';
+        })()"#,
+    )
+    .unwrap_or_default());
+    eprintln!("[e2e] popup-perms: save={clicked}");
+    if clicked == "clicked" {
+        // The panel's save is one invoke round-trip; poll the store until the
+        // new policy lands, then report what is actually stored.
+        let mut stored = String::new();
+        for _ in 0..20 {
+            if let Ok(a) = store.get("ex2") {
+                if a.settings.popup_policy == "allow" {
+                    stored = format!(
+                        "policy={} allowlist=[{}]",
+                        a.settings.popup_policy,
+                        a.settings.popup_allowlist.join(",")
+                    );
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if stored.is_empty() {
+            eprintln!("[e2e] popup-perms: stored FAIL ex2 never became allow");
+            return;
+        }
+        eprintln!("[e2e] popup-perms: stored ex2 {stored}");
+    }
+    // A disabled Save (global override on) is not a failure: the run's
+    // purpose there is the banner + disabled rows, already logged above.
+    // Scroll the whole panel section (heading + banner + rows) into view
+    // for the screenshot, then finish.
+    let _ = main.eval(
+        "document.querySelector('.popup-permissions-list')?.closest('section')?.scrollIntoView({block: 'start'});",
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    eprintln!("[e2e] popup-perms: flow done");
+}
