@@ -1,5 +1,4 @@
-//! "Add to applications" for popup, account, tabbed, and search windows
-//! (v0.9.11, extended).
+//! "Add to applications" for popup and account windows (v0.9.11, extended).
 //!
 //! Popups are raw site windows with no AppMaka chrome, so their affordances
 //! live outside the page: a Windows system-menu item (popup_chrome.rs),
@@ -13,19 +12,10 @@
 //! popup closes. A promoted account page is only added to the launcher —
 //! the user is mid-browsing, so nothing opens and nothing closes.
 //!
-//! The search window is addable through the shortcut only: it is frameless
-//! on Windows and never gets the popup system menu, and its own shortcuts
-//! overlay already advertises Ctrl+Shift+A for this. Promotion never
-//! closes the search window — it is reusable, and closing it would destroy
-//! the search session and the session its popups share.
-//!
 //! The new app is created with a FRESH session dir (`store.add_app`): the
 //! popup shares its parent account's *live* session dir, which WebView2
 //! locks while the parent window lives — moving or copying it is
 //! unreliable, so a fresh login is the honest v1. The user was told.
-//! The same holds for the search window: its session is wiped on close
-//! and shared with its popups, so it is never adopted or copied, and the
-//! user signs in once more in the new app window.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -37,8 +27,8 @@ use crate::adblock::AdblockState;
 use crate::store::AppStore;
 use crate::windows::WindowState;
 
-/// Fixed global shortcut for the add flow. Fires only when an addable
-/// window is focused; ignored silently anywhere else.
+/// Fixed global shortcut for the add flow. Fires only when a popup window
+/// is focused; ignored silently anywhere else.
 const ADD_SHORTCUT: &str = "Ctrl+Shift+A";
 
 /// True only when the fixed shortcut was actually registered by
@@ -65,59 +55,14 @@ pub struct PopupAddOutcome {
     pub app_name: String,
 }
 
-/// Only `popup-*`, `acct-*`, `tabbed-*` labels and the search window may
-/// be promoted. OAuth modals are transient sign-in windows (meaningless
-/// to add) and `main` is the launcher. `acct-*` windows capture their
-/// *live* URL — the user may have navigated somewhere else and wants
-/// that page as a new app. The search window label is an exact match,
-/// never a prefix, so lookalikes such as `websearch-1` stay rejected.
+/// Only `popup-*` and `acct-*` labels may be promoted. OAuth modals are
+/// transient sign-in windows (meaningless to add) and `main` is the
+/// launcher. `acct-*` windows capture their *live* URL — the user may have
+/// navigated somewhere else and wants that page as a new app.
 pub(crate) fn add_label_allowed(label: &str) -> bool {
     // v0.13.16: tabbed windows join popups and account windows — the
     // page showing in a tab group is addable exactly like a plain page.
-    // Search window: the shortcut is its only add path, since it has no
-    // system menu and is not an account.
-    label.starts_with("popup-")
-        || label.starts_with("acct-")
-        || label.starts_with("tabbed-")
-        || label == crate::websearch::SEARCH_WINDOW_LABEL
-}
-
-/// Whether promoting this window opens the new app as a page window.
-/// Popups and the search window do; account and tabbed windows stay put
-/// and are only added to the launcher. Pure so the matrix stays tested.
-pub(crate) fn should_open_new_window(label: &str) -> bool {
-    label.starts_with("popup-") || label == crate::websearch::SEARCH_WINDOW_LABEL
-}
-
-/// Whether promotion closes the source window. Only popups close: the
-/// search window is reusable, and account/tabbed windows stay open.
-pub(crate) fn should_close_after_add(label: &str) -> bool {
-    label.starts_with("popup-")
-}
-
-/// Whether a URL is a search-engine results page rather than a site.
-/// DuckDuckGo counts on its bare or www host; Google counts only on a
-/// /search path, and its sign-in host never counts. Pure so the guard
-/// stays testable without a Tauri app handle. Applied only to the search
-/// window, so popup/account behaviour is unchanged.
-pub(crate) fn is_search_results_url(raw: &str) -> bool {
-    let Ok(parsed) = raw.trim().parse::<url::Url>() else {
-        return false;
-    };
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    let host = host.to_ascii_lowercase();
-    if host == "duckduckgo.com" || host == "www.duckduckgo.com" {
-        return true;
-    }
-    if host == "accounts.google.com" {
-        return false;
-    }
-    if host == "google.com" || host.ends_with(".google.com") {
-        return parsed.path() == "/search" || parsed.path().starts_with("/search/");
-    }
-    false
+    label.starts_with("popup-") || label.starts_with("acct-") || label.starts_with("tabbed-")
 }
 
 /// Validate the popup's live URL: must be a real http(s) address.
@@ -165,12 +110,6 @@ pub(crate) fn run_add(
         .map_err(|_| "Couldn't read this page's address.".to_string())?
         .to_string();
     let url = validate_popup_url(&live_url)?;
-
-    // Search window only: a results page is not a site, so refuse it
-    // plainly instead of creating a search-engine app.
-    if label == crate::websearch::SEARCH_WINDOW_LABEL && is_search_results_url(&url) {
-        return Err("This is a search results page — open a result first, then add that site.".to_string());
-    }
 
     let name = crate::page_title::fetch_page_title(&url)
         .unwrap_or_else(|_| crate::preview::prettified_domain(&url));
@@ -223,21 +162,17 @@ pub(crate) fn run_add(
     // so the promoted app appears immediately, not after a restart.
     let _ = app.emit("appmaka:apps-changed", ());
 
-    // Open as a proper page window (frameless + caption strip) for
-    // popups and the search window: the new window is the feedback that
-    // the add worked. A popup then closes, since it has been promoted
-    // and keeping both open would show two windows on the same site.
-    // The search window never closes — it is reusable, and closing it
-    // would destroy the search session its popups share. From an
-    // account window the user is mid-browsing — just add it to the
-    // launcher and leave everything alone; no new window, no close.
-    // The new app's session is fresh (see the module docs), so the user
-    // signs in once more there; the search sign-in is not carried over.
-    if should_open_new_window(label) {
+    // Open as a proper page window (frameless + caption strip), then close
+    // the popup: it has been promoted, and keeping both open would show
+    // two windows on the same site. From an account window the user is
+    // mid-browsing — just add it to the launcher and leave everything
+    // alone; no new window, no close.
+    if label.starts_with("popup-") {
         crate::windows::open_account(app, store, adblock, winstate, &app_id, &account_id, false)?;
-    }
-    if should_close_after_add(label) {
-        let _ = window.close();
+        // Async teardown: a synchronous close here runs on the caller's
+        // thread, and closing a popup's WebView2 controller from inside
+        // a close dispatch is the freeze. The new window is already open.
+        crate::popup_bar::close_popup_async(app, label);
     }
 
     Ok(PopupAddOutcome {
@@ -282,15 +217,17 @@ pub fn ensure_add_shortcut_registered(app: &AppHandle) {
     }
 }
 
-/// Global-shortcut dispatch: run the flow only when an addable window
-/// is focused; anywhere else the keypress is ignored silently.
+/// Global-shortcut dispatch: run the flow only when a popup window is
+/// focused; anywhere else the keypress is ignored silently.
 pub fn fire_from_hotkey(app: &AppHandle) {
-    // Fires on the focused window when it's one we can promote. The
-    // label gate in run_add is the authority; this just finds the
-    // focused candidate, using the same gate so the two cannot drift.
+    // Fires on the focused window when it's one we can promote — a popup
+    // or an account window. The label gate in run_add is the authority;
+    // this just finds the focused candidate.
     let label = app.webview_windows().values().find_map(|w| {
         let l = w.label().to_string();
-        (add_label_allowed(&l) && w.is_focused().unwrap_or(false)).then_some(l)
+        ((l.starts_with("popup-") || l.starts_with("acct-") || l.starts_with("tabbed-"))
+            && w.is_focused().unwrap_or(false))
+        .then_some(l)
     });
     let Some(label) = label else { return };
     let app = app.clone();
@@ -302,23 +239,13 @@ pub fn fire_from_hotkey(app: &AppHandle) {
             Ok(o) => {
                 if o.already_added {
                     emit_notice(&app, MSG_ALREADY_ADDED);
-                } else if !should_open_new_window(&label) {
-                    // Windows that open the new app show it as feedback;
-                    // account and tabbed windows stay put, so say what
-                    // happened.
+                } else if !label.starts_with("popup-") {
+                    // Popups show the new window as feedback; account and
+                    // tabbed windows stay put, so say what happened.
                     emit_notice(&app, &format!("{MSG_ADDED_PREFIX}{}", o.app_name));
                 }
             }
-            Err(e) => {
-                // Say why it failed when run_add said why (a rejected
-                // search results page, for example); the generic message
-                // is only the fallback for an empty error.
-                if e.is_empty() {
-                    emit_notice(&app, MSG_ADD_FAILED);
-                } else {
-                    emit_notice(&app, &e);
-                }
-            }
+            Err(_) => emit_notice(&app, MSG_ADD_FAILED),
         }
     });
 }
@@ -338,62 +265,6 @@ mod tests {
         assert!(!add_label_allowed(""));
         assert!(!add_label_allowed("popup"));
         assert!(!add_label_allowed("xpopup-3"));
-    }
-
-    #[test]
-    fn add_label_allows_search_window_exactly() {
-        assert!(add_label_allowed(crate::websearch::SEARCH_WINDOW_LABEL));
-        assert!(add_label_allowed("websearch"));
-        // Exact match only: prefix lookalikes stay rejected.
-        assert!(!add_label_allowed("websearch-1"));
-        assert!(!add_label_allowed("websearchx"));
-        assert!(!add_label_allowed("xwebsearch"));
-        assert!(!add_label_allowed("main"));
-        assert!(!add_label_allowed("oauth-3"));
-        assert!(!add_label_allowed(""));
-    }
-
-    #[test]
-    fn open_close_matrix() {
-        // Popup: open the new window, then close the source.
-        assert!(should_open_new_window("popup-3"));
-        assert!(should_close_after_add("popup-3"));
-        // Search window: open the new window, never close the source.
-        assert!(should_open_new_window("websearch"));
-        assert!(!should_close_after_add("websearch"));
-        // Account and tabbed windows: neither opens nor closes.
-        assert!(!should_open_new_window("acct-app1-acct1"));
-        assert!(!should_close_after_add("acct-app1-acct1"));
-        assert!(!should_open_new_window("tabbed-group1-g0"));
-        assert!(!should_close_after_add("tabbed-group1-g0"));
-        // Launcher and OAuth: neither.
-        assert!(!should_open_new_window("main"));
-        assert!(!should_close_after_add("main"));
-        assert!(!should_open_new_window("oauth-3"));
-        assert!(!should_close_after_add("oauth-3"));
-    }
-
-    #[test]
-    fn search_results_detection() {
-        // DuckDuckGo, with or without www.
-        assert!(is_search_results_url("https://duckduckgo.com/?q=example"));
-        assert!(is_search_results_url("https://www.duckduckgo.com/?q=example"));
-        // Google, only on a /search path.
-        assert!(is_search_results_url("https://www.google.com/search?q=example"));
-        assert!(is_search_results_url("https://google.com/search?q=example"));
-        assert!(!is_search_results_url("https://www.google.com/"));
-        // Lookalike paths are not results pages.
-        assert!(!is_search_results_url("https://www.google.com/searching"));
-        assert!(!is_search_results_url("https://www.google.com/searchfoo"));
-        // A normal site is never a results page, even with /search in it.
-        assert!(!is_search_results_url("https://example.com/"));
-        assert!(!is_search_results_url("https://example.com/search?q=example"));
-        // Google's sign-in host never counts.
-        assert!(!is_search_results_url("https://accounts.google.com/signin"));
-        assert!(!is_search_results_url("https://accounts.google.com/"));
-        // Unparseable input is not a results page.
-        assert!(!is_search_results_url("not a url"));
-        assert!(!is_search_results_url(""));
     }
 
     #[test]
