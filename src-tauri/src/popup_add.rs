@@ -1,4 +1,4 @@
-//! "Add to applications" for popup and account windows (v0.9.11, extended).
+//! "Add to applications" for popup, account, and search windows (v0.9.11, extended).
 //!
 //! Popups are raw site windows with no AppMaka chrome, so their affordances
 //! live outside the page: a Windows system-menu item (popup_chrome.rs),
@@ -6,7 +6,8 @@
 //! button on the dashboard's popup rows. Account windows get the same
 //! shortcut and dashboard button — they capture the window's *live* URL,
 //! so a page navigated to inside an account can be promoted to its own app.
-//! All paths funnel into `run_add`.
+//! The search window gets the shortcut too: the user searches for a site,
+//! opens a result, and adds that page. All paths funnel into `run_add`.
 //!
 //! A promoted popup opens as a fresh app window (fresh session dir) and the
 //! popup closes. A promoted account page is only added to the launcher —
@@ -45,6 +46,10 @@ pub fn add_shortcut_active() -> bool {
 pub const MSG_ALREADY_ADDED: &str = "This site is already in your applications.";
 pub const MSG_ADD_FAILED: &str = "Couldn't add this site — try the launcher's add box instead.";
 pub const MSG_ADDED_PREFIX: &str = "Added to your applications: ";
+/// Refusal when the search window is still showing results: adding the
+/// results page would create a broken "Google Search" tile.
+pub const MSG_SEARCH_RESULTS: &str =
+    "Open a result first — a search page can't be added as an app.";
 
 /// Outcome returned to the dashboard (camelCase for the frontend).
 #[derive(Debug, Clone, Serialize)]
@@ -55,14 +60,21 @@ pub struct PopupAddOutcome {
     pub app_name: String,
 }
 
-/// Only `popup-*` and `acct-*` labels may be promoted. OAuth modals are
-/// transient sign-in windows (meaningless to add) and `main` is the
-/// launcher. `acct-*` windows capture their *live* URL — the user may have
-/// navigated somewhere else and wants that page as a new app.
+/// Only `popup-*`, `acct-*`, and `tabbed-*` labels may be promoted, plus
+/// the fixed `websearch` label. OAuth modals are transient sign-in windows
+/// (meaningless to add) and `main` is the launcher. `acct-*` windows capture
+/// their *live* URL — the user may have navigated somewhere else and wants
+/// that page as a new app. The search window captures its live URL the same
+/// way: the user searches for a site, opens a result, and adds that page.
 pub(crate) fn add_label_allowed(label: &str) -> bool {
     // v0.13.16: tabbed windows join popups and account windows — the
     // page showing in a tab group is addable exactly like a plain page.
-    label.starts_with("popup-") || label.starts_with("acct-") || label.starts_with("tabbed-")
+    // The search window joins them too: the F1 shortcut list in the
+    // search window already advertises Ctrl+Shift+A.
+    label.starts_with("popup-")
+        || label.starts_with("acct-")
+        || label.starts_with("tabbed-")
+        || label == "websearch"
 }
 
 /// Validate the popup's live URL: must be a real http(s) address.
@@ -110,6 +122,12 @@ pub(crate) fn run_add(
         .map_err(|_| "Couldn't read this page's address.".to_string())?
         .to_string();
     let url = validate_popup_url(&live_url)?;
+
+    // The search window still showing results: adding it would create a
+    // broken "Google Search" tile. The user must open a result first.
+    if label == "websearch" && crate::websearch::is_search_results_url(&url) {
+        return Err(MSG_SEARCH_RESULTS.to_string());
+    }
 
     let name = crate::page_title::fetch_page_title(&url)
         .unwrap_or_else(|_| crate::preview::prettified_domain(&url));
@@ -217,17 +235,16 @@ pub fn ensure_add_shortcut_registered(app: &AppHandle) {
     }
 }
 
-/// Global-shortcut dispatch: run the flow only when a popup window is
-/// focused; anywhere else the keypress is ignored silently.
+/// Global-shortcut dispatch: run the flow only when a popup, account,
+/// tabbed, or search window is focused; anywhere else the keypress is
+/// ignored silently.
 pub fn fire_from_hotkey(app: &AppHandle) {
-    // Fires on the focused window when it's one we can promote — a popup
-    // or an account window. The label gate in run_add is the authority;
-    // this just finds the focused candidate.
+    // Fires on the focused window when it's one we can promote. The
+    // label gate in run_add is the authority — reuse it here instead of
+    // restating the prefixes, so a new addable window type can't drift.
     let label = app.webview_windows().values().find_map(|w| {
         let l = w.label().to_string();
-        ((l.starts_with("popup-") || l.starts_with("acct-") || l.starts_with("tabbed-"))
-            && w.is_focused().unwrap_or(false))
-        .then_some(l)
+        (add_label_allowed(&l) && w.is_focused().unwrap_or(false)).then_some(l)
     });
     let Some(label) = label else { return };
     let app = app.clone();
@@ -240,12 +257,21 @@ pub fn fire_from_hotkey(app: &AppHandle) {
                 if o.already_added {
                     emit_notice(&app, MSG_ALREADY_ADDED);
                 } else if !label.starts_with("popup-") {
-                    // Popups show the new window as feedback; account and
-                    // tabbed windows stay put, so say what happened.
+                    // Popups show the new window as feedback; account,
+                    // tabbed, and search windows stay put, so say what
+                    // happened.
                     emit_notice(&app, &format!("{MSG_ADDED_PREFIX}{}", o.app_name));
                 }
             }
-            Err(_) => emit_notice(&app, MSG_ADD_FAILED),
+            Err(e) => {
+                // The results-page refusal names the fix; anything else
+                // keeps the generic message.
+                if e == MSG_SEARCH_RESULTS {
+                    emit_notice(&app, &e);
+                } else {
+                    emit_notice(&app, MSG_ADD_FAILED);
+                }
+            }
         }
     });
 }
@@ -260,6 +286,8 @@ mod tests {
         assert!(add_label_allowed("popup-0"));
         assert!(add_label_allowed("acct-app1-acct1"));
         assert!(add_label_allowed("tabbed-group1-g0"));
+        assert!(add_label_allowed("websearch"));
+        assert!(!add_label_allowed("websearch-x"));
         assert!(!add_label_allowed("oauth-3"));
         assert!(!add_label_allowed("main"));
         assert!(!add_label_allowed(""));
@@ -286,5 +314,8 @@ mod tests {
         assert!(!MSG_ADD_FAILED.to_lowercase().contains("popup"));
         assert!(!MSG_ADD_FAILED.contains("error"));
         assert!(!MSG_ADD_FAILED.contains("Error"));
+        assert!(!MSG_SEARCH_RESULTS.to_lowercase().contains("popup"));
+        assert!(!MSG_SEARCH_RESULTS.contains("error"));
+        assert!(!MSG_SEARCH_RESULTS.contains("Error"));
     }
 }

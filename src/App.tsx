@@ -1382,6 +1382,193 @@ function AppSettingsForm({
 }
 
 /**
+ * One app's popup permission, editable in place. Saves through the same
+ * update_app_settings command as the per-app settings form, changing only
+ * the popup fields — the rest of the settings ride along untouched.
+ */
+function PopupPermissionsRow({
+  app,
+  globalAllow,
+  onSaved,
+  onError,
+}: {
+  app: WebApp;
+  globalAllow: boolean;
+  onSaved: (app: WebApp) => void;
+  onError: (msg: string) => void;
+}) {
+  const settings = app.settings ?? DEFAULT_SETTINGS;
+  const [popupPolicy, setPopupPolicy] = useState<"block" | "allow">(settings.popup_policy);
+  const [allowlist, setAllowlist] = useState(settings.popup_allowlist.join("\n"));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  const dirty =
+    popupPolicy !== settings.popup_policy ||
+    allowlist !== settings.popup_allowlist.join("\n");
+
+  // Follow settings saved elsewhere (e.g. the app's own settings form);
+  // never clobber an edit in progress.
+  useEffect(() => {
+    if (!dirty) {
+      setPopupPolicy(settings.popup_policy);
+      setAllowlist(settings.popup_allowlist.join("\n"));
+    }
+  }, [settings, dirty]);
+
+  const allowedHosts = allowlist
+    .split("\n")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    setFormError(null);
+    setSaved(false);
+    const newSettings: AppSettings = {
+      ...settings,
+      popup_policy: popupPolicy,
+      popup_allowlist: allowedHosts,
+    };
+    setSaving(true);
+    try {
+      const savedSettings = await invoke<AppSettings>("update_app_settings", {
+        id: app.id,
+        settings: newSettings,
+      });
+      setSaved(true);
+      onSaved({ ...app, settings: savedSettings });
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const accountStates = (app.accounts ?? []).map((account) => {
+    const state =
+      account.popup_policy === "allow"
+        ? "Allow"
+        : account.popup_policy === "block"
+          ? "Block"
+          : "Uses app setting";
+    return `${account.label} — ${state}`;
+  });
+
+  return (
+    <li className="popup-permissions-row">
+      <form className="settings-form" onSubmit={(e) => void handleSave(e)}>
+        <h3>{app.name}</h3>
+        <p className="muted small">{hostOf(app.url)}</p>
+        <label>
+          <span>Popups</span>
+          <select
+            value={popupPolicy}
+            disabled={globalAllow}
+            onChange={(e) => setPopupPolicy(e.target.value === "allow" ? "allow" : "block")}
+            aria-label={`Popup permission for ${app.name}`}
+          >
+            <option value="block">Block all popups</option>
+            <option value="allow">Allow popups as contained windows</option>
+          </select>
+        </label>
+        <label>
+          <span>Popup allowlist</span>
+          <textarea
+            value={allowlist}
+            disabled={globalAllow}
+            onChange={(e) => setAllowlist(e.target.value)}
+            rows={2}
+            placeholder="accounts.google.com"
+            spellCheck={false}
+            autoComplete="off"
+            aria-label={`Popup allowlist for ${app.name}`}
+          />
+          <span className="help">
+            Sites allowed to open sign-in popups even when blocking. One hostname per line.
+          </span>
+        </label>
+        {allowedHosts.length > 0 && (
+          <p className="muted small">
+            {allowedHosts.length} allowed {allowedHosts.length === 1 ? "site" : "sites"}
+          </p>
+        )}
+        {accountStates.length > 0 && (
+          <p className="muted small">Accounts: {accountStates.join("; ")}</p>
+        )}
+        <div className="form-actions">
+          <button type="submit" disabled={saving || !dirty || globalAllow}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+          {saved && !dirty && (
+            <span className="muted small" role="status">
+              Saved
+            </span>
+          )}
+        </div>
+        {formError && (
+          <p className="form-error" role="alert">
+            {formError}
+          </p>
+        )}
+      </form>
+    </li>
+  );
+}
+
+/**
+ * Central popup permissions: every installed app in one list, so the
+ * popup setting doesn't have to be hunted down in each app's settings.
+ * Read-only for accounts (their overrides are shown, not edited here).
+ */
+function PopupPermissionsPanel({
+  apps,
+  launcherSettings,
+  onSaved,
+  onError,
+}: {
+  apps: WebApp[];
+  launcherSettings: LauncherSettings | null;
+  onSaved: (app: WebApp) => void;
+  onError: (msg: string) => void;
+}) {
+  const globalAllow = launcherSettings?.allow_popups_globally ?? false;
+  return (
+    <>
+      {launcherSettings !== null && globalAllow ? (
+        <p className="muted small">
+          Popups are allowed in all apps right now. Turn off “Allow popups in all apps” in
+          Launcher settings to use the per-app settings below.
+        </p>
+      ) : (
+        <p className="muted small">
+          Choose which apps may open popups. Changes take effect when the account window is
+          closed and reopened.
+        </p>
+      )}
+      {apps.length === 0 ? (
+        <p className="muted">No apps yet. Add a web app above to manage its popup permission here.</p>
+      ) : (
+        <ul className="popup-permissions-list">
+          {apps.map((app) => (
+            <PopupPermissionsRow
+              key={app.id}
+              app={app}
+              globalAllow={globalAllow}
+              onSaved={onSaved}
+              onError={onError}
+            />
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+/**
  * Edit-app dialog: rename, change the URL/color, and manage the logo —
  * upload a custom image, fetch the site's icon, or remove it.
  */
@@ -4350,6 +4537,18 @@ function AppShell() {
           <h2>Link handling</h2>
         </div>
         <LinkRules />
+      </section>
+
+      <section className="panel popup-permissions-panel">
+        <div className="panel-head">
+          <h2>Popup permissions</h2>
+        </div>
+        <PopupPermissionsPanel
+          apps={apps}
+          launcherSettings={launcherSettings}
+          onSaved={replaceApp}
+          onError={setError}
+        />
       </section>
 
       <section className="panel">

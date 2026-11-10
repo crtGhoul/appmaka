@@ -216,6 +216,29 @@ input[type="color"] {
   gap: 12px;
 }
 
+.popup-permissions-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Row titles and the panel heading inherit the near-white base text
+   color, which is unreadable on the white card in the light theme
+   (the shared .panel h2 / .settings-form h3 pattern has the same flaw).
+   Pin the color here, scoped to this panel, in both themes. */
+.popup-permissions-row h3,
+.popup-permissions-panel h2 {
+  color: #1a1b1e;
+}
+
+:root[data-theme="dark"] .popup-permissions-row h3,
+:root[data-theme="dark"] .popup-permissions-panel h2 {
+  color: #eceef1;
+}
+
 .app-card {
   display: flex;
   flex-direction: column;
