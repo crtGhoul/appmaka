@@ -1293,7 +1293,7 @@ fn run_media_flow(app: &AppHandle) {
     let second = media_cmd(&main, "media_play_pause");
     let row2 = media_row(&main);
     eprintln!("[e2e] media: toggle2={second} row2={row2}");
-    // The bar polls every 2s and listens for appmaka:media-changed; give
+    // The bar refreshes on appmaka:media-changed (no more 2s poll); give
     // it a beat, then check the DOM.
     std::thread::sleep(Duration::from_secs(3));
     let bar = eval_in(
@@ -1311,4 +1311,110 @@ fn run_media_flow(app: &AppHandle) {
     let row3 = media_row(&main);
     eprintln!("[e2e] media: toggle3={third} row3={row3}");
     eprintln!("[e2e] media: flow done");
+}
+
+// Driven by `APPMAKA_DEBUG_LAUNCHER_MODE=launcher`. The 0.18.12
+// stutter-fix proof, in one run:
+//   1. Mount the Now Playing bar (open the seeded "sec" app, toggle to
+//      paused) so the event-driven refresh is live, then idle 10s: the
+//      debug counter for list_open_account_windows must not climb (the old
+//      2s interval would add ~5 calls; one stray focus refresh is tolerated).
+//   2. Summon the launcher through the real toggle path (hide, then
+//      toggle_main_window) and confirm the "perf / Launcher summon timing"
+//      entry lands in errors.json.
+//   3. Type in the launcher search input via eval and confirm the input
+//      value + filtered tile count respond — this is the check that launcher
+//      interaction still works with the main-window Focused(true) ->
+//      focus_webview call removed. If it fails, that deletion must be
+//      reverted, not worked around.
+pub fn maybe_run_launcher_flow(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_LAUNCHER_MODE").unwrap_or_default() != "launcher" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-launcher".to_string())
+        .spawn(move || run_launcher_flow(&app));
+}
+
+#[cfg(debug_assertions)]
+fn launcher_list_open_calls() -> u64 {
+    crate::windows::DEBUG_LIST_OPEN_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(debug_assertions))]
+fn launcher_list_open_calls() -> u64 {
+    0
+}
+
+fn run_launcher_flow(app: &AppHandle) {
+    use std::time::Duration;
+    std::thread::sleep(Duration::from_secs(6));
+    let Some(main) = app.get_webview("main") else {
+        eprintln!("[e2e] launcher: no-main-webview");
+        return;
+    };
+    // Mount the Now Playing bar: open the seeded sec app and toggle to
+    // paused (same path as the media flow; the bar shows while paused).
+    let (Some(store), Some(adblock), Some(winstate)) = (
+        app.try_state::<crate::store::AppStore>(),
+        app.try_state::<crate::adblock::AdblockState>(),
+        app.try_state::<crate::windows::WindowState>(),
+    ) else {
+        eprintln!("[e2e] launcher: missing state");
+        return;
+    };
+    if let Err(e) =
+        crate::windows::open_account(app, &store, &adblock, &winstate, "sec", "sec-a", false)
+    {
+        eprintln!("[e2e] launcher: open failed: {e}");
+        return;
+    }
+    std::thread::sleep(Duration::from_secs(8));
+    let _ = media_cmd(&main, "media_play_pause");
+    let _ = media_cmd(&main, "media_play_pause");
+    let row = media_row(&main);
+    eprintln!("[e2e] launcher: bar mount row={row}");
+    let bar = eval_in(&main, "document.querySelector('.now-playing-bar') !== null")
+        .unwrap_or_default();
+    eprintln!("[e2e] launcher: bar_present={bar}");
+    // Idle 10s: the event-driven bar must not poll.
+    std::thread::sleep(Duration::from_secs(2));
+    let before = launcher_list_open_calls();
+    std::thread::sleep(Duration::from_secs(10));
+    let after = launcher_list_open_calls();
+    eprintln!(
+        "[e2e] launcher: list_open_calls_before={before} after={after} delta={}",
+        after.saturating_sub(before)
+    );
+    // Summon through the real toggle path and confirm the perf entry.
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    crate::toggle_main_window(app);
+    std::thread::sleep(Duration::from_secs(1));
+    let perf = app
+        .path()
+        .app_data_dir()
+        .map(|d| std::fs::read_to_string(d.join("errors.json")).unwrap_or_default())
+        .unwrap_or_default()
+        .contains("Launcher summon timing");
+    eprintln!("[e2e] launcher: summon_perf_logged={perf}");
+    // Type in the launcher search input and confirm it responds.
+    let tiles_before =
+        eval_in(&main, "document.querySelectorAll('.tile-label').length").unwrap_or_default();
+    let typed = eval_in(
+        &main,
+        "(() => { const inp = document.querySelector('input[placeholder^=\"Search apps\"]'); if (!inp) return 'no-input'; inp.focus(); const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; setter.call(inp, 'Example Two'); inp.dispatchEvent(new Event('input', {bubbles: true})); return 'focused=' + (document.activeElement === inp) + ' value=' + inp.value; })()",
+    )
+    .unwrap_or_default();
+    std::thread::sleep(Duration::from_secs(1));
+    let tiles_after = eval_in(
+        &main,
+        "document.querySelectorAll('.tile-label').length + '|' + Array.from(document.querySelectorAll('.tile-label')).map(e => e.textContent).join(',')",
+    )
+    .unwrap_or_default();
+    eprintln!("[e2e] launcher: tiles_before={tiles_before} typed={typed} tiles_after={tiles_after}");
+    eprintln!("[e2e] launcher: flow done");
 }

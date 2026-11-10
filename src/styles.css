@@ -49,8 +49,6 @@ body {
 .launcher-root,
 .launcher-shell {
   background: rgba(13, 15, 22, calc(var(--panel-opacity, 0.92)));
-  backdrop-filter: blur(24px) saturate(150%);
-  -webkit-backdrop-filter: blur(24px) saturate(150%);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-panel);
@@ -203,8 +201,6 @@ body {
   margin: 0 auto;
   padding: 8px 12px;
   background: rgba(19, 21, 31, 0.94);
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
   border: 1px solid var(--accent-border);
   border-radius: var(--radius-md);
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.08) inset;
@@ -257,15 +253,12 @@ body {
 }
 
 .now-playing-bar.is-playing .now-playing-bar-eq span:nth-child(1) {
-  animation: appmaka-eq 0.75s ease-in-out infinite alternate;
 }
 
 .now-playing-bar.is-playing .now-playing-bar-eq span:nth-child(2) {
-  animation: appmaka-eq 0.55s ease-in-out 0.15s infinite alternate;
 }
 
 .now-playing-bar.is-playing .now-playing-bar-eq span:nth-child(3) {
-  animation: appmaka-eq 0.65s ease-in-out 0.3s infinite alternate;
 }
 
 .now-playing-bar.is-paused .now-playing-bar-eq span {
@@ -273,14 +266,6 @@ body {
   opacity: 0.55;
 }
 
-@keyframes appmaka-eq {
-  0% {
-    transform: scaleY(0.3);
-  }
-  100% {
-    transform: scaleY(1);
-  }
-}
 
 .now-playing-bar-text {
   display: flex;
@@ -629,8 +614,6 @@ textarea:focus-visible {
   max-width: 260px;
   padding: 5px;
   background: rgba(28, 30, 38, 0.94);
-  -webkit-backdrop-filter: blur(28px) saturate(1.5);
-  backdrop-filter: blur(28px) saturate(1.5);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
   box-shadow:
@@ -719,8 +702,6 @@ textarea:focus-visible {
   overflow-y: auto;
   padding: 5px;
   background: rgba(28, 30, 38, 0.96);
-  -webkit-backdrop-filter: blur(28px) saturate(1.5);
-  backdrop-filter: blur(28px) saturate(1.5);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
@@ -744,8 +725,6 @@ textarea:focus-visible {
   max-width: 100%;
   padding: 20px;
   background: rgba(24, 25, 30, 0.96);
-  -webkit-backdrop-filter: blur(24px) saturate(1.25);
-  backdrop-filter: blur(24px) saturate(1.25);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
   box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5);

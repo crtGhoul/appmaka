@@ -13,6 +13,9 @@ import type { OpenAccountWindow } from "./types";
  * - Which web app (and account) is playing
  * - Previous, Play/Pause, and Next controls wired to `account_window_command`
  * - One-click focus to bring the playing app window to the front
+ *
+ * Low-overhead: listens for backend "appmaka:media-changed" events instead of
+ * continuously polling on a timer.
  */
 export function NowPlayingBar() {
   const [mediaWindows, setMediaWindows] = useState<OpenAccountWindow[]>([]);
@@ -49,10 +52,8 @@ export function NowPlayingBar() {
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, 2000);
 
+    // Event-driven: refresh when audio starts, pauses, or stops in any webview
     let unlisten: (() => void) | undefined;
     void listen("appmaka:media-changed", () => {
       void refresh();
@@ -60,9 +61,23 @@ export function NowPlayingBar() {
       unlisten = fn;
     });
 
+    // Refresh when the launcher window becomes visible/focused
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        void refresh();
+      }
+    };
+    const onFocus = () => {
+      void refresh();
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("focus", onFocus);
+
     return () => {
-      window.clearInterval(timer);
       if (unlisten) unlisten();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("focus", onFocus);
     };
   }, [refresh]);
 

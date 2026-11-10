@@ -1051,7 +1051,7 @@ fn set_panel_opacity(app: AppHandle, opacity: f32) -> Result<LauncherSettings, S
 /// (cursor and monitor geometry are physical; monitor origins can be
 /// negative on multi-monitor X11, which the formula handles). The position
 /// is set BEFORE show() so there is no visible jump.
-fn toggle_main_window(app: &AppHandle) {
+pub(crate) fn toggle_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         let visible = w.is_visible().unwrap_or(false);
         let minimized = w.is_minimized().unwrap_or(false);
@@ -1063,10 +1063,19 @@ fn toggle_main_window(app: &AppHandle) {
         if visible && !minimized && on_screen {
             let _ = w.hide();
         } else {
+            let summon_start = std::time::Instant::now();
             let _ = w.unminimize();
             position_on_target_monitor(app, &w);
             windows::ensure_on_visible_monitor(app, &w);
             let _ = app.emit("appmaka:show-launcher", ());
+            let elapsed_ms = summon_start.elapsed().as_millis();
+            crate::errors::record(
+                app,
+                "perf",
+                "Launcher summon timing",
+                &format!("Summon to visible completed in {}ms", elapsed_ms),
+                false,
+            );
         }
     }
 }
@@ -1426,6 +1435,9 @@ fn main() {
             // v0.18.11 media-arms E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_media_flow(app.handle());
+            // v0.18.12 launcher-responsiveness E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_launcher_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
@@ -1519,12 +1531,6 @@ fn main() {
                     tauri::WindowEvent::Focused(focused) => {
                         if let Some(w) = window.app_handle().get_webview_window("main") {
                             crate::windows::set_window_memory_target_low(&w, !*focused);
-                        }
-                        if *focused {
-                            // v0.18.9: focus the webview too — window focus
-                            // does not reach a child webview.
-                            #[cfg(windows)]
-                            crate::windows::focus_webview(window.app_handle(), "main");
                         }
                     }
                     _ => {}

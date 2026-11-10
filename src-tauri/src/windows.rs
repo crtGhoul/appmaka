@@ -4553,6 +4553,12 @@ pub fn toggle_window_fullscreen(app: AppHandle, label: String) -> Result<(), Str
     Ok(())
 }
 
+/// Debug-only invocation count for `list_open_account_windows` (see
+/// above). Read by the launcher E2E flow; zero-cost in release builds.
+#[cfg(debug_assertions)]
+pub static DEBUG_LIST_OPEN_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// List every open account window with its app/account names and focus
 /// state, for the RAM dashboard.
 #[tauri::command]
@@ -4561,6 +4567,10 @@ pub fn list_open_account_windows(
     app: AppHandle,
     store: State<'_, AppStore>,
 ) -> Vec<OpenAccountInfo> {
+    // Debug-only count so the 0.18.12 launcher E2E can prove the Now
+    // Playing bar no longer polls this command on a timer.
+    #[cfg(debug_assertions)]
+    DEBUG_LIST_OPEN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // v0.18.5: snapshot the audio and paused-media sets once for all rows below.
     let playing: HashSet<String> = app
         .try_state::<WindowState>()
