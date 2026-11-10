@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Webview, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri::webview::WebviewBuilder;
 
@@ -787,6 +787,13 @@ pub struct WindowState {
     /// — WebKitGTK exposes no equivalent, so Linux windows rely on
     /// Keep Awake alone for audio protection.
     audio_playing: Mutex<HashSet<String>>,
+    /// Labels of windows whose media playback was paused via AppMaka's
+    /// Now Playing bar or keyboard media keys, so the Now Playing bar
+    /// remains visible while paused and can resume playback.
+    media_paused: Mutex<HashSet<String>>,
+    /// Most recent window label that played media, targeted by global
+    /// keyboard media keys (MediaPlayPause / MediaTrackNext / MediaTrackPrevious).
+    last_media_window: Mutex<Option<String>>,
     /// Last-visited URLs seeded by session restore (v0.16.4), keyed by
     /// window label. open_account_placed takes an entry one-shot as its
     /// window opens; leftovers (a restore entry whose window never
@@ -2650,11 +2657,14 @@ fn attach_popup_lifecycle_trace(app: &AppHandle, window: &tauri::WebviewWindow, 
     let log_label = label.to_string();
     window.on_window_event(move |event| {
         match event {
-            tauri::WindowEvent::CloseRequested { .. } => {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
                 log_popup_lifecycle(&log_app, &log_label, "close-requested");
+                crate::popup_bar::close_popup_async(&log_app, &log_label);
             }
             tauri::WindowEvent::Destroyed => {
                 log_popup_lifecycle(&log_app, &log_label, "destroyed");
+                crate::popup_bar::close_popup_async(&log_app, &log_label);
             }
             _ => {}
         }
@@ -3564,7 +3574,7 @@ fn webview_hidden(window: &WebviewWindow) -> bool {
 }
 
 /// v0.18.5: mark one window's audio state. Only ever touches the
-/// audio set — never the window-state mutex — so the COM handler can
+/// audio/media sets — never the window-state mutex — so the COM handler can
 /// call it without any lock-ordering risk.
 fn set_audio_playing(app: &AppHandle, label: &str, playing: bool) {
     if let Some(winstate) = app.try_state::<WindowState>() {
@@ -3575,7 +3585,16 @@ fn set_audio_playing(app: &AppHandle, label: &str, playing: bool) {
                 set.remove(label);
             }
         }
+        if playing {
+            if let Ok(mut paused) = winstate.media_paused.lock() {
+                paused.remove(label);
+            }
+            if let Ok(mut last) = winstate.last_media_window.lock() {
+                *last = Some(label.to_string());
+            }
+        }
     }
+    let _ = app.emit("appmaka:media-changed", ());
 }
 
 /// v0.18.5: is this window protected from idle reclaim — playing audio
@@ -4078,8 +4097,178 @@ pub(crate) fn toggle_account_keep_awake(app: &AppHandle, label: &str) -> Option<
     Some(!current)
 }
 
-/// Navigate, toggle adblock, or toggle Keep Awake for one account's
-/// window, from the launcher / tile menu.
+/// JS snippet evaluated inside a webview to control media playback
+/// (`"media_play_pause"`, `"media_next"`, `"media_prev"`).
+/// Uses HTMLMediaElement (`<video>`, `<audio>`) first, then site-specific
+/// media controls (YouTube, Spotify, SoundCloud, Apple Music, Twitch) and
+/// generic ARIA media buttons as fallbacks.
+fn media_control_js(action: &str) -> &'static str {
+    match action {
+        "media_play_pause" => r#"(function(){
+            try {
+                var media = Array.from(document.querySelectorAll('video, audio'));
+                var playing = media.find(function(m){ return !m.paused && !m.ended; });
+                if (playing) { playing.pause(); return; }
+                var paused = media.find(function(m){ return m.paused && (m.currentTime > 0 || m.readyState >= 2); }) || media[0];
+                if (paused) { paused.play().catch(function(){}); return; }
+                var btn = document.querySelector(
+                    '.ytp-play-button, [data-testid="control-button-playpause"], .playControl, ' +
+                    'button[aria-label*="Pause" i], button[aria-label*="Play" i], [title*="Pause" i], [title*="Play" i]'
+                );
+                if (btn && typeof btn.click === 'function') { btn.click(); }
+            } catch (_) {}
+        })();"#,
+        "media_next" => r#"(function(){
+            try {
+                var btn = document.querySelector(
+                    '.ytp-next-button, [data-testid="control-button-skip-forward"], .skipControl__next, ' +
+                    'button[aria-label*="Next" i], [title*="Next" i]'
+                );
+                if (btn && typeof btn.click === 'function') { btn.click(); return; }
+                var media = document.querySelector('video, audio');
+                if (media && isFinite(media.duration)) {
+                    media.currentTime = Math.min(media.duration, media.currentTime + 10);
+                }
+            } catch (_) {}
+        })();"#,
+        "media_prev" => r#"(function(){
+            try {
+                var btn = document.querySelector(
+                    '.ytp-prev-button, [data-testid="control-button-skip-back"], .skipControl__previous, ' +
+                    'button[aria-label*="Previous" i], [title*="Previous" i]'
+                );
+                if (btn && typeof btn.click === 'function') { btn.click(); return; }
+                var media = document.querySelector('video, audio');
+                if (media) {
+                    media.currentTime = Math.max(0, media.currentTime - 10);
+                }
+            } catch (_) {}
+        })();"#,
+        _ => "",
+    }
+}
+
+/// Execute a media control action (`"media_play_pause"`, `"media_next"`,
+/// `"media_prev"`) on a specific window label and update its paused state.
+/// Returns `Some(true)` if the window is now playing, `Some(false)` if paused.
+pub(crate) fn control_window_media(app: &AppHandle, label: &str, action: &str) -> Option<bool> {
+    let js = media_control_js(action);
+    if js.is_empty() {
+        return None;
+    }
+    let window = app.get_webview_window(label)?;
+    let _ = window.eval(js);
+
+    let mut now_playing = None;
+    if let Some(winstate) = app.try_state::<WindowState>() {
+        if let Ok(mut last) = winstate.last_media_window.lock() {
+            *last = Some(label.to_string());
+        }
+        if action == "media_play_pause" {
+            let currently_playing = winstate
+                .audio_playing
+                .lock()
+                .ok()
+                .map(|s| s.contains(label))
+                .unwrap_or(false);
+            if currently_playing {
+                if let Ok(mut set) = winstate.audio_playing.lock() {
+                    set.remove(label);
+                }
+                if let Ok(mut paused) = winstate.media_paused.lock() {
+                    paused.insert(label.to_string());
+                }
+                now_playing = Some(false);
+            } else {
+                if let Ok(mut paused) = winstate.media_paused.lock() {
+                    paused.remove(label);
+                }
+                if let Ok(mut set) = winstate.audio_playing.lock() {
+                    set.insert(label.to_string());
+                }
+                now_playing = Some(true);
+            }
+        } else {
+            if let Ok(mut paused) = winstate.media_paused.lock() {
+                paused.remove(label);
+            }
+            now_playing = Some(true);
+        }
+    }
+    let _ = app.emit("appmaka:media-changed", ());
+    now_playing
+}
+
+static MEDIA_PLAY_PAUSE_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static MEDIA_NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static MEDIA_PREV_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Register global hardware media keys (`MediaPlayPause`, `MediaTrackNext`,
+/// `MediaTrackPrevious`) best-effort at startup.
+pub fn register_media_shortcuts(app: &AppHandle) {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+    let gs = app.global_shortcut();
+    for (key_str, slot) in [
+        ("MediaPlayPause", &MEDIA_PLAY_PAUSE_ID),
+        ("MediaTrackNext", &MEDIA_NEXT_ID),
+        ("MediaTrackPrevious", &MEDIA_PREV_ID),
+    ] {
+        if let Ok(sc) = key_str.parse::<Shortcut>() {
+            if !gs.is_registered(sc) && gs.register(sc).is_ok() {
+                slot.store(sc.id(), Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// If `shortcut_id` is one of the registered hardware media keys, return its
+/// corresponding action (`"media_play_pause"`, `"media_next"`, `"media_prev"`).
+pub fn media_action_for_shortcut(shortcut_id: u32) -> Option<&'static str> {
+    if shortcut_id == 0 {
+        return None;
+    }
+    if shortcut_id == MEDIA_PLAY_PAUSE_ID.load(Ordering::Relaxed) {
+        Some("media_play_pause")
+    } else if shortcut_id == MEDIA_NEXT_ID.load(Ordering::Relaxed) {
+        Some("media_next")
+    } else if shortcut_id == MEDIA_PREV_ID.load(Ordering::Relaxed) {
+        Some("media_prev")
+    } else {
+        None
+    }
+}
+
+/// Dispatch a global hardware media key press to the currently playing (or
+/// most recently active) media web app window.
+pub fn handle_global_media_key(app: &AppHandle, action: &str) {
+    let target_label = app.try_state::<WindowState>().and_then(|winstate| {
+        if let Ok(playing) = winstate.audio_playing.lock() {
+            if let Some(lbl) = playing.iter().next() {
+                return Some(lbl.clone());
+            }
+        }
+        if let Ok(last) = winstate.last_media_window.lock() {
+            if let Some(lbl) = last.as_ref() {
+                if app.get_webview_window(lbl).is_some() {
+                    return Some(lbl.clone());
+                }
+            }
+        }
+        if let Ok(paused) = winstate.media_paused.lock() {
+            if let Some(lbl) = paused.iter().next() {
+                return Some(lbl.clone());
+            }
+        }
+        None
+    });
+
+    if let Some(label) = target_label {
+        let _ = control_window_media(app, &label, action);
+    }
+}
+
+/// Navigate, toggle adblock, toggle Keep Awake, or control media playback
+/// for one account's window, from the launcher / tile menu / Now Playing bar.
 #[tauri::command]
 pub fn account_window_command(
     app: AppHandle,
@@ -4103,6 +4292,9 @@ pub fn account_window_command(
         }
         "toggle_adblock" => toggle_account_adblock(&app, &label),
         "toggle_keep_awake" => toggle_account_keep_awake(&app, &label),
+        "media_play_pause" | "media_next" | "media_prev" => {
+            control_window_media(&app, &label, &action)
+        }
         _ => return Err(format!("unknown window action: {action}")),
     })
 }
@@ -4193,6 +4385,9 @@ pub struct OpenAccountInfo {
     /// v0.18.5: WebView2 reports the document is playing audio
     /// (Windows only; always false on Linux, which has no API for it).
     pub playing_audio: bool,
+    /// True when media playback in this window was paused via AppMaka's
+    /// Now Playing controls or media keys, keeping the Now Playing bar active.
+    pub media_paused: bool,
     /// v0.18.5: the account's Keep Awake lock.
     pub keep_awake: bool,
     /// v0.18.5: live document.title, for the launcher's Now Playing
@@ -4284,9 +4479,9 @@ pub async fn close_all_account_windows(app: AppHandle) -> Result<usize, String> 
     }
     // Popups are not tracked in WindowState; sweep them by live-window
     // label so no account-related webview survives a close-all.
-    for (label, window) in app.webview_windows() {
+    for (label, _) in app.webview_windows() {
         if label.starts_with("popup-") || label.starts_with("oauth-") {
-            let _ = window.close();
+            crate::popup_bar::close_popup_async(&app, &label);
         }
     }
     Ok(closed)
@@ -4318,6 +4513,10 @@ pub(crate) fn close_label_allowed(label: &str) -> bool {
 pub async fn close_open_window(app: AppHandle, label: String) -> Result<(), String> {
     if !close_label_allowed(&label) {
         return Err(format!("not a closeable window: {label}"));
+    }
+    if label.starts_with("popup-") || label.starts_with("oauth-") {
+        crate::popup_bar::close_popup_async(&app, &label);
+        return Ok(());
     }
     close_tracked_window(&app, &label, CloseIntent::User);
     Ok(())
@@ -4362,10 +4561,14 @@ pub fn list_open_account_windows(
     app: AppHandle,
     store: State<'_, AppStore>,
 ) -> Vec<OpenAccountInfo> {
-    // v0.18.5: snapshot the audio set once for all rows below.
+    // v0.18.5: snapshot the audio and paused-media sets once for all rows below.
     let playing: HashSet<String> = app
         .try_state::<WindowState>()
         .and_then(|s| s.audio_playing.lock().ok().map(|set| set.clone()))
+        .unwrap_or_default();
+    let paused_media: HashSet<String> = app
+        .try_state::<WindowState>()
+        .and_then(|s| s.media_paused.lock().ok().map(|set| set.clone()))
         .unwrap_or_default();
     let tracked: Vec<(String, String, String, String, bool, bool, bool)> =
         match app.try_state::<WindowState>() {
@@ -4426,6 +4629,7 @@ pub fn list_open_account_windows(
                 suspended,
                 // v0.18.5: audio state + Keep Awake + title for tiles.
                 playing_audio: playing.contains(&label),
+                media_paused: paused_media.contains(&label),
                 keep_awake: store
                     .get(&app_id)
                     .map(|a| a.effective_keep_awake(&account_id))
@@ -4461,6 +4665,7 @@ pub fn list_open_account_windows(
                         // The search window is never TrySuspend-frozen.
                         suspended: false,
                         playing_audio: false,
+                        media_paused: false,
                         keep_awake: false,
                         page_title: account_label,
                         adblock_on: true,
@@ -4498,6 +4703,7 @@ pub fn list_open_account_windows(
                 // Popups are never TrySuspend-frozen.
                 suspended: false,
                 playing_audio: false,
+                media_paused: false,
                 keep_awake: false,
                 adblock_on: false,
             })
