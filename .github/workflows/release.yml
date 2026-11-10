@@ -37,7 +37,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]] || [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           elif gh release view "${TAG}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists; skipping automatic release."
