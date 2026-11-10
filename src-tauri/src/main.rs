@@ -1213,11 +1213,12 @@ fn main() {
                             return;
                         }
                         // v0.9.11: fixed "add to applications" shortcut.
-                        // Fires only when a popup or account window is
-                        // focused; ignored silently anywhere else. The
-                        // active flag guarantees this can never steal a
-                        // user's own binding or the summon hotkey: those
-                        // always win registration, leaving the flag false.
+                        // Fires only when a popup, account, tabbed, or
+                        // search window is focused; ignored silently
+                        // anywhere else. The active flag guarantees this
+                        // can never steal a user's own binding or the
+                        // summon hotkey: those always win registration,
+                        // leaving the flag false.
                         if crate::popup_add::add_shortcut_active()
                             && Some(shortcut.id())
                                 == crate::popup_add::add_shortcut_id()
@@ -1438,6 +1439,12 @@ fn main() {
             // v0.18.12 launcher-responsiveness E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_launcher_flow(app.handle());
+            // Websearch "add this site" E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_websearch_add_flow(app.handle());
+            // Popup permissions panel E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_popup_permissions_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
