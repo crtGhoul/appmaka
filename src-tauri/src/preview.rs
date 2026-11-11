@@ -238,8 +238,14 @@ pub fn start_preview(
         // only visible mouse for users whose native cursor doesn't
         // render inside WebView2 — previews never had it, so the mouse
         // "disappeared" on preview pages (the user's Reddit sign-in).
+        // Guard + cosmetic + scriptlets + skipper run in ALL frames
+        // (see the account-window builder for why); previews never
+        // had the guard, scriptlets, or skipper before.
+        let preview_page_url = crate::adblock::new_page_url(&url);
+        let preview_adblock = adblock.clone();
         site_builder = site_builder
-            .initialization_script(windows::TARGET_BLANK_SHIM_JS)
+            .initialization_script_for_all_frames(windows::TARGET_BLANK_SHIM_JS)
+            .initialization_script_for_all_frames(windows::window_open_guard_js(&[]))
             .initialization_script(windows::NAV_KEYS_JS)
             .initialization_script(windows::shortcuts_overlay_js(app));
         let cursor_js = windows::saved_cursor_js(app);
@@ -248,15 +254,33 @@ pub fn start_preview(
         }
         let css = adblock.cosmetic_css_for(&url);
         if !css.is_empty() {
-            site_builder =
-                site_builder.initialization_script(windows::cosmetic_init_script(&css));
+            site_builder = site_builder
+                .initialization_script_for_all_frames(windows::cosmetic_init_script(&css));
         }
+        let scriptlets = adblock.scriptlet_js_for(&url);
+        if !scriptlets.is_empty() {
+            site_builder = site_builder.initialization_script_for_all_frames(scriptlets);
+        }
+        site_builder =
+            site_builder.initialization_script_for_all_frames(adblock.yt_ad_skipper_js());
         // Converge the cursor to the saved style after each navigation:
         // a preview opened before a cursor settings change would
         // otherwise keep its build-time cursor for its whole life.
         let nav_app = app.clone();
         let nav_label = site_window_label(&id);
-        site_builder = site_builder.on_navigation(move |_nav_url: &url::Url| {
+        // One shared URL value: the nav hook updates it, the network
+        // hook reads it. A second Arc here would go stale. Windows-only
+        // binding: the network hook only exists there.
+        #[cfg(windows)]
+        let attach_page_url = preview_page_url.clone();
+        site_builder = site_builder.on_navigation(move |nav_url: &url::Url| {
+            windows::reapply_adblock_on_navigation(
+                &nav_app,
+                &preview_adblock,
+                &preview_page_url,
+                nav_url,
+                &nav_label,
+            );
             windows::schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
             true
         });
@@ -267,6 +291,20 @@ pub fn start_preview(
         windows::ensure_on_visible_monitor(app, &site);
         #[cfg(windows)]
         windows::attach_fullscreen_sync(&site);
+        // Focused-back focus: Alt+Tab back to the preview must route
+        // focus into its webview, or clicks land on a dead page (the
+        // 0.18.8 dead-clicks shape). Open-time focus is already covered
+        // by ensure_on_visible_monitor above.
+        #[cfg(windows)]
+        let site_label = site_window_label(&id);
+        #[cfg(windows)]
+        let site_for_ev = site.clone();
+        site.on_window_event(move |event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                #[cfg(windows)]
+                crate::windows::focus_webview(site_for_ev.app_handle(), &site_label);
+            }
+        });
 
         // Previews always get ad blocking; there are no per-app settings yet.
         #[cfg(windows)]
@@ -274,7 +312,7 @@ pub fn start_preview(
             &site,
             adblock,
             Arc::new(AtomicBool::new(true)),
-            url.clone(),
+            attach_page_url,
         );
 
         // Control window: our own UI, parked just above the site window and
