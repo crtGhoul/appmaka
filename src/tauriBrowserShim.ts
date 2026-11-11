@@ -19,8 +19,8 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   popup_policy: "block",
   popup_allowlist: [],
   adblock_enabled: true,
-  auto_suspend_minutes: 30,
-  auto_close_minutes: 30,
+  auto_suspend_minutes: 5,
+  auto_close_minutes: 5,
 };
 
 const DEFAULT_LAUNCHER_SETTINGS: LauncherSettings = {
@@ -45,6 +45,7 @@ const DEFAULT_LAUNCHER_SETTINGS: LauncherSettings = {
   custom_cursor_color: "violet",
   open_as_tabbed: false,
   allow_popups_globally: false,
+  auto_allow_permissions: false,
   auto_hide_top_bar: false,
   accent: "indigo",
   theme: "system",
@@ -162,6 +163,7 @@ function isNativeAppMakaWindow(): boolean {
     label === "main" ||
     label === "clipboard" ||
     label === "dock" ||
+    label === "websearch" ||
     label.startsWith("tabstrip-") ||
     label.startsWith("split-") ||
     label.startsWith("popupbar-") ||
@@ -943,7 +945,6 @@ if (typeof window !== "undefined") {
   const mockEventInternals = window.__APPMAKA_EVENT_INTERNALS__;
 
   if (nativeTauri && mockInternals) {
-    const fallbackInvoke = mockInternals.invoke;
     const fallbackUnregisterListener = mockEventInternals?.unregisterListener;
     window.__APPMAKA_INTERNALS__ = {
       ...mockInternals,
@@ -967,7 +968,22 @@ if (typeof window !== "undefined") {
           return await nativeTauri.invoke(cmd, args, options);
         } catch (err) {
           if (String(err).includes("not allowed by ACL")) {
-            return fallbackInvoke(cmd, args, options);
+            // Was a silent mock fallback: a real command denied by
+            // the capability file looked exactly like a browser mock,
+            // so missing permissions shipped unnoticed. Record it
+            // where the settings error history can show it, then fail
+            // loudly instead of serving canned data.
+            console.error(`[appmaka] invoke "${cmd}" denied by ACL:`, err);
+            if (cmd !== "record_frontend_error") {
+              void nativeTauri
+                .invoke("record_frontend_error", {
+                  kind: "acl",
+                  message: `Command "${cmd}" is not allowed by the app capabilities.`,
+                  technical: String(err),
+                })
+                .catch(() => {});
+            }
+            throw err;
           }
           throw err;
         }
