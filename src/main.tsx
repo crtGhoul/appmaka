@@ -6,7 +6,6 @@ import "./tauriBrowserShim";
 import App from "./App";
 import { NowPlayingBar } from "./NowPlayingBar";
 import "./styles.css";
-import "./visibility";
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

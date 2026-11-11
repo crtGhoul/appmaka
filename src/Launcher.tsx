@@ -672,7 +672,7 @@ export function IconGrid({
           {(() => {
             const title = playingFor?.(r);
             if (title == null) return null;
-            const short = title.length > 26 ? `${title.slice(0, 25)}…` : title;
+            const short = title.length > 22 ? `${title.slice(0, 21)}…` : title;
             return (
               <span
                 className="tile-now-playing"
