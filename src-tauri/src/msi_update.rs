@@ -295,7 +295,12 @@ fn run_msi_launch(app: &AppHandle) -> Result<(), String> {
     // App.tsx).
     prepare_for_update_exit(app);
     let _ = app.emit("msi-update-launched", ());
-    app.exit(0);
+    // v0.18.15: exit the process outright. app.exit(0) never completes
+    // while windows that prevent_close are open (same quit hang as tray
+    // Quit — see main.rs), which would leave the installer wedged on a
+    // process that refuses to go away. Session is already saved and the
+    // sentinel cleared by prepare_for_update_exit, so this loses nothing.
+    std::process::exit(0);
     #[allow(unreachable_code)]
     Ok(())
 }
@@ -369,7 +374,10 @@ fn run_msi_update(
     // `run_msi_launch` (see there) before going away.
     prepare_for_update_exit(app);
     let _ = app.emit("msi-update-launched", ());
-    app.exit(0);
+    // v0.18.15: exit the process outright (same quit hang as tray Quit —
+    // app.exit(0) never completes while windows that prevent_close are
+    // open; see main.rs).
+    std::process::exit(0);
     #[allow(unreachable_code)]
     Ok(())
 }
