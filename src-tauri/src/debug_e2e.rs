@@ -299,7 +299,7 @@ fn run_flow(app: &AppHandle, url: &str, mode: &str) {
         parent_label: String::new(),
         chain_allowed: false,
     };
-    crate::windows::spawn_popup_window(&ctx, &parsed);
+    crate::windows::spawn_popup_window(&ctx, &parsed, None);
     eprintln!("[e2e] popup requested for {url}");
     // Let the window build and the navigation settle.
     std::thread::sleep(std::time::Duration::from_secs(10));
@@ -629,30 +629,65 @@ fn run_split_flow(app: &AppHandle) {
         info.active_pane
     );
 
-    // 3.6 v0.18.10: a gesture inside a page marks its pane active.
-    // Dispatch a pointerdown in pane 0's webview (the gesture init
-    // script's path) and check the highlight follows it.
-    if let Some(w) = app.get_webview(&split::pane_webview_label(
+    // 3.6 v0.18.10: a gesture inside a page marks its pane active — but
+    // only a REAL gesture. A synthetic pointerdown is ignored by design
+    // (hardened v0.18.9: the gesture reporter drops isTrusted === false),
+    // so the active pane must NOT move on the dispatch below. The real
+    // path is then proven the way a user drives it: a direct
+    // `note_user_gesture` invoke from pane 0's webview, which must move
+    // the highlight to pane 0.
+    let active_pane = || {
+        split::list_splits(app)
+            .map(|l| {
+                l.open
+                    .iter()
+                    .find(|g| g.id == gid)
+                    .map(|g| g.active_pane)
+                    .unwrap_or(usize::MAX)
+            })
+            .unwrap_or(usize::MAX)
+    };
+    let pane0 = app.get_webview(&split::pane_webview_label(
         &gid,
         &info.panes[0].app_id,
         &info.panes[0].account_id,
-    )) {
+    ));
+    if let Some(w) = &pane0 {
         let _ = eval_in(
-            &w,
+            w,
             "document.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true})); 'dispatched'",
         );
     }
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let gesture_active = split::list_splits(app)
-        .map(|l| {
-            l.open
-                .iter()
-                .find(|g| g.id == gid)
-                .map(|g| g.active_pane)
-                .unwrap_or(usize::MAX)
-        })
-        .unwrap_or(usize::MAX);
-    eprintln!("[e2e] split: gesture_active={gesture_active}");
+    eprintln!(
+        "[e2e] split: synthetic_gesture_ignored active_still={}",
+        active_pane()
+    );
+    if let Some(w) = &pane0 {
+        let _ = eval_in(
+            w,
+            "window.__invokeResult = 'pending'; window.__TAURI_INTERNALS__.invoke('note_user_gesture', {}).then(function(){ window.__invokeResult = 'ok'; }).catch(function(e){ window.__invokeResult = 'err:' + e; }); 'sent'",
+        );
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let invoke_result = pane0
+        .as_ref()
+        .and_then(|w| eval_in(w, "window.__invokeResult"))
+        .unwrap_or_default();
+    eprintln!(
+        "[e2e] split: direct_gesture_active={} invokeResult={invoke_result}",
+        active_pane()
+    );
+    // 3.6b: focus transfer — focusing pane 1 moves the active pane and
+    // focuses the frame + the pane webview (the open_split focus path).
+    // Real mouse focus is PC-gated; this proves the backend transfer.
+    match split::focus_split_pane(app, &splitstate, &gid, 1) {
+        Ok(()) => eprintln!(
+            "[e2e] split: focus_transfer pane=1 active={} ok=true",
+            active_pane()
+        ),
+        Err(e) => eprintln!("[e2e] split: focus_transfer pane=1 ok=false err={e}"),
+    }
 
     // 3.7 v0.18.10: add the removed app back — pull its standalone
     // window into the open split. The app removed in step 3 is the one
@@ -1178,7 +1213,9 @@ fn run_security_flow(app: &AppHandle, dl_dir: &str) {
     std::thread::sleep(Duration::from_secs(3));
     let blocked = !file.exists();
     eprintln!("[e2e] security: no-gesture download blocked={blocked}");
-    // 3. After a gesture, the same download is allowed.
+    // 3. A synthetic pointerdown must NOT arm the gate (hardened v0.18.9:
+    // isTrusted === false is ignored by design), so the download stays
+    // blocked. The direct invoke below proves the backend allow path.
     let _ = eval_in(
         &wv,
         "document.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, cancelable: true})); 'dispatched'",
@@ -1194,11 +1231,11 @@ fn run_security_flow(app: &AppHandle, dl_dir: &str) {
         "typeof window.__appmakaGestureLast !== 'undefined' && window.__appmakaGestureLast > 0",
     )
     .unwrap_or_default();
-    eprintln!("[e2e] security: gesture recorded={recorded} listenerFired={listener_fired}");
+    eprintln!("[e2e] security: synthetic gesture recorded={recorded} listenerFired={listener_fired}");
     let _ = eval_in(&wv, "document.getElementById('dl').click(); 'clicked'");
     std::thread::sleep(Duration::from_secs(4));
     let allowed = file.exists();
-    eprintln!("[e2e] security: gestured download allowed={allowed}");
+    eprintln!("[e2e] security: synthetic-gesture download allowed={allowed}");
     // Direct invoke, bypassing the listener: if this records, the listener
     // is the broken link; if not, the invoke/command is. Capture the
     // promise outcome on the window so the exact error is visible.
@@ -1213,6 +1250,17 @@ fn run_security_flow(app: &AppHandle, dl_dir: &str) {
         .map(|g| g.recent(&label, Duration::from_secs(10)))
         .unwrap_or(false);
     eprintln!("[e2e] security: direct invoke recorded={direct} invokeResult={invoke_result}");
+    // The direct invoke arms the gate: re-arm right before the click so
+    // the 3s gesture window is fresh, then the same download must land.
+    let _ = eval_in(
+        &wv,
+        "window.__TAURI_INTERNALS__.invoke('note_user_gesture', {}); 'sent'",
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    let _ = eval_in(&wv, "document.getElementById('dl').click(); 'clicked'");
+    std::thread::sleep(Duration::from_secs(4));
+    let direct_allowed = file.exists();
+    eprintln!("[e2e] security: direct-gesture download allowed={direct_allowed}");
     eprintln!("[e2e] security: flow done");
 }
 
@@ -1320,13 +1368,15 @@ fn run_media_flow(app: &AppHandle) {
 //      debug counter for list_open_account_windows must not climb (the old
 //      2s interval would add ~5 calls; one stray focus refresh is tolerated).
 //   2. Summon the launcher through the real toggle path (hide, then
-//      toggle_main_window) and confirm the "perf / Launcher summon timing"
-//      entry lands in errors.json.
+//      toggle_main_window) and confirm no "perf / Launcher summon timing"
+//      entry lands in errors.json — routine hotkey use must not pollute
+//      the error log (v0.18.14). Also logs summon_focus_ms (hide ->
+//      toggle -> window reports focused).
 //   3. Type in the launcher search input via eval and confirm the input
 //      value + filtered tile count respond — this is the check that launcher
 //      interaction still works with the main-window Focused(true) ->
-//      focus_webview call removed. If it fails, that deletion must be
-//      reverted, not worked around.
+//      focus_webview call restored (v0.18.14). If it fails, that
+//      restoration must be re-examined, not worked around.
 pub fn maybe_run_launcher_flow(app: &AppHandle) {
     if std::env::var("APPMAKA_DEBUG_LAUNCHER_MODE").unwrap_or_default() != "launcher" {
         return;
@@ -1387,20 +1437,40 @@ fn run_launcher_flow(app: &AppHandle) {
         "[e2e] launcher: list_open_calls_before={before} after={after} delta={}",
         after.saturating_sub(before)
     );
-    // Summon through the real toggle path and confirm the perf entry.
+    // Summon through the real toggle path and confirm no perf entry
+    // pollutes errors.json (v0.18.14: the summon-timing record is gone).
+    // Also time the summon: hide -> toggle -> window reports focused.
+    // NOTE: the restored main-window Focused(true) -> focus_webview call
+    // is Windows-only (#[cfg(windows)] MoveFocus), so the sandbox proves
+    // the toggle path + the launcher page taking focus (input below),
+    // not MoveFocus itself — that leg is PC-gated, like real clicks.
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
     }
     std::thread::sleep(Duration::from_secs(1));
+    let summon_start = std::time::Instant::now();
     crate::toggle_main_window(app);
-    std::thread::sleep(Duration::from_secs(1));
+    let mut summon_focus_ms: u128 = 2000;
+    for _ in 0..100 {
+        let focused = app
+            .get_webview_window("main")
+            .map(|w| w.is_focused().unwrap_or(false))
+            .unwrap_or(false);
+        if focused {
+            summon_focus_ms = summon_start.elapsed().as_millis();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let doc_focused = eval_in(&main, "document.hasFocus()").unwrap_or_default();
+    eprintln!("[e2e] launcher: summon_focus_ms={summon_focus_ms} doc_focused={doc_focused}");
     let perf = app
         .path()
         .app_data_dir()
         .map(|d| std::fs::read_to_string(d.join("errors.json")).unwrap_or_default())
         .unwrap_or_default()
         .contains("Launcher summon timing");
-    eprintln!("[e2e] launcher: summon_perf_logged={perf}");
+    eprintln!("[e2e] launcher: summon_perf_logged={perf} (want false)");
     // Type in the launcher search input and confirm it responds.
     let tiles_before =
         eval_in(&main, "document.querySelectorAll('.tile-label').length").unwrap_or_default();
@@ -1417,6 +1487,101 @@ fn run_launcher_flow(app: &AppHandle) {
     .unwrap_or_default();
     eprintln!("[e2e] launcher: tiles_before={tiles_before} typed={typed} tiles_after={tiles_after}");
     eprintln!("[e2e] launcher: flow done");
+}
+
+// ---------------------------------------------------------------------------
+// Theme screenshot driver (v0.18.14 Area 2).
+//
+// Driven by `APPMAKA_DEBUG_THEME_SHOT=1`. Walks the views the QA
+// screenshots need — launcher, the Now Playing bar (mounted via the sec
+// media toggle, same as the launcher flow), library, one app's Settings
+// form — logging `theme-shot: ready <view>` at each stop and waiting
+// there so the shell script can screenshot. Also logs the resolved
+// theme and the body's computed colors, so a wrong-theme run is visible
+// in the log, not just in pixels.
+//
+// Same contract as the other flows: debug builds only, inert without
+// the env var, detached thread, never blocks startup.
+// ---------------------------------------------------------------------------
+
+/// Called once from setup. Returns immediately.
+pub fn maybe_run_theme_shot_flow(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_THEME_SHOT").unwrap_or_default() != "1" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-theme-shot".to_string())
+        .spawn(move || run_theme_shot_flow(&app));
+}
+
+fn run_theme_shot_flow(app: &AppHandle) {
+    use std::time::Duration;
+    std::thread::sleep(Duration::from_secs(6));
+    let Some(main) = app.get_webview("main") else {
+        eprintln!("[theme-shot] no-main-webview");
+        return;
+    };
+    let theme = eval_in(
+        &main,
+        "document.documentElement.dataset.theme + '|' + getComputedStyle(document.body).backgroundColor + '|' + getComputedStyle(document.body).color",
+    )
+    .unwrap_or_default();
+    eprintln!("[theme-shot] theme={theme}");
+    eprintln!("[theme-shot] ready launcher");
+    std::thread::sleep(Duration::from_secs(8));
+    // Mount the Now Playing bar: open the seeded sec app and toggle to
+    // paused (same path as the launcher flow).
+    let (Some(store), Some(adblock), Some(winstate)) = (
+        app.try_state::<crate::store::AppStore>(),
+        app.try_state::<crate::adblock::AdblockState>(),
+        app.try_state::<crate::windows::WindowState>(),
+    ) else {
+        eprintln!("[theme-shot] missing state");
+        return;
+    };
+    if let Err(e) =
+        crate::windows::open_account(app, &store, &adblock, &winstate, "sec", "sec-a", false)
+    {
+        eprintln!("[theme-shot] open failed: {e}");
+        return;
+    }
+    std::thread::sleep(Duration::from_secs(8));
+    let _ = media_cmd(&main, "media_play_pause");
+    let _ = media_cmd(&main, "media_play_pause");
+    let bar = eval_in(&main, "document.querySelector('.now-playing-bar') !== null")
+        .unwrap_or_default();
+    eprintln!("[theme-shot] bar_present={bar}");
+    eprintln!("[theme-shot] ready now-playing");
+    std::thread::sleep(Duration::from_secs(8));
+    // Library: the launcher footer's "Manage apps" button.
+    let lib = eval_in(
+        &main,
+        "(() => { const b = Array.from(document.querySelectorAll('button')).find(x => x.textContent.trim() === 'Manage apps'); if (!b) return 'no-button'; b.click(); return 'clicked'; })()",
+    )
+    .unwrap_or_default();
+    std::thread::sleep(Duration::from_secs(2));
+    eprintln!("[theme-shot] library={lib}");
+    eprintln!("[theme-shot] ready library");
+    std::thread::sleep(Duration::from_secs(8));
+    // Settings: the first app row's Settings toggle. The panel expands
+    // inside that app's card, below the fold behind the Now Playing bar,
+    // so scroll the form's "Settings" heading into view before the shot.
+    let set = eval_in(
+        &main,
+        "(() => { const b = document.querySelector('.settings-toggle'); if (!b) return 'no-button'; b.click(); return 'clicked'; })()",
+    )
+    .unwrap_or_default();
+    std::thread::sleep(Duration::from_secs(2));
+    let set_scroll = eval_in(
+        &main,
+        "(() => { const h = Array.from(document.querySelectorAll('h3')).find(x => x.textContent.trim() === 'Settings'); if (!h) return 'no-form'; h.scrollIntoView({ block: 'center' }); return 'scrolled'; })()",
+    )
+    .unwrap_or_default();
+    eprintln!("[theme-shot] settings={set}/{set_scroll}");
+    eprintln!("[theme-shot] ready settings");
+    std::thread::sleep(Duration::from_secs(8));
+    eprintln!("[theme-shot] flow done");
 }
 
 // ---------------------------------------------------------------------------
@@ -1598,13 +1763,94 @@ fn run_websearch_add_flow(app: &AppHandle) {
 
 /// Called once from setup. Returns immediately.
 pub fn maybe_run_popup_permissions_flow(app: &AppHandle) {
-    if std::env::var("APPMAKA_DEBUG_POPUP_PERMS_MODE").unwrap_or_default() != "panel" {
+    let mode = std::env::var("APPMAKA_DEBUG_POPUP_PERMS_MODE").unwrap_or_default();
+    if mode != "panel" && mode != "panel-collapse" {
         return;
     }
     let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("appmaka-debug-popup-perms".to_string())
-        .spawn(move || run_popup_permissions_flow(&app));
+        .spawn(move || run_popup_permissions_flow(&app, &mode));
+}
+
+/// Collapse toggle, driven through the panel's own controls: collapse
+/// all, expand one row by clicking its summary, collapse all again,
+/// expand all. Each step asserts the row count in each form (expanded
+/// rows carry a select, collapsed rows a one-line summary button).
+/// Ends expanded unless `leave_collapsed` is set, so the caller picks
+/// the screenshot state. Returns "ok" or a "FAIL: ..." reason.
+fn collapse_phase(main: &tauri::Webview, leave_collapsed: bool) -> String {
+    use std::time::Duration;
+    let read = |js: &str| unquote(eval_in(main, js).unwrap_or_default());
+    let counts = || {
+        read(
+            r#"(() => {
+          const sels = document.querySelectorAll('.popup-permissions-row select').length;
+          const sums = Array.from(document.querySelectorAll('.popup-permissions-summary'))
+            .map(b => Array.from(b.querySelectorAll('span')).map(s => s.textContent).join(' '));
+          return 'selects=' + sels + ' summaries=[' + sums.join(' | ') + ']';
+        })()"#,
+        )
+    };
+    let label = || {
+        read("document.querySelector('.popup-permissions-toggle')?.textContent ?? 'none'")
+    };
+    let click_toggle = || {
+        read(
+            r#"(() => { document.querySelector('.popup-permissions-toggle')?.click(); return 'clicked'; })()"#,
+        )
+    };
+    let collapsed_all =
+        "selects=0 summaries=[Example One example.com Block | Example Two example.org Block | Example Three example.net Allow]";
+    let expanded_all = "selects=3 summaries=[]";
+    let one_expanded =
+        "selects=1 summaries=[Example One example.com Block | Example Three example.net Allow]";
+
+    if label() != "Collapse all" {
+        return format!("FAIL: initial toggle label={}", label());
+    }
+    click_toggle();
+    std::thread::sleep(Duration::from_millis(500));
+    if counts() != collapsed_all {
+        return format!("FAIL: after collapse-all got {}", counts());
+    }
+    if label() != "Show all" {
+        return format!("FAIL: toggle label after collapse-all={}", label());
+    }
+    let clicked = read(
+        r#"(() => { const b = Array.from(document.querySelectorAll('.popup-permissions-summary')).find(b => b.textContent.includes('Example Two')); if (!b) return 'no-summary'; b.click(); return 'clicked'; })()"#,
+    );
+    if clicked != "clicked" {
+        return format!("FAIL: expand-one summary click={clicked}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    if counts() != one_expanded {
+        return format!("FAIL: after expand-one got {}", counts());
+    }
+    if label() != "Collapse all" {
+        return format!("FAIL: toggle label after expand-one={}", label());
+    }
+    click_toggle();
+    std::thread::sleep(Duration::from_millis(500));
+    if counts() != collapsed_all {
+        return format!("FAIL: after second collapse-all got {}", counts());
+    }
+    click_toggle();
+    std::thread::sleep(Duration::from_millis(500));
+    if counts() != expanded_all {
+        return format!("FAIL: after expand-all got {}", counts());
+    }
+    if label() != "Collapse all" {
+        return format!("FAIL: toggle label after expand-all={}", label());
+    }
+    if leave_collapsed {
+        click_toggle();
+        std::thread::sleep(Duration::from_millis(500));
+        if counts() != collapsed_all {
+            return format!("FAIL: final collapse got {}", counts());
+        }
+    }
+    "ok".to_string()
 }
 
 /// eval_in returns JS strings JSON-quoted ("flipped"); strip the quotes
@@ -1614,7 +1860,7 @@ fn unquote(s: String) -> String {
     s.trim_matches('"').to_string()
 }
 
-fn run_popup_permissions_flow(app: &AppHandle) {
+fn run_popup_permissions_flow(app: &AppHandle, mode: &str) {
     use std::time::Duration;
     std::thread::sleep(Duration::from_secs(6));
     let Some(main) = app.get_webview("main") else {
@@ -1647,6 +1893,22 @@ fn run_popup_permissions_flow(app: &AppHandle) {
     }
     if !mounted {
         eprintln!("[e2e] popup-perms: rows never mounted");
+        return;
+    }
+    // Collapse toggle first: it needs no backend round-trip, and the
+    // flip below needs the rows expanded. The collapse-only mode stops
+    // here with the panel collapsed, for its screenshot.
+    let collapse = collapse_phase(&main, mode == "panel-collapse");
+    eprintln!("[e2e] popup-perms: collapse={collapse}");
+    if collapse != "ok" {
+        return;
+    }
+    if mode == "panel-collapse" {
+        let _ = main.eval(
+            "document.querySelector('.popup-permissions-list')?.closest('section')?.scrollIntoView({block: 'start'});",
+        );
+        std::thread::sleep(Duration::from_secs(1));
+        eprintln!("[e2e] popup-perms: flow done");
         return;
     }
     let state = unquote(eval_in(
@@ -1739,4 +2001,235 @@ fn run_popup_permissions_flow(app: &AppHandle) {
     );
     std::thread::sleep(Duration::from_secs(1));
     eprintln!("[e2e] popup-perms: flow done");
+}
+
+// ---------------------------------------------------------------------------
+// 0.18.14: auto-allow site permissions toggle + dictation "small" model.
+// Driven by `APPMAKA_DEBUG_01814_MODE=toggle` or `=model`. Same contract
+// as the other flows: debug builds only, inert without the env var,
+// detached thread, never blocks startup.
+//
+// The flow proves, in one run:
+//   - the permission decision reads the LIVE setting: with the toggle
+//     off every kind answers Default; with it on, microphone, camera,
+//     geolocation, and notifications answer Allow while file access,
+//     automatic downloads, and window management still answer Default;
+//     flipping it back off restores Default (no stale capture).
+//   - the Settings checkbox itself flips the stored setting end to
+//     end (click -> invoke -> saved setting), and the decision follows
+//     the click immediately.
+//   - the dictation backend accepts "small" (previously rejected as
+//     "Unknown speech model") and the Speech model group offers three
+//     radios, with small present.
+// Mode "toggle" ends with the Launcher settings toggle scrolled into
+// view; mode "model" ends with the Clipboard speech-model radios in
+// view, for the two screenshots.
+// ---------------------------------------------------------------------------
+
+/// Called once from setup. Returns immediately.
+pub fn maybe_run_01814_flow(app: &AppHandle) {
+    let mode = std::env::var("APPMAKA_DEBUG_01814_MODE").unwrap_or_default();
+    if mode != "toggle" && mode != "model" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-01814".to_string())
+        .spawn(move || run_01814_flow(&app, &mode));
+}
+
+fn run_01814_flow(app: &AppHandle, mode: &str) {
+    use std::time::Duration;
+    use tauri::webview::{PermissionKind, PermissionResponse};
+    std::thread::sleep(Duration::from_secs(6));
+    let Some(main) = app.get_webview("main") else {
+        eprintln!("[e2e] 01814: no-main-webview");
+        return;
+    };
+    // Both new controls live in the library view: the toggle in the
+    // Launcher settings panel, the model radios in the Clipboard panel.
+    if let Err(e) = crate::show_library_view(app) {
+        eprintln!("[e2e] 01814: show-library failed: {e}");
+        return;
+    }
+    // The Launcher section is collapsed by default (`launcherPanelOpen`
+    // starts false), so the toggle is not in the DOM until the section's
+    // "Show" button is clicked. Open it first — poll, because the
+    // library view renders after the settings load.
+    let mut opened = String::new();
+    for _ in 0..20 {
+        opened = unquote(eval_in(
+            &main,
+            r#"(() => {
+              const btns = Array.from(document.querySelectorAll('button.text-button[aria-expanded]'));
+              const btn = btns.find(b => b.closest('section')?.querySelector('h2')?.textContent === 'Launcher');
+              if (!btn) return 'no-launcher-btn';
+              if (btn.getAttribute('aria-expanded') === 'true') return 'already-open';
+              btn.click();
+              return 'opened';
+            })()"#,
+        )
+        .unwrap_or_default());
+        if opened == "opened" || opened == "already-open" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if opened != "opened" && opened != "already-open" {
+        eprintln!("[e2e] 01814: FAIL launcher section open={opened}");
+        return;
+    }
+    eprintln!("[e2e] 01814: launcher-section={opened}");
+    std::thread::sleep(Duration::from_millis(500));
+    // Wait for the toggle to mount (React renders after settings load).
+    let mut mounted = false;
+    for _ in 0..20 {
+        let n = eval_in(
+            &main,
+            "document.querySelectorAll('input[aria-label=\"Automatically allow site permissions\"]').length",
+        )
+        .unwrap_or_default();
+        if !n.is_empty() && n != "0" {
+            mounted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if !mounted {
+        eprintln!("[e2e] 01814: toggle never mounted");
+        return;
+    }
+    // The live decision, in one line per run: mic/cam/geo/notif plus
+    // the three kinds that must never auto-allow.
+    let decide = |main: &tauri::Webview| -> String {
+        [
+            ("mic", PermissionKind::Microphone),
+            ("cam", PermissionKind::Camera),
+            ("geo", PermissionKind::Geolocation),
+            ("notif", PermissionKind::Notifications),
+            ("fs", PermissionKind::FileSystemAccess),
+            ("dl", PermissionKind::AutomaticDownloads),
+            ("wm", PermissionKind::WindowManagement),
+        ]
+        .iter()
+        .map(|(name, kind)| {
+            let r = crate::launcher_settings::decide_permission(main, *kind);
+            format!(
+                "{name}={}",
+                if r == PermissionResponse::Allow {
+                    "allow"
+                } else {
+                    "default"
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+    };
+    let expect = |label: &str, got: &str, want: &str| -> bool {
+        if got != want {
+            eprintln!("[e2e] 01814: FAIL {label}: got {got} want {want}");
+            return false;
+        }
+        eprintln!("[e2e] 01814: {label} {got}");
+        true
+    };
+    let all_default =
+        "mic=default cam=default geo=default notif=default fs=default dl=default wm=default";
+    let on = "mic=allow cam=allow geo=allow notif=allow fs=default dl=default wm=default";
+    // Off: everything answers the platform default.
+    if !expect("decide-off", &decide(&main), all_default) {
+        return;
+    }
+    // On, via the command: the four kinds allow, the rest stay default.
+    if let Err(e) = crate::launcher_settings::set_auto_allow_permissions(app.clone(), true) {
+        eprintln!("[e2e] 01814: FAIL set-on: {e}");
+        return;
+    }
+    if !expect("decide-on", &decide(&main), on) {
+        return;
+    }
+    // Back off, via the command: the decision follows immediately.
+    if let Err(e) = crate::launcher_settings::set_auto_allow_permissions(app.clone(), false) {
+        eprintln!("[e2e] 01814: FAIL set-off: {e}");
+        return;
+    }
+    if !expect("decide-off-again", &decide(&main), all_default) {
+        return;
+    }
+    // The checkbox itself, end to end: click -> invoke -> saved setting.
+    let clicked = unquote(eval_in(
+        &main,
+        r#"(() => { const c = document.querySelector('input[aria-label="Automatically allow site permissions"]'); if (!c) return 'no-checkbox'; c.click(); return 'clicked'; })()"#,
+    )
+    .unwrap_or_default());
+    if clicked != "clicked" {
+        eprintln!("[e2e] 01814: FAIL toggle click={clicked}");
+        return;
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    let checked = unquote(eval_in(
+        &main,
+        "document.querySelector('input[aria-label=\"Automatically allow site permissions\"]')?.checked",
+    )
+    .unwrap_or_default());
+    eprintln!("[e2e] 01814: toggle=clicked checked={checked}");
+    if checked != "true" {
+        eprintln!("[e2e] 01814: FAIL toggle checked={checked}");
+        return;
+    }
+    // The UI-driven change is live for the decision at once.
+    if !expect("decide-after-ui-click", &decide(&main), on) {
+        return;
+    }
+    // Dictation backend: "small" was rejected before this release.
+    match crate::dictation::set_dictation_model(app.clone(), "small".to_string()) {
+        Ok(_) => eprintln!("[e2e] 01814: model-small=ok"),
+        Err(e) => {
+            eprintln!("[e2e] 01814: FAIL model-small: {e}");
+            return;
+        }
+    }
+    // Restore the default so the seeded run leaves nothing behind.
+    match crate::dictation::set_dictation_model(app.clone(), "tiny".to_string()) {
+        Ok(_) => eprintln!("[e2e] 01814: model-restore=ok"),
+        Err(e) => {
+            eprintln!("[e2e] 01814: FAIL model-restore: {e}");
+            return;
+        }
+    }
+    // Dictation UI: three radios, with small present.
+    let mut radios = String::new();
+    for _ in 0..20 {
+        radios = unquote(eval_in(
+            &main,
+            r#"(() => {
+              const rs = Array.from(document.querySelectorAll('input[name="dictation-model"]'));
+              const labels = rs.map(r => r.closest('label')?.textContent ?? '');
+              return 'radios=' + rs.length + ' small=' + labels.some(t => t.includes('Small')) + ' checked=' + (rs.find(r => r.checked)?.closest('label')?.textContent ?? 'none');
+            })()"#,
+        )
+        .unwrap_or_default());
+        if radios.starts_with("radios=3") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    eprintln!("[e2e] 01814: {radios}");
+    if !radios.starts_with("radios=3") || !radios.contains("small=true") {
+        eprintln!("[e2e] 01814: FAIL radios");
+        return;
+    }
+    // Scroll the requested control into view for the screenshot.
+    if mode == "model" {
+        let _ = main.eval(
+            "document.querySelector('div[role=\"radiogroup\"][aria-label=\"Speech model\"]')?.scrollIntoView({block: 'center'});",
+        );
+    } else {
+        let _ = main.eval(
+            "document.querySelector('input[aria-label=\"Automatically allow site permissions\"]')?.scrollIntoView({block: 'center'});",
+        );
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    eprintln!("[e2e] 01814: flow done");
 }
