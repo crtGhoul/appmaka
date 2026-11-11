@@ -62,6 +62,20 @@ function Get-AppLogContent {
     return ''
 }
 
+# Print the tail of app.log to the job log so the [e2e] + [setup-timing]
+# lines stay readable in the GitHub Actions UI even when the artifact
+# download is unavailable. No-op when the log is missing or empty.
+function Show-AppLogTail {
+    $content = Get-AppLogContent
+    if (-not $content) { return }
+    $lines = $content -split "`r?`n" | Where-Object { $_ -ne '' }
+    if ($lines.Count -eq 0) { return }
+    $tail = $lines | Select-Object -Last 120
+    Write-Host '--- app.log (last 120 lines) ---'
+    foreach ($line in $tail) { Write-Host $line }
+    Write-Host '--- end app.log ---'
+}
+
 function Get-CpuSnapshot {
     $snap = @{}
     foreach ($name in @('appmaka', 'msedgewebview2')) {
@@ -193,6 +207,7 @@ if (-not $flowDone) {
 } else {
     Add-Result 'launcher-flow' $true 'launcher flow finished'
 }
+Show-AppLogTail
 
 # Bar mounted (Now Playing bar present after the media toggles).
 if ($log -match 'launcher: bar_present=true') {
@@ -368,6 +383,7 @@ if ($null -eq $exitTime) {
         Add-Result 'quit' $false "exited ${quitSecs}s after quit fired (slow quit; quit log line seen: $quitRequested)"
     }
 }
+Show-AppLogTail
 
 # ---------------------------------------------------------------------------
 # 5. errors.json after the run (the app redacts URLs/tokens in it).
