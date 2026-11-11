@@ -1464,6 +1464,11 @@ fn main() {
             // Theme screenshot driver (v0.18.14 Area 2, Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_theme_shot_flow(app.handle());
+            // Quit flow (Windows debug CI): after N seconds, perform the
+            // exact tray-Quit sequence so CI can measure clean-quit time.
+            // Debug builds only, inert without the env var.
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_quit_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
