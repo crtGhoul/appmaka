@@ -1303,6 +1303,8 @@ fn main() {
             summon_main_window_from_second_instance(app);
         }))
         .setup(|app| {
+            #[cfg(debug_assertions)]
+            eprintln!("[setup-timing] start");
             let store =
                 AppStore::load(app.handle()).map_err(std::io::Error::other)?;
             let adblock =
@@ -1354,7 +1356,11 @@ fn main() {
             windows::cleanup_orphan_private_sessions(app.handle());
             // Sweep any orphaned msedgewebview2.exe processes left behind by a
             // previous killed/crashed AppMaka instance before opening windows.
+            #[cfg(debug_assertions)]
+            eprintln!("[setup-timing] before cleanup_orphan_webview2");
             let _ = windows::cleanup_orphan_webview2_processes(app.handle());
+            #[cfg(debug_assertions)]
+            eprintln!("[setup-timing] after cleanup_orphan_webview2");
 
             // Filter lists download + engine compile happen on a background
             // thread so startup never waits on the network.
@@ -1373,6 +1379,8 @@ fn main() {
             // Capture the registration outcome so the UI can warn when the
             // saved hotkey isn't actually live (e.g. another app already
             // owns Alt+Space) instead of showing it as if it worked.
+            #[cfg(debug_assertions)]
+            eprintln!("[setup-timing] before register_hotkey");
             let hotkey_status =
                 match launcher_settings::register_hotkey(app.handle(), &settings.hotkey) {
                     Ok(()) => HotkeyStatus {
@@ -1401,6 +1409,8 @@ fn main() {
                         }
                     }
                 };
+            #[cfg(debug_assertions)]
+            eprintln!("[setup-timing] after register_hotkey");
             app.manage(Mutex::new(hotkey_status));
             if settings.autostart {
                 if let Err(e) = app.handle().autolaunch().enable() {
@@ -1427,6 +1437,8 @@ fn main() {
             crate::windows::register_media_shortcuts(app.handle());
             // Debug-only E2E driver (Xvfb smoke): inert without the env var,
             // compiled out of release builds.
+            #[cfg(debug_assertions)]
+            eprintln!("[setup-timing] before e2e flows");
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_popup_flow(app.handle());
             // v0.9.12 clipboard pinning E2E driver (Xvfb smoke).
@@ -1469,6 +1481,8 @@ fn main() {
             // Debug builds only, inert without the env var.
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_quit_flow(app.handle());
+            #[cfg(debug_assertions)]
+            eprintln!("[setup-timing] after e2e flows");
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
