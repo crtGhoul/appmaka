@@ -1,0 +1,93 @@
+name: windows-debug
+
+# AppMaka — Windows debug probe (manual only).
+#
+# Builds the DEBUG binary (the E2E drivers are compiled out of release
+# builds) and launches it on a real Windows runner, then runs automated,
+# non-interactive checks targeting the post-0.18.7 stutter breakage:
+#   1. launcher summon + focus + typing (the [e2e] launcher flow)
+#   2. clean quit timing (the [e2e] quit flow; fails if the process does
+#      not exit within the timeout)
+#   3. idle CPU over 30s for appmaka.exe + msedgewebview2.exe
+#   4. window move via SetWindowPos on the main window
+#   5. errors.json contents after the run
+#
+# Manual trigger only (workflow_dispatch). It NEVER releases, publishes,
+# signs, or touches the updater — no release steps, no signing key, no
+# tags, no latest.json. It does not modify release.yml's release-first
+# protection and does not run on push.
+#
+# What CI can and cannot prove: it can measure CPU, quit time, focus,
+# and errors on real Windows with a real WebView2. It cannot judge
+# "feel" and it cannot do real mouse clicks or drags — the window-move
+# check is programmatic (SetWindowPos), not a mouse drag, and the
+# hotkey check is the internal toggle path, not a physical key press.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-debug:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Setup Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust target
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Typecheck + build frontend
+        run: npm run build
+
+      - name: Build debug binary
+        # Debug profile only (no bundler, no signing key): the E2E
+        # drivers are compiled in, and the exe is launched directly.
+        # This is the same `cargo build` the Linux QA uses for its
+        # debug binary; the frontend dist above is embedded by
+        # tauri-build at compile time.
+        run: cargo build --manifest-path src-tauri/Cargo.toml
+
+      - name: Verify debug binary exists
+        shell: pwsh
+        run: |
+          $exe = 'src-tauri\target\debug\appmaka.exe'
+          if (-not (Test-Path $exe)) {
+            Write-Error "debug binary missing: $exe"
+            exit 1
+          }
+          Write-Host "debug binary: $exe ($( (Get-Item $exe).Length ) bytes)"
+
+      - name: Run Windows debug probe
+        shell: pwsh
+        run: .\scripts\windows-debug-probe.ps1
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-debug-results
+          path: |
+            debug-out/*.log
+            debug-out/*.json
+            debug-out/*.md
+          if-no-files-found: warn
