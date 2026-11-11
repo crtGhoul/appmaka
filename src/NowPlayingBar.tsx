@@ -122,6 +122,17 @@ export function NowPlayingBar() {
     [optimisticPlaying, refresh],
   );
 
+  // The bar is fixed over the bottom of the main window; while it is
+  // mounted, reserve its height in the page (see styles.css) so the
+  // launcher footer and the last library row are never covered by it.
+  useEffect(() => {
+    if (!current) return;
+    document.body.classList.add("now-playing-visible");
+    return () => {
+      document.body.classList.remove("now-playing-visible");
+    };
+  }, [current]);
+
   // Handle hardware media keys when the launcher/library window itself has focus.
   useEffect(() => {
     if (!current) return;
