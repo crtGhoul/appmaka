@@ -2239,7 +2239,8 @@ fn run_01814_flow(app: &AppHandle, mode: &str) {
 //
 // Driven by `APPMAKA_DEBUG_QUIT_AFTER_SECS=N`. After N seconds, performs
 // the exact tray-Quit sequence (pin::set_shutting_down,
-// session::write_session, session::clear_restore_sentinel, app.exit(0))
+// session::write_session, session::clear_restore_sentinel,
+// std::process::exit(0))
 // so CI can measure clean-quit time from outside: PowerShell waits for
 // the process to exit and fails if it is still alive after the timeout.
 // Logs `[e2e] quit: requested` immediately before exiting.
@@ -2268,5 +2269,8 @@ fn run_quit_flow(app: &AppHandle, secs: u64) {
     crate::pin::set_shutting_down();
     crate::session::write_session(app);
     crate::session::clear_restore_sentinel(app);
-    app.exit(0);
+    // v0.18.15: exit the process outright (same reason as tray Quit —
+    // app.exit(0) never completes while windows that prevent_close are
+    // open, so the process stays alive; see main.rs tray-quit).
+    std::process::exit(0);
 }
