@@ -2233,3 +2233,40 @@ fn run_01814_flow(app: &AppHandle, mode: &str) {
     std::thread::sleep(Duration::from_secs(1));
     eprintln!("[e2e] 01814: flow done");
 }
+
+// ---------------------------------------------------------------------------
+// Quit flow (Windows debug CI).
+//
+// Driven by `APPMAKA_DEBUG_QUIT_AFTER_SECS=N`. After N seconds, performs
+// the exact tray-Quit sequence (pin::set_shutting_down,
+// session::write_session, session::clear_restore_sentinel, app.exit(0))
+// so CI can measure clean-quit time from outside: PowerShell waits for
+// the process to exit and fails if it is still alive after the timeout.
+// Logs `[e2e] quit: requested` immediately before exiting.
+//
+// Same contract as the other flows: debug builds only, inert without the
+// env var, detached thread, never blocks startup.
+// ---------------------------------------------------------------------------
+
+pub fn maybe_run_quit_flow(app: &AppHandle) {
+    let secs: u64 = std::env::var("APPMAKA_DEBUG_QUIT_AFTER_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if secs == 0 {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-quit".to_string())
+        .spawn(move || run_quit_flow(&app, secs));
+}
+
+fn run_quit_flow(app: &AppHandle, secs: u64) {
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    eprintln!("[e2e] quit: requested after={secs}s");
+    crate::pin::set_shutting_down();
+    crate::session::write_session(app);
+    crate::session::clear_restore_sentinel(app);
+    app.exit(0);
+}
