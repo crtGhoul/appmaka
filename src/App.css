@@ -225,17 +225,193 @@ input[type="color"] {
   gap: 12px;
 }
 
-/* Row titles and the panel heading inherit the near-white base text
-   color, which is unreadable on the white card in the light theme
-   (the shared .panel h2 / .settings-form h3 pattern has the same flaw).
-   Pin the color here, scoped to this panel, in both themes. */
+/* Popup permissions panel: every text element pinned here, scoped to
+   this panel, in both themes. Two things were blending in before this:
+   the select and textarea inherit the label's muted gray, so the actual
+   values read as faint gray on white; and the help text (#8a8d95) and
+   muted lines (#5b5e66) are too light next to the near-black headings.
+   In dark the same muted gray is dim on the dark card. Only the h2/h3
+   colors were pinned before; the rest inherited the flaw. */
 .popup-permissions-row h3,
 .popup-permissions-panel h2 {
   color: #1a1b1e;
 }
 
+/* Muted lines (host, accounts, counts, helper text): darker than the
+   global muted gray so they read as text, not a watermark. */
+.popup-permissions-panel .muted {
+  color: #43464d;
+}
+
+/* Field labels ("Popups", "Popup allowlist") are labels, not asides:
+   body-dark, not muted gray. */
+.popup-permissions-panel .settings-form label {
+  color: #26282c;
+}
+
+/* The values in the controls must be body-dark. They sit inside the
+   label element, so without this they inherit its muted color. */
+.popup-permissions-panel .settings-form select,
+.popup-permissions-panel .settings-form textarea {
+  color: #1a1b1e;
+}
+
+.popup-permissions-panel .settings-form .help {
+  color: #565a62;
+}
+
+/* Collapsed row: the card lives on the row itself (no form inside it),
+   so it gets the same card surface as the expanded form. */
+.popup-permissions-panel .popup-permissions-row-collapsed {
+  background: #fff;
+  border: 1px solid #e3e5e9;
+  border-radius: 8px;
+}
+
+.popup-permissions-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  text-align: left;
+  color: #1a1b1e;
+  font-size: 14px;
+}
+
+.popup-permissions-summary:hover:not(:disabled) {
+  background: #f0f1f4;
+}
+
+.popup-permissions-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.popup-permissions-summary-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popup-permissions-summary-policy {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
 :root[data-theme="dark"] .popup-permissions-row h3,
 :root[data-theme="dark"] .popup-permissions-panel h2 {
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .popup-permissions-panel .muted {
+  color: #c6cad1;
+}
+
+:root[data-theme="dark"] .popup-permissions-panel .settings-form label {
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .popup-permissions-panel .settings-form select,
+:root[data-theme="dark"] .popup-permissions-panel .settings-form textarea {
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .popup-permissions-panel .settings-form .help {
+  color: #b9bec7;
+}
+
+:root[data-theme="dark"] .popup-permissions-panel .form-error {
+  color: #f2a8a8;
+}
+
+:root[data-theme="dark"] .popup-permissions-panel .popup-permissions-row-collapsed {
+  background: #1e2025;
+  border-color: #34373e;
+}
+
+:root[data-theme="dark"] .popup-permissions-summary {
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .popup-permissions-summary:hover:not(:disabled) {
+  background: #2e3036;
+}
+
+/* Launcher + Clipboard sections: the same --text flaw as the popup
+   panel — styles.css sets --text once to near-white (#f3f4f8) with no
+   light-theme override, so in light theme the section headings, field
+   labels, and help text read as faint gray on white. The new
+   auto-allow toggle (Launcher) and the Small speech-model radio
+   (Clipboard) live here, so both sections get the same scoped pins
+   as the popup panel: body-dark text in light, light text in dark. */
+.launcher-panel h2,
+.clipboard-panel h2 {
+  color: #1a1b1e;
+}
+
+.launcher-panel .muted,
+.clipboard-panel .muted {
+  color: #43464d;
+}
+
+/* Field labels (checkbox rows, radio labels, field-label spans) are
+   labels, not asides: body-dark, not muted gray. */
+.launcher-panel label,
+.clipboard-panel label,
+.launcher-panel .field-label,
+.clipboard-panel .field-label,
+.launcher-panel .inline-form,
+.clipboard-panel .inline-form {
+  color: #26282c;
+}
+
+.launcher-panel .help,
+.clipboard-panel .help {
+  color: #565a62;
+}
+
+/* The values in the controls must be body-dark. */
+.launcher-panel select,
+.clipboard-panel select,
+.launcher-panel input[type="text"],
+.clipboard-panel input[type="text"] {
+  color: #1a1b1e;
+}
+
+:root[data-theme="dark"] .launcher-panel h2,
+:root[data-theme="dark"] .clipboard-panel h2 {
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .launcher-panel .muted,
+:root[data-theme="dark"] .clipboard-panel .muted {
+  color: #c6cad1;
+}
+
+:root[data-theme="dark"] .launcher-panel label,
+:root[data-theme="dark"] .clipboard-panel label,
+:root[data-theme="dark"] .launcher-panel .field-label,
+:root[data-theme="dark"] .clipboard-panel .field-label,
+:root[data-theme="dark"] .launcher-panel .inline-form,
+:root[data-theme="dark"] .clipboard-panel .inline-form {
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .launcher-panel .help,
+:root[data-theme="dark"] .clipboard-panel .help {
+  color: #b9bec7;
+}
+
+:root[data-theme="dark"] .launcher-panel select,
+:root[data-theme="dark"] .clipboard-panel select,
+:root[data-theme="dark"] .launcher-panel input[type="text"],
+:root[data-theme="dark"] .clipboard-panel input[type="text"] {
   color: #eceef1;
 }
 
@@ -543,13 +719,10 @@ input[type="color"] {
   flex-direction: column;
   padding: 16px 16px 10px;
   border-radius: 14px;
-  background: rgba(20, 21, 26, var(--folder-alpha, 0.72));
-  -webkit-backdrop-filter: blur(24px) saturate(1.25);
-  backdrop-filter: blur(24px) saturate(1.25);
+  background: rgba(16, 18, 26, max(0.92, var(--folder-alpha, 0.92)));
   border: 1px solid rgba(255, 255, 255, 0.11);
-  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.45), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
   color: #f2f3f5;
-  animation: panel-in 150ms ease-out;
 }
 
 @keyframes panel-in {
@@ -630,7 +803,6 @@ input[type="color"] {
   cursor: pointer;
   color: #f2f3f5;
   transition: background-color 100ms ease, border-color 100ms ease;
-  animation: tile-in 120ms ease-out;
 }
 
 @keyframes tile-in {
