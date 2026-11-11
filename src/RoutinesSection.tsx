@@ -443,11 +443,9 @@ export function RoutinesSection({
         </p>
       )}
       {routines && routines.length === 0 && !formOpen ? (
-        <p className="muted small">
-          No routines yet. A routine opens a set of apps and accounts with one
-          click or one keystroke. For example, "Morning" could open your work
-          email, your main chat account, and a dashboard.
-        </p>
+        // The panel intro above already explains what a routine is; the
+        // empty state only needs to say there are none yet.
+        <p className="muted small">No routines yet.</p>
       ) : (
         <ul style={{ listStyle: "none", padding: 0, margin: "0 0 8px" }}>
           {(routines ?? []).map((routine) => (
