@@ -1,15 +1,15 @@
 {
-  "version": "0.18.13",
-  "notes": "Add sites from search results with Ctrl+Shift+A, and popup permissions for every app in one panel.",
-  "pub_date": "2026-11-10T21:50:06Z",
+  "version": "0.18.14",
+  "notes": "AppMaka 0.18.14: panel fix, English-only small-model Whisper dictation, and an auto-allow permissions toggle (off by default), plus four-area hardening and audit glitch fixes — no memory-target drop on main-window hide, no folder-panel remount or blur, OAuth and about:blank popups allowed through the window-open guard, and thread-local popup-chrome subclassing.",
+  "pub_date": "2026-11-11T16:41:33Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2EwVHpSSzBLK3IvNUdYTmdqSjJQZktjdkhkQ1k3Tk9LdnpQQjQ2U3V5cGdFc3l3RnowbnFVdzZCRUprQXpRZVpWVTFHUlhNSUZBcmpQOXF1K01YaVFNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzQ3MDY5CWZpbGU6QXBwTWFrYV8wLjE4LjEzX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjEzCkQ4RFIvOGQ5ZUxzMmQwVlZzR3BVekFjajJGYWMvbEN2bGlRU0VTT0pHQkMrZGJ2NTUxdVAvc0lTdG5QblVGZXFNYkdMcUQ0VC9NMnh4WVUwR0FKTENRPT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.13/AppMaka_0.18.13_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1Z3WmVUcWJoOERIWGd6amx0RnNEVmhDVXFKSWxaYUdLWGlyVkVFV3FTOG9HcERDN2E0QURtTW9Ycklla2RiM0U3c1RCOXVmVGRlWXNmdUVaRHNlR3dvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDE0OTAxCWZpbGU6QXBwTWFrYV8wLjE4LjE0X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjE0Ckl4RWgrcXJiallNMmh6YmZFcm9FMXB4eWgyLzNEQ2dEczF6N1Z2OEg4VzduVWFtL2pIRFFPZ0xNUGZFbVR3b28rUFFnUU9QbHd1bDF5ZkRFenJrRUN3PT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.14/AppMaka_0.18.14_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1dOTEF1Q3RZYjVGczdDZVNVRDlXcHJPVVpLcm11cHk4RHA3aHoxZFdEUXF1TmZoQXYraHYzQ0NlNmpEVnNqZVpQZGpuWnFweitjWFBHS0hnWjJwQkFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MzQ3Mzg4CWZpbGU6QXBwTWFrYV8wLjE4LjEzX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4xMwp6UlcxZThOcG1rWHRiNStXZ3JNYXN0QkdtcTRNeEY4OHBITkxQWm93WHZJVTFqK1BqOUJscDJTaHp5RFkwMStTelNxeTNMcGRDZms1QkwzSVlxK0pCdz09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.13/AppMaka_0.18.13_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1JoQzY0TDhtL1BLTFAvY0kyNTU4bzRXdGFVam1OcHdkY2p1NmlMb3ZSRjE0dThpa0l2bWIrc2Vma0VpWFhJT1FXMlNsb3pRbFl4T004aEJ5dzltbXdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDE1MjQ2CWZpbGU6QXBwTWFrYV8wLjE4LjE0X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4xNAppYkZ6eTNOSk5ZRGxzZHMxckNPL2tnaWRqdlNtOXZNaGppNlczTEt0UWNwa2JYei8xNUJ2QUJNK0kyTjZ3YzZWbCtaZGJsa3dQNkptczVHdC9vMStCUT09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.14/AppMaka_0.18.14_amd64.AppImage"
     }
   }
 }
