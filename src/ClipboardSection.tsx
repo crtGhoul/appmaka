@@ -405,13 +405,13 @@ export function ClipboardSection() {
             <input
               type="radio"
               name="dictation-model"
-              checked={!dict || dict.model !== "base"}
+              checked={!dict || dict?.model === "tiny"}
               onChange={() => void chooseModel("tiny")}
               style={{ marginRight: 8 }}
             />
             Tiny — lightest download, good for clear speech
           </label>
-          <label style={{ display: "block", cursor: "pointer" }}>
+          <label style={{ display: "block", marginBottom: 6, cursor: "pointer" }}>
             <input
               type="radio"
               name="dictation-model"
@@ -421,13 +421,23 @@ export function ClipboardSection() {
             />
             Base — hears better, bigger download
           </label>
+          <label style={{ display: "block", cursor: "pointer" }}>
+            <input
+              type="radio"
+              name="dictation-model"
+              checked={dict?.model === "small"}
+              onChange={() => void chooseModel("small")}
+              style={{ marginRight: 8 }}
+            />
+            Small — hears better still, slower, about 470 MB download
+          </label>
         </div>
         {dict && !dict.ready ? (
           <div>
             <button onClick={() => void downloadDictation()} disabled={downloading}>
               {downloading
                 ? "Downloading…"
-                : `Download speech model (about ${dict.model === "base" ? "150" : "85"} MB)`}
+                : `Download speech model (about ${dict.model === "small" ? "470" : dict.model === "base" ? "150" : "85"} MB)`}
             </button>
             <p className="muted small" style={{ margin: "6px 0 0" }}>
               One-time download. Nothing is installed or loaded until this
