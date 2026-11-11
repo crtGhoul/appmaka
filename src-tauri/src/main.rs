@@ -1177,7 +1177,17 @@ fn build_tray(app: &mut tauri::App) -> Result<(), String> {
                 // deliberate quit, or the next launch would wrongly think
                 // the previous run crashed mid-restore (v0.9.7).
                 session::clear_restore_sentinel(app);
-                app.exit(0);
+                // v0.18.15: exit the process outright. app.exit(0) asks
+                // Tauri to close every window first, and the main window
+                // (plus clipboard/preview/popup windows) prevent_close
+                // unconditionally — so with any app window open the
+                // graceful exit never completes and the process stays
+                // alive (confirmed on the real PC: quit requested, session
+                // written, but the process had to be force-killed). The
+                // session is already saved and the sentinel cleared, so a
+                // direct process exit loses nothing and guarantees Quit
+                // actually quits.
+                std::process::exit(0);
             }
             _ => {}
         })
