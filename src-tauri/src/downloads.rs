@@ -496,9 +496,31 @@ fn plan_destination(
 
 /// v0.18.9: drive-by download gate. A download counts as user-initiated
 /// for this long after the last pointer/key gesture in the same window.
-/// Long enough for a slow server to answer a clicked download; the
-/// drive-bys this stops fire on page load, with no gesture at all.
-const GESTURE_WINDOW: Duration = Duration::from_secs(10);
+/// Three seconds: a real click on a real download link fires the
+/// download immediately (the request is already in flight), while the
+/// old 10s window let ad/redirect scripts on streaming sites wait out
+/// a Play click and then fire an unwanted download inside it.
+const GESTURE_WINDOW: Duration = Duration::from_secs(3);
+
+/// File extensions whose download from a `blob:`/`data:` URL is never
+/// legitimate without an explicit save: those URLs carry no origin to
+/// judge and no server filename, so an executable arriving that way is
+/// a drive-by payload. A real installer download comes from an
+/// https: URL (allowed with a gesture); a generated document (PDF,
+/// CSV) is not in this list.
+const EXECUTABLE_DOWNLOAD_EXTENSIONS: [&str; 19] = [
+    "exe", "msi", "bat", "cmd", "scr", "ps1", "psm1", "vbs", "vbe", "js", "jse", "jar", "apk",
+    "dmg", "pkg", "com", "pif", "cpl", "hta",
+];
+
+/// True when the suggested filename ends in an executable extension.
+fn is_executable_download(filename: &str) -> bool {
+    let ext = Path::new(filename)
+        .extension()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    EXECUTABLE_DOWNLOAD_EXTENSIONS.contains(&ext.as_str())
+}
 
 /// Contained-popup window labels never download legitimately — sign-in
 /// flows don't download files — so any download from one is a drive-by
@@ -513,13 +535,30 @@ const POPUP_LABEL_PREFIXES: [&str; 2] = ["popup-", "oauth-"];
 static LAST_DOWNLOAD_BLOCK_NOTICE_SECS: AtomicU64 = AtomicU64::new(0);
 
 /// Pure gate decision, unit-tested: popup windows never download, retries
-/// are exempt, anything else needs a recent gesture.
-fn download_block_reason(label: &str, is_retry: bool, gestured: bool) -> Option<&'static str> {
+/// are exempt, anything else needs a recent gesture. A `blob:`/`data:`
+/// executable is blocked even WITH a gesture — the gesture that armed
+/// it is usually the Play click on a streaming page, not a click on a
+/// download link — while retries (explicitly re-fired by the user from
+/// the download list) stay exempt.
+fn download_block_reason(
+    label: &str,
+    is_retry: bool,
+    gestured: bool,
+    url: &str,
+    filename: &str,
+) -> Option<&'static str> {
     if POPUP_LABEL_PREFIXES.iter().any(|p| label.starts_with(p)) {
         return Some("it came from a popup window");
     }
-    if !is_retry && !gestured {
-        return Some("no click started it");
+    if !is_retry {
+        if is_executable_download(filename)
+            && (url.starts_with("blob:") || url.starts_with("data:"))
+        {
+            return Some("it was an automatic executable download");
+        }
+        if !gestured {
+            return Some("no click started it");
+        }
     }
     None
 }
@@ -591,29 +630,6 @@ pub fn make_download_handler(
 ) -> impl Fn(Webview<tauri::Wry>, DownloadEvent<'_>) -> bool + Send + Sync + 'static {
     move |webview, event| match event {
         DownloadEvent::Requested { url, destination } => {
-            // Private windows: the file lands in the ephemeral session dir
-            // (deleted with the window) and is never recorded in history.
-            // No save dialog — the file is transient by design.
-            if let Some(pdir) = crate::windows::private_dir_for(&app, webview.label()) {
-                let suggested = sanitize_filename(
-                    &destination
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "download".to_string()),
-                );
-                let dest = pdir.join("downloads").join(&suggested);
-                if let Err(e) = fs::create_dir_all(dest.parent().unwrap_or(&pdir)) {
-                    eprintln!("[appmaka] private download dir failed: {e}");
-                    return false;
-                }
-                *destination = dest;
-                return true;
-            }
-            let Some(state) = app.try_state::<DownloadState>() else {
-                // DownloadState not managed yet; block rather than leak the
-                // file to the webview's default location.
-                return false;
-            };
             let url_str = url.as_str().to_string();
             // A retry re-fires through a hidden window whose label names
             // the entry it supersedes.
@@ -630,10 +646,13 @@ pub fn make_download_handler(
             );
 
             // v0.18.9: drive-by downloads. A download from a popup window
-            // is never legitimate, and a download with no recent gesture
-            // in this window wasn't started by the user. Retries are
-            // exempt — the retry window re-fires a download the user
-            // already asked for, and it never sees gestures.
+            // is never legitimate, a blob:/data: executable is never a
+            // link the user clicked, and a download with no recent
+            // gesture in this window wasn't started by the user. Retries
+            // are exempt — the retry window re-fires a download the user
+            // already asked for, and it never sees gestures. The gate
+            // runs BEFORE the private-window branch: private windows
+            // used to bypass it entirely.
             let is_retry = retry_of.is_some();
             let gestured = if is_retry {
                 true
@@ -642,10 +661,30 @@ pub fn make_download_handler(
                     .map(|g| g.recent(webview.label(), GESTURE_WINDOW))
                     .unwrap_or(false)
             };
-            if let Some(reason) = download_block_reason(webview.label(), is_retry, gestured) {
+            if let Some(reason) =
+                download_block_reason(webview.label(), is_retry, gestured, &url_str, &suggested)
+            {
                 notify_download_blocked(&app, &suggested, reason);
                 return false;
             }
+
+            // Private windows: the file lands in the ephemeral session dir
+            // (deleted with the window) and is never recorded in history.
+            // No save dialog — the file is transient by design.
+            if let Some(pdir) = crate::windows::private_dir_for(&app, webview.label()) {
+                let dest = pdir.join("downloads").join(&suggested);
+                if let Err(e) = fs::create_dir_all(dest.parent().unwrap_or(&pdir)) {
+                    eprintln!("[appmaka] private download dir failed: {e}");
+                    return false;
+                }
+                *destination = dest;
+                return true;
+            }
+            let Some(state) = app.try_state::<DownloadState>() else {
+                // DownloadState not managed yet; block rather than leak the
+                // file to the webview's default location.
+                return false;
+            };
 
             // Snapshot what the dialog needs, then release the lock: the
             // dialog is modal and must never run under our mutex.
@@ -1354,18 +1393,75 @@ mod tests {
 
     #[test]
     fn download_gate_blocks_popups_and_ungestured_downloads() {
+        let https_pdf = "https://example.com/report.pdf";
         // Popup windows never download legitimately.
-        assert!(download_block_reason("popup-3", false, true).is_some());
-        assert!(download_block_reason("oauth-1", true, true).is_some());
+        assert!(download_block_reason("popup-3", false, true, https_pdf, "a.pdf").is_some());
+        assert!(download_block_reason("oauth-1", true, true, https_pdf, "a.pdf").is_some());
         // No gesture, no retry: blocked.
-        assert!(download_block_reason("acct-x-y", false, false).is_some());
+        assert!(download_block_reason("acct-x-y", false, false, https_pdf, "a.pdf").is_some());
         // A recent gesture allows it.
-        assert!(download_block_reason("acct-x-y", false, true).is_none());
+        assert!(download_block_reason("acct-x-y", false, true, https_pdf, "a.pdf").is_none());
         // Retries re-fire a user-requested download: exempt even without
         // a gesture in the retry window.
-        assert!(download_block_reason("appmaka-retry-dl-1", true, false).is_none());
+        assert!(
+            download_block_reason("appmaka-retry-dl-1", true, false, https_pdf, "a.pdf").is_none()
+        );
         // Other windows are unaffected by the popup prefixes.
-        assert!(download_block_reason("tabbed-1", false, true).is_none());
+        assert!(download_block_reason("tabbed-1", false, true, https_pdf, "a.pdf").is_none());
+    }
+
+    #[test]
+    fn download_gate_blocks_blob_and_data_executables_even_with_a_gesture() {
+        // The Play-click drive-by: a real gesture armed the gate, then
+        // an ad script fired a blob:/data: executable inside the window.
+        let blob_exe = "blob:https://stream.example/550e8400-e29b-41d4-a716-446655440000";
+        assert!(
+            download_block_reason("acct-x-y", false, true, blob_exe, "player-update.exe")
+                .is_some()
+        );
+        assert!(
+            download_block_reason("acct-x-y", false, true, "data:application/octet-stream;base64,AAAA", "setup.msi")
+                .is_some()
+        );
+        // Extension check is case-insensitive.
+        assert!(
+            download_block_reason("acct-x-y", false, true, blob_exe, "Player-Update.EXE")
+                .is_some()
+        );
+        // Same blob URL, non-executable payload: a generated document
+        // the user asked for still downloads.
+        assert!(
+            download_block_reason("acct-x-y", false, true, blob_exe, "invoice.pdf").is_none()
+        );
+        // Same executable over https with a gesture: a real installer
+        // link the user clicked still downloads.
+        assert!(download_block_reason(
+            "acct-x-y",
+            false,
+            true,
+            "https://example.com/setup.exe",
+            "setup.exe"
+        )
+        .is_none());
+        // A retry of a blob executable (explicitly re-fired by the user
+        // from the download list) stays exempt.
+        assert!(
+            download_block_reason("appmaka-retry-dl-1", true, false, blob_exe, "setup.exe")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn executable_detection_matches_known_payloads_only() {
+        assert!(is_executable_download("setup.exe"));
+        assert!(is_executable_download("update.MSI"));
+        assert!(is_executable_download("run.bat"));
+        assert!(is_executable_download("app.apk"));
+        assert!(!is_executable_download("report.pdf"));
+        assert!(!is_executable_download("song.mp3"));
+        assert!(!is_executable_download("archive.zip"));
+        assert!(!is_executable_download("noextension"));
+        assert!(!is_executable_download("setup.exe.txt"));
     }
 
     #[test]

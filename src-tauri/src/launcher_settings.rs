@@ -22,9 +22,13 @@ pub const DEFAULT_HOTKEY: &str = "Alt+Space";
 /// Default translucency of the phone-folder launcher panel (matches the
 /// original hard-coded CSS value). The user can make it more solid in the
 /// launcher settings; 1.0 is fully opaque.
-pub const DEFAULT_PANEL_OPACITY: f32 = 0.55;
-/// Hard floor so the panel can never become unreadably faint.
-pub const MIN_PANEL_OPACITY: f32 = 0.3;
+pub const DEFAULT_PANEL_OPACITY: f32 = 0.92;
+/// Hard floor so the panel can never become unreadably faint. It matches
+/// the folder-panel CSS floor (App.css `max(0.92, var(--folder-alpha))`):
+/// the solid surface replaced the blur, so below 0.92 the text over a busy
+/// desktop is unreadable — and the slider must not offer values the panel
+/// ignores.
+pub const MIN_PANEL_OPACITY: f32 = 0.92;
 
 fn default_hotkey() -> String {
     DEFAULT_HOTKEY.to_string()
@@ -149,6 +153,15 @@ pub struct LauncherSettings {
     /// Old files migrate to false.
     #[serde(default)]
     pub allow_popups_globally: bool,
+    /// Auto-allow site permissions (v0.18.14): when true, sites in
+    /// any app window get microphone, camera, geolocation, and
+    /// notifications without asking. Everything else (file access,
+    /// automatic downloads, window management, ...) still follows
+    /// the platform default. Read live at permission time, so it
+    /// applies to already-open windows immediately. Old files
+    /// migrate to false.
+    #[serde(default)]
+    pub auto_allow_permissions: bool,
     /// Hide the top bar on app windows until the mouse touches the top
     /// edge (v0.18.7): the full-screen strip's reveal, extended to
     /// windowed windows. Windows-only (Linux keeps native decorations);
@@ -299,6 +312,7 @@ impl Default for LauncherSettings {
             custom_cursor: default_custom_cursor(),
             open_as_tabbed: false,
             allow_popups_globally: false,
+            auto_allow_permissions: false,
             auto_hide_top_bar: false,
             accent: default_accent(),
             theme: default_theme(),
@@ -464,7 +478,7 @@ pub fn set_hotkey(
     save(app, settings)
 }
 
-/// Set the launcher panel translucency (0.3..=1.0). Saved immediately so
+/// Set the launcher panel translucency (0.92..=1.0). Saved immediately so
 /// the choice survives restarts.
 pub fn set_panel_opacity(
     app: &AppHandle,
@@ -745,6 +759,53 @@ pub fn set_allow_popups_globally(
     settings.allow_popups_globally = enabled;
     save(&app, &settings)?;
     Ok(settings.clone())
+}
+
+/// Set the auto-allow site permissions toggle (v0.18.14). JS:
+/// `invoke("set_auto_allow_permissions", { enabled })`. No window
+/// broadcast needed: the permission handler reads the setting live
+/// on every request.
+#[tauri::command]
+pub fn set_auto_allow_permissions(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.auto_allow_permissions = enabled;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Decide a site permission request against the global auto-allow
+/// setting (v0.18.14), read live so the Settings switch applies to
+/// already-open windows immediately. Fail-closed: any trouble
+/// reading the setting means the platform default (prompt). Only
+/// microphone, camera, geolocation, and notifications are ever
+/// auto-allowed; file access, automatic downloads, window
+/// management, and everything else always fall through to the
+/// platform default.
+pub fn decide_permission(
+    webview: &tauri::Webview,
+    kind: tauri::webview::PermissionKind,
+) -> tauri::webview::PermissionResponse {
+    use tauri::webview::{PermissionKind, PermissionResponse};
+    let allowed = webview
+        .try_state::<Mutex<LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.auto_allow_permissions))
+        .unwrap_or(false);
+    if !allowed {
+        return PermissionResponse::Default;
+    }
+    match kind {
+        PermissionKind::Microphone
+        | PermissionKind::Camera
+        | PermissionKind::Geolocation
+        | PermissionKind::Notifications => PermissionResponse::Allow,
+        _ => PermissionResponse::Default,
+    }
 }
 
 /// Hide the top bar until the mouse touches the top edge (v0.18.7). JS:

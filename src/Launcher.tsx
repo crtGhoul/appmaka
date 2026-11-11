@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { evaluateExpression, formatCalcResult } from "./calc";
@@ -552,7 +552,7 @@ export function buildResults(
  * Accounts show their app's icon with the account label (and the app name
  * as a quiet sub-label); programs show their extracted .exe icon.
  */
-export function IconGrid({
+export const IconGrid = memo(function IconGrid({
   items,
   activeIndex,
   onHover,
@@ -610,8 +610,9 @@ export function IconGrid({
           role="option"
           aria-selected={i === activeIndex}
           className={`icon-tile${i === activeIndex ? " is-active" : ""}`}
-          style={{ animationDelay: `${Math.min(i, 10) * 14}ms` }}
-          onMouseEnter={() => onHover(i)}
+          onMouseEnter={() => {
+            if (i !== activeIndex) onHover(i);
+          }}
           onClick={() => onActivate(r)}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -672,7 +673,7 @@ export function IconGrid({
           {(() => {
             const title = playingFor?.(r);
             if (title == null) return null;
-            const short = title.length > 22 ? `${title.slice(0, 21)}…` : title;
+            const short = title.length > 26 ? `${title.slice(0, 25)}…` : title;
             return (
               <span
                 className="tile-now-playing"
@@ -781,7 +782,7 @@ export function IconGrid({
       ))}
     </div>
   );
-}
+});
 
 /**
  * v0.15.0: Ctrl+K quick-switch palette. Renders inside the launcher
@@ -1201,6 +1202,11 @@ export function LauncherSettingsPanel({
   const [allowPopupsGlobally, setAllowPopupsGlobally] = useState(
     settings.allow_popups_globally ?? false
   );
+  // v0.18.14: auto-allow site permissions (mic, camera, location,
+  // notifications) in every app window.
+  const [autoAllowPermissions, setAutoAllowPermissions] = useState(
+    settings.auto_allow_permissions ?? false
+  );
   // v0.18.7: hide the top bar until the mouse touches the top edge
   // (Windows only — Linux keeps native decorations).
   const [autoHideTopBar, setAutoHideTopBar] = useState(
@@ -1580,6 +1586,24 @@ export function LauncherSettingsPanel({
     }
   }
 
+  // v0.18.14: auto-allow site permissions — applies live, no reopen needed.
+  async function handleAutoAllowPermissions(enabled: boolean) {
+    setAutoAllowPermissions(enabled);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>(
+        "set_auto_allow_permissions",
+        { enabled }
+      );
+      onSaved(updated);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setAutoAllowPermissions(settings.auto_allow_permissions ?? false);
+    }
+  }
+
   // v0.18.7: hide the top bar until the mouse touches the top edge —
   // applies live to open windows, no reopen needed.
   async function handleAutoHideTopBar(enabled: boolean) {
@@ -1924,6 +1948,22 @@ export function LauncherSettingsPanel({
         </span>
       </label>
 
+      <label className="inline-form">
+        <span>Automatically allow site permissions</span>
+        <input
+          type="checkbox"
+          checked={autoAllowPermissions}
+          onChange={(e) => void handleAutoAllowPermissions(e.target.checked)}
+          aria-label="Automatically allow site permissions"
+        />
+        <span className="help">
+          Sites can use the microphone, camera, location, and
+          notifications in every app without asking first. Turn it off
+          and sites ask again. File access, downloads, and window
+          management are never auto-allowed.
+        </span>
+      </label>
+
       {isWindows && (
         <label className="inline-form">
           <span>Hide the top bar until the mouse reaches the top</span>
@@ -1947,7 +1987,7 @@ export function LauncherSettingsPanel({
         </span>
         <input
           type="range"
-          min={30}
+          min={92}
           max={100}
           step={1}
           value={opacity}

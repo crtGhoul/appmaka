@@ -562,9 +562,89 @@ pub fn cleanup_orphan_webview2_processes(_app: &AppHandle) -> usize {
     killed
 }
 
+/// Walk `pid`'s parent chain: true when `ancestor` is reached (a process
+/// counts as its own descendant here, so the check also covers the
+/// process itself). Bounded at 32 hops — the same cap
+/// `cleanup_orphan_webview2_processes` uses — so a corrupt parent cycle
+/// cannot spin forever. Pure over the snapshot: unit-testable without
+/// killing anything.
+fn is_descendant_of(
+    sys: &sysinfo::System,
+    pid: sysinfo::Pid,
+    ancestor: sysinfo::Pid,
+) -> bool {
+    if pid == ancestor {
+        return true;
+    }
+    let mut cur = sys.process(pid).and_then(|p| p.parent());
+    let mut depth = 0usize;
+    while let Some(p) = cur {
+        if p == ancestor {
+            return true;
+        }
+        cur = sys.process(p).and_then(|pp| pp.parent());
+        depth += 1;
+        if depth > 32 {
+            break;
+        }
+    }
+    false
+}
+
+/// Kill decision for one WebView2 process in the session sweep: a
+/// command-line match or an attribution hit marks it, but a live
+/// descendant of this process never qualifies — it belongs to a window
+/// this AppMaka instance owns (or is still shutting down after a close)
+/// and killing it would take down live UI. Split out so the rule is
+/// unit-testable without touching real processes.
+fn session_webview2_kill_candidate(
+    cmd_matches: bool,
+    is_attributed: bool,
+    is_live_descendant: bool,
+) -> bool {
+    (cmd_matches || is_attributed) && !is_live_descendant
+}
+
+/// True when `(app_id, account_id)` is in live use right now: its
+/// standalone window is open, or a live tab holds it, or a live split
+/// pane holds it. Mirrors `prepare_session_dir_for_open`'s guard and
+/// extends it to every tab in a live group (not just the active one)
+/// and to split panes — any of those owns a WebView2 process on this
+/// session dir, so nothing matching the session is an orphan.
+fn session_in_live_use(app: &AppHandle, app_id: &str, account_id: &str) -> bool {
+    if app
+        .get_webview_window(&account_window_label(app_id, account_id))
+        .is_some()
+    {
+        return true;
+    }
+    if crate::tabs::live_tab_groups(app).iter().any(|g| {
+        g.tabs
+            .iter()
+            .any(|t| t.app_id == app_id && t.account_id == account_id)
+    }) {
+        return true;
+    }
+    if let Some(splitstate) = app.try_state::<crate::split::SplitState>() {
+        if crate::split::group_with_account(&splitstate, app_id, account_id).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Terminate orphaned `msedgewebview2.exe` processes holding `session_dir`
 /// (or attributed to `(app_id, account_id)`) so a retry can create a fresh
 /// WebView2 environment with current browser arguments (v0.18.6 / v0.18.7).
+///
+/// Safety (v0.18.14): this must NEVER kill a WebView2 process owned by a
+/// live window. Before this fix the sweep below skipped only `self_pid`
+/// itself, so when a contained popup's build failed with `0x8007139F` the
+/// retry killed the *parent* window's live WebView2 process — same
+/// session dir, descendant of this process — and the parent died with it.
+/// Two guards now prevent that: a live window/tab/split pane using this
+/// session returns early (nothing matching it is an orphan), and every
+/// remaining candidate is skipped when it descends from this process.
 pub fn terminate_orphaned_webview2_for_session(
     app: &AppHandle,
     app_id: &str,
@@ -574,6 +654,13 @@ pub fn terminate_orphaned_webview2_for_session(
     use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System, UpdateKind};
 
     let mut killed = cleanup_orphan_webview2_processes(app);
+
+    // A live window, tab, or split pane owns this session's WebView2
+    // process. Nothing matching the session is an orphan; stop here
+    // rather than risking the parent that asked for the retry.
+    if session_in_live_use(app, app_id, account_id) {
+        return killed;
+    }
 
     let sys = System::new_with_specifics(
         RefreshKind::nothing().with_processes(
@@ -614,7 +701,18 @@ pub fn terminate_orphaned_webview2_for_session(
                 || (!tail_marker.is_empty() && norm.contains(&tail_marker))
         });
         let is_attributed = attributed_pids.contains(&pid.as_u32());
-        if (cmd_matches || is_attributed) && proc_.kill() {
+        // Live descendants are never candidates, even when their
+        // command line names this session: a window closed moments
+        // ago is still shutting its renderer down, and a live one
+        // must survive the retry.
+        if !session_webview2_kill_candidate(
+            cmd_matches,
+            is_attributed,
+            is_descendant_of(&sys, *pid, self_pid),
+        ) {
+            continue;
+        }
+        if proc_.kill() {
             killed += 1;
         }
     }
@@ -630,9 +728,18 @@ pub fn terminate_orphaned_webview2_for_session(
         let other_tab_open = crate::tabs::live_tab_groups(app)
             .iter()
             .any(|g| !g.tabs.is_empty());
-        if !other_account_open && !other_tab_open {
+        // Split panes are not in WindowState and have no tab group: a
+        // live split is a live window too, so its panes must survive.
+        let other_split_open = app
+            .try_state::<crate::split::SplitState>()
+            .map(|s| s.total_panes() > 0)
+            .unwrap_or(true);
+        if !other_account_open && !other_tab_open && !other_split_open {
             for (pid, proc_) in sys.processes() {
                 if *pid == self_pid {
+                    continue;
+                }
+                if is_descendant_of(&sys, *pid, self_pid) {
                     continue;
                 }
                 let name = proc_.name().to_string_lossy().to_ascii_lowercase();
@@ -1117,9 +1224,13 @@ pub fn open_account_placed(
     let shortcuts_js = shortcuts_overlay_js(app);
     let cursor_js = saved_cursor_js(app);
     let user_scripts = crate::userscripts::user_scripts_init_scripts(app, target_url.as_str());
-    let cosmetic_css = adblock.cosmetic_css_for(&web_app.url);
-    let scriptlets_js = adblock.scriptlet_js_for(&web_app.url);
+    let cosmetic_css = adblock.cosmetic_css_for(target_url.as_str());
+    let scriptlets_js = adblock.scriptlet_js_for(target_url.as_str());
     let yt_skipper_js = adblock.yt_ad_skipper_js().to_string();
+    // Shared live page URL for the network hook: seeded with the
+    // navigation target (last-visited URL when there is one), not the
+    // app's home URL, and kept current by on_navigation below.
+    let page_url = crate::adblock::new_page_url(target_url.as_str());
 
     // v0.18.6 / v0.18.7: Wrap WebView2 window creation in an unscoped
     // 6-second timeout thread (`std::thread::scope` would block forever on join
@@ -1143,6 +1254,8 @@ pub fn open_account_placed(
         let b_cosmetic_css = cosmetic_css.clone();
         let b_scriptlets_js = scriptlets_js.clone();
         let b_yt_skipper_js = yt_skipper_js.clone();
+        let b_page_url = page_url.clone();
+        let b_adblock = adblock.clone();
 
         std::thread::Builder::new()
             .name(format!("appmaka-build-{b_label}"))
@@ -1176,6 +1289,8 @@ pub fn open_account_placed(
                         let app = tint_app.clone();
                         let lbl = tint_label.clone();
                         let u = nav_url.clone();
+                        let nav_adblock = b_adblock.clone();
+                        let nav_page_url = b_page_url.clone();
                         std::thread::Builder::new()
                             .name(format!("appmaka-page-retint-{lbl}"))
                             .spawn(move || {
@@ -1186,6 +1301,9 @@ pub fn open_account_placed(
                                     crate::tint::TintTarget::PageStrip,
                                 );
                                 schedule_cursor_reapply(app.clone(), lbl.clone());
+                                reapply_adblock_on_navigation(
+                                    &app, &nav_adblock, &nav_page_url, &u, &lbl,
+                                );
                             })
                             .ok();
                         true
@@ -1195,15 +1313,28 @@ pub fn open_account_placed(
                 {
                     let nav_app = b_app.clone();
                     let nav_label = b_label.clone();
-                    builder = builder.on_navigation(move |_nav_url: &url::Url| {
+                    builder = builder.on_navigation(move |nav_url: &url::Url| {
+                        reapply_adblock_on_navigation(
+                            &nav_app,
+                            &b_adblock,
+                            &b_page_url,
+                            nav_url,
+                            &nav_label,
+                        );
                         schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
                         true
                     });
                 }
+                // Guard/adblock layers run in ALL frames: on Linux the
+                // plain init script is main-frame only, so an embedded
+                // player iframe would otherwise dodge the popup guard,
+                // the gesture reporter, and the cosmetic/scriptlet
+                // layers. On Windows wry injects every init script into
+                // subframes regardless, so this is a no-op there.
                 builder = builder
-                    .initialization_script(TARGET_BLANK_SHIM_JS)
-                    .initialization_script(b_guard_js)
-                    .initialization_script(GESTURE_REPORT_JS)
+                    .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
+                    .initialization_script_for_all_frames(b_guard_js)
+                    .initialization_script_for_all_frames(GESTURE_REPORT_JS)
                     .initialization_script(NAV_KEYS_JS)
                     .initialization_script(b_shortcuts_js);
                 if !b_cursor_js.is_empty() {
@@ -1213,12 +1344,14 @@ pub fn open_account_placed(
                     builder = builder.initialization_script(js);
                 }
                 if !b_cosmetic_css.is_empty() {
-                    builder = builder.initialization_script(cosmetic_init_script(&b_cosmetic_css));
+                    builder = builder.initialization_script_for_all_frames(
+                        cosmetic_init_script(&b_cosmetic_css),
+                    );
                 }
                 if !b_scriptlets_js.is_empty() {
-                    builder = builder.initialization_script(b_scriptlets_js);
+                    builder = builder.initialization_script_for_all_frames(b_scriptlets_js);
                 }
-                builder = builder.initialization_script(b_yt_skipper_js);
+                builder = builder.initialization_script_for_all_frames(b_yt_skipper_js);
                 {
                     let title_app = b_app.clone();
                     let title_label = b_label.clone();
@@ -1309,12 +1442,10 @@ pub fn open_account_placed(
     #[cfg(windows)]
     let _ = window.set_shadow(true);
     crate::caption::page_window_opened(app, &label, &window);
-    #[cfg(windows)]
-    win32_force_show_and_focus(&window);
     // v0.11.0: universal title-bar blending — tint the strip with the
     // site's color (theme-color meta → page background → default).
     #[cfg(windows)]
-    crate::tint::request_retint(app, &label, &page_url, crate::tint::TintTarget::PageStrip);
+    crate::tint::request_retint(app, &label, &target_url, crate::tint::TintTarget::PageStrip);
 
     // Per-account adblock override wins; None means "inherit the app setting"
     // (v0.8.1). This seeds the flag the Windows network blocker reads; the
@@ -1452,7 +1583,7 @@ pub fn open_account_placed(
     });
 
     #[cfg(windows)]
-    crate::adblock::attach_network_blocking(&window, adblock, adblock_flag, web_app.url.clone());
+    crate::adblock::attach_network_blocking(&window, adblock, adblock_flag, page_url);
     // v0.18.5: audio tracking for the idle guards (Windows only).
     #[cfg(windows)]
     attach_audio_tracking(&window, app);
@@ -1526,9 +1657,18 @@ pub(crate) fn open_split_pane_webview(
     let cursor_js = saved_cursor_js(app);
     let guard_js = window_open_guard_js(&web_app.settings.popup_allowlist);
     let user_scripts = crate::userscripts::user_scripts_init_scripts(app, target_url.as_str());
-    let cosmetic_css = adblock.cosmetic_css_for(&web_app.url);
-    let scriptlets_js = adblock.scriptlet_js_for(&web_app.url);
+    let cosmetic_css = adblock.cosmetic_css_for(target_url.as_str());
+    let scriptlets_js = adblock.scriptlet_js_for(target_url.as_str());
     let yt_skipper_js = adblock.yt_ad_skipper_js().to_string();
+    // Shared live page URL for the network hook (see open_account_placed).
+    let page_url = crate::adblock::new_page_url(target_url.as_str());
+    // Split panes have no tracked window entry, so the per-account
+    // override is read once here (same rule as account windows).
+    // Windows-only: the flag feeds the network hook.
+    #[cfg(windows)]
+    let adblock_flag = Arc::new(AtomicBool::new(
+        web_app.effective_adblock_enabled(account_id),
+    ));
 
     let build_once = || -> Result<Webview, String> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Webview, String>>(1);
@@ -1545,6 +1685,8 @@ pub(crate) fn open_split_pane_webview(
         let b_cosmetic_css = cosmetic_css.clone();
         let b_scriptlets_js = scriptlets_js.clone();
         let b_yt_skipper_js = yt_skipper_js.clone();
+        let b_page_url = page_url.clone();
+        let b_adblock = adblock.clone();
         let (bx, by, bw, bh) = bounds;
         std::thread::Builder::new()
             .name(format!("appmaka-build-{b_label}"))
@@ -1563,15 +1705,24 @@ pub(crate) fn open_split_pane_webview(
                 {
                     let nav_app = b_app.clone();
                     let nav_label = b_label.clone();
-                    builder = builder.on_navigation(move |_nav_url: &url::Url| {
+                    builder = builder.on_navigation(move |nav_url: &url::Url| {
+                        reapply_adblock_on_navigation(
+                            &nav_app,
+                            &b_adblock,
+                            &b_page_url,
+                            nav_url,
+                            &nav_label,
+                        );
                         schedule_cursor_reapply_webview(nav_app.clone(), nav_label.clone());
                         true
                     });
                 }
+                // Guard/adblock layers run in ALL frames (see the
+                // account-window builder for why).
                 builder = builder
-                    .initialization_script(TARGET_BLANK_SHIM_JS)
-                    .initialization_script(b_guard_js)
-                    .initialization_script(GESTURE_REPORT_JS)
+                    .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
+                    .initialization_script_for_all_frames(b_guard_js)
+                    .initialization_script_for_all_frames(GESTURE_REPORT_JS)
                     .initialization_script(NAV_KEYS_JS)
                     .initialization_script(b_shortcuts_js);
                 if !b_cursor_js.is_empty() {
@@ -1581,12 +1732,14 @@ pub(crate) fn open_split_pane_webview(
                     builder = builder.initialization_script(js);
                 }
                 if !b_cosmetic_css.is_empty() {
-                    builder = builder.initialization_script(cosmetic_init_script(&b_cosmetic_css));
+                    builder = builder.initialization_script_for_all_frames(
+                        cosmetic_init_script(&b_cosmetic_css),
+                    );
                 }
                 if !b_scriptlets_js.is_empty() {
-                    builder = builder.initialization_script(b_scriptlets_js);
+                    builder = builder.initialization_script_for_all_frames(b_scriptlets_js);
                 }
-                builder = builder.initialization_script(b_yt_skipper_js);
+                builder = builder.initialization_script_for_all_frames(b_yt_skipper_js);
                 let res = b_frame
                     .add_child(
                         builder,
@@ -1652,6 +1805,17 @@ pub(crate) fn open_split_pane_webview(
         app_id.to_string(),
         account_id.to_string(),
         pids_before,
+    );
+    // Network blocking for the pane: child webviews never got the
+    // WebResourceRequested hook before — ads/trackers in a split pane
+    // sailed through while the same account in its own window was
+    // blocked. Same shared engine, same per-account flag.
+    #[cfg(windows)]
+    crate::adblock::attach_network_blocking_webview(
+        &webview,
+        adblock,
+        adblock_flag,
+        page_url,
     );
     store.touch_account(app_id, account_id);
     crate::sleep::clear_sleep(app, app_id, account_id);
@@ -1738,11 +1902,88 @@ pub(crate) fn cosmetic_init_script(css: &str) -> String {
     let json_css = serde_json::to_string(css).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         "(function(){{try{{var css={json_css};\
+        var old=document.querySelectorAll('style[data-appmaka=\"cosmetic\"]');\
+        for(var i=0;i<old.length;i++){{old[i].remove();}}\
         var s=document.createElement('style');\
         s.setAttribute('data-appmaka','cosmetic');s.textContent=css;\
         var root=document.head||document.documentElement;\
         if(root){{root.appendChild(s);}}}}catch(e){{}}}})();"
     )
+}
+
+/// Re-inject domain-matched adblock layers after a navigation whose host
+/// changed (see `AdblockState::nav_refresh_js`). `on_navigation` fires
+/// at navigation *start*, before the new document exists, so an eval
+/// issued there would land in the outgoing document and be discarded:
+/// the refresh runs twice, once now (covers a same-document navigation
+/// that never commits a new document) and once after 600ms (covers the
+/// committed document). The bundle is idempotent — the cosmetic style
+/// replaces any previous one, the YouTube skipper guards on a window
+/// flag — so the double apply is harmless. Best-effort and silent: a
+/// missing window/webview just means the refresh is skipped.
+pub(crate) fn reapply_adblock_on_navigation(
+    app: &AppHandle,
+    adblock: &crate::adblock::AdblockState,
+    current: &crate::adblock::CurrentPageUrl,
+    url: &url::Url,
+    label: &str,
+) {
+    let Some(js) = adblock.nav_refresh_js(current, url) else {
+        return;
+    };
+    // One detached thread for both passes: on_navigation must never
+    // block on an eval round-trip.
+    let app = app.clone();
+    let label = label.to_string();
+    let _ = std::thread::Builder::new()
+        .name(format!("appmaka-adblock-refresh-{label}"))
+        .spawn(move || {
+            eval_adblock_refresh(&app, &label, &js);
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            eval_adblock_refresh(&app, &label, &js);
+        });
+}
+
+fn eval_adblock_refresh(app: &AppHandle, label: &str, js: &str) {
+    if let Some(window) = app.get_webview_window(label) {
+        let _ = window.eval(js);
+        return;
+    }
+    if let Some(webview) = app.get_webview(label) {
+        let _ = webview.eval(js);
+    }
+}
+
+/// Navigation refresh for windows built without an `AdblockState` in
+/// hand (contained popups): resolves the managed state live, so a
+/// popup built before the state exists still degrades to "no refresh"
+/// instead of failing the open.
+pub(crate) fn reapply_adblock_for_label(
+    app: &AppHandle,
+    current: &crate::adblock::CurrentPageUrl,
+    url: &url::Url,
+    label: &str,
+) {
+    let Some(adblock) = app.try_state::<crate::adblock::AdblockState>() else {
+        return;
+    };
+    reapply_adblock_on_navigation(app, &adblock, current, url, label);
+}
+
+/// The adblock flag a contained popup inherits: the parent window's
+/// per-account flag when the parent is a tracked account window, else
+/// on. Popups must respect the account's adblock setting instead of
+/// silently re-enabling blocking the user turned off. Windows-only:
+/// the flag feeds the network hook, which only exists there.
+#[cfg(windows)]
+pub(crate) fn adblock_flag_for_parent(app: &AppHandle, parent_label: &str) -> Arc<AtomicBool> {
+    app.try_state::<WindowState>()
+        .and_then(|s| {
+            s.inner.lock().ok().and_then(|m| {
+                m.get(parent_label).map(|t| t.adblock_enabled.clone())
+            })
+        })
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(true)))
 }
 
 /// Custom page cursor (v0.12.0): a page-drawn pointer for app windows.
@@ -1906,29 +2147,40 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       if (window.__appmakaCursor.style === IDENT) return;
       try {{ window.__appmakaCursor.destroy(); }} catch (e) {{}}
     }}
-    // The cursor:none style. initialization_script runs before <head>
-    // exists, so target <html> first and re-inject into <head> once
-    // available so page stylesheets can't override us. The CALL is
-    // deferred until the dots exist (below): this style used to be
-    // injected first, and any failure after it left the native cursor
-    // hidden with no drawn replacement — no cursor at all.
+    // The cursor:none style, scoped to the html attribute below: the
+    // native cursor is hidden only while the drawn one is actually
+    // showing (pointer inside, page visible, nothing fullscreen).
+    // Unconditional cursor:none used to hide the OS cursor over
+    // fullscreen video and modal dialogs, which paint above the drawn
+    // dots — no cursor at all. See syncNativeCursorSuppression.
     function injectStyle() {{
       if (document.querySelector("[data-appmaka=cursor]")) return;
       var s = document.createElement("style");
       s.setAttribute("data-appmaka", "cursor");
       s.textContent =
-        "*,*::before,*::after,html,body,:root{{cursor:none!important}}" +
+        "html[data-appmaka-cursor-on='1'],html[data-appmaka-cursor-on='1'] *,html[data-appmaka-cursor-on='1'] *::before,html[data-appmaka-cursor-on='1'] *::after{{cursor:none!important}}" +
         // Frame boxes keep the native cursor: over an embed the top
         // document receives no mousemove at all, so suppressing the
         // native cursor there leaves no visible pointer, and the
         // drawn dot sits parked at the frame's edge. The iframe type
-        // selector outranks the universal rule above.
+        // selector outranks the rule above.
         "iframe{{cursor:auto!important}}";
       (document.head || document.documentElement).appendChild(s);
+    }}
+    // Gate for the style above: set the attribute only while the
+    // pointer is inside, the page is visible, and nothing is
+    // fullscreen. Called from showAt / onLeave / fullscreenchange.
+    function syncNativeCursorSuppression() {{
+      if (inside && !document.fullscreenElement && !document.hidden) {{
+        document.documentElement.setAttribute("data-appmaka-cursor-on", "1");
+      }} else {{
+        document.documentElement.removeAttribute("data-appmaka-cursor-on");
+      }}
     }}
     // Rollback helper: removes everything we injected so the native
     // cursor comes back. Used by destroy() and by the failure path.
     function removeChrome() {{
+      document.documentElement.removeAttribute("data-appmaka-cursor-on");
       var junk = document.querySelectorAll("[data-appmaka=cursor],[data-appmaka=cursor-dot]");
       for (var i = 0; i < junk.length; i++) junk[i].remove();
     }}
@@ -2018,6 +2270,8 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
           nodes[i].el.style.opacity = nodes[i].o;
         }}
       }}
+      syncNativeCursorSuppression();
+      scheduleFrame();
     }}
 
     // mousemove is the primary tracker.
@@ -2029,6 +2283,7 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
     function onLeave() {{
       inside = false;
       for (var i = 0; i < nodes.length; i++) nodes[i].el.style.opacity = 0;
+      syncNativeCursorSuppression();
     }}
     document.addEventListener("mousemove", onMove, {{ passive: true }});
     window.addEventListener("mouseenter", onEnter, {{ passive: true }});
@@ -2037,17 +2292,32 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
     // moves to another window or the native caption strip): without a
     // second net the dots would sit frozen at their last position.
     window.addEventListener("blur", onLeave);
+    // Fullscreen (video, or a modal <dialog>) paints above the drawn
+    // dots: the native cursor must come back while it is showing.
+    function onFullscreenChange() {{ syncNativeCursorSuppression(); }}
+    document.addEventListener("fullscreenchange", onFullscreenChange);
 
     // One rAF loop: head snaps, followers lerp (trail effect).
     // transform-only — no layout, no paint beyond the dot elements.
-    // While the pointer is out the dots are invisible (onLeave zeroed
-    // their opacity), so the loop re-queues without writing anything:
-    // an idle page must not pay per-frame style writes.
-    (function frame() {{
+    // The loop STOPS instead of re-queuing when the pointer is out,
+    // the page is hidden or fullscreen, or every non-animated dot has
+    // converged on its target (within 0.25px): an idle page must not
+    // pay per-frame style writes. The next mousemove re-arms it via
+    // scheduleFrame in showAt. Time-based styles (orbit, bubbles,
+    // pulse, ripple, stardust) never settle by construction, so they
+    // keep the loop alive while the pointer is inside.
+    var ANIMATED = ["orbit", "bubbles", "pulse", "ripple", "stardust"];
+    function scheduleFrame() {{
+      if (rafId !== 0) return;
+      rafId = requestAnimationFrame(frame);
+    }}
+    function frame() {{
+      rafId = 0;
       if (dead) return;
-      if (!inside) {{ rafId = requestAnimationFrame(frame); return; }}
+      if (!inside || document.fullscreenElement || document.hidden) return;
       var now = performance.now();
       var px = tx, py = ty;
+      var settled = true;
       for (var i = 0; i < nodes.length; i++) {{
         var n = nodes[i];
         if (i === 0) {{
@@ -2070,9 +2340,13 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
         }}
         else if (STYLE === "snake") {{
           // A lazier lerp than trail — the body swings wide (v0.16.0).
+          if (Math.abs(px - n.x) >= 0.25 || Math.abs(py - n.y) >= 0.25) settled = false;
           n.x += (px - n.x) * 0.22; n.y += (py - n.y) * 0.22;
         }}
-        else {{ n.x += (px - n.x) * 0.4; n.y += (py - n.y) * 0.4; }}
+        else {{
+          if (Math.abs(px - n.x) >= 0.25 || Math.abs(py - n.y) >= 0.25) settled = false;
+          n.x += (px - n.x) * 0.4; n.y += (py - n.y) * 0.4;
+        }}
         var tr = "translate(" + n.x + "px," + n.y + "px)";
         if (i === 0 && STYLE === "pulse") {{
           tr += " scale(" + (1 + 0.16 * Math.sin(now / 260)).toFixed(3) + ")";
@@ -2085,8 +2359,11 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
         n.el.style.transform = tr;
         px = n.x; py = n.y;
       }}
-      rafId = requestAnimationFrame(frame);
-    }})();
+      // Re-queue only while something still moves: time-based styles
+      // never settle, so they keep running while the pointer is in.
+      if (!settled || ANIMATED.indexOf(STYLE) !== -1) scheduleFrame();
+    }}
+    scheduleFrame();
 
     function destroy() {{
       dead = true;
@@ -2096,6 +2373,7 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       window.removeEventListener("mouseenter", onEnter);
       document.removeEventListener("mouseleave", onLeave);
       window.removeEventListener("blur", onLeave);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
       if (obs) obs.disconnect();
       removeChrome();
       if (window.__appmakaCursor && window.__appmakaCursor.style === IDENT) {{
@@ -2218,20 +2496,31 @@ pub(crate) fn apply_cursor_live(app: &AppHandle, style: &str) {
 /// Re-apply the *current* saved cursor style shortly after a
 /// navigation. A window built before a settings change re-runs its
 /// build-time initialization script (old style) on every navigation;
-/// this converges it to the saved style. Passes at widening delays,
+/// this converges it to the saved style. Two passes (600ms, 2.5s),
 /// because an eval that lands before the new document commits is
 /// discarded with the old one — the same-style guard in the script
-/// makes a redundant pass a no-op. Later passes cover slow commits
-/// (VPN, consent interstitials); the final 9s pass (v0.16.3) catches
-/// the slowest. Called from the
+/// makes a redundant pass a no-op. The later pass covers slow commits
+/// (VPN, consent interstitials). Called from the
 /// navigation hooks and from the search window's reuse path (all
 /// platforms). Never blocks the caller: everything here runs on a
 /// detached thread.
 pub(crate) fn schedule_cursor_reapply(app: AppHandle, label: String) {
+    // Off by default ("off" is the default cursor, launcher_settings):
+    // don't spawn a thread that evals into a page that never shows a
+    // custom cursor. A mid-flight off→dot settings change skips
+    // reapply for that one navigation only; the next navigation
+    // re-applies.
+    let style = app
+        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
+        .unwrap_or_default();
+    if style.is_empty() || style == "off" {
+        return;
+    }
     let _ = std::thread::Builder::new()
         .name("appmaka-cursor-reapply".to_string())
         .spawn(move || {
-            for delay_ms in [600, 2000, 4000, 9000] {
+            for delay_ms in [600, 2500] {
                 std::thread::sleep(Duration::from_millis(delay_ms));
                 let style = app
                     .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
@@ -2248,13 +2537,20 @@ pub(crate) fn schedule_cursor_reapply(app: AppHandle, label: String) {
 
 /// Split-pane twin of `schedule_cursor_reapply`: panes are child
 /// webviews, so the lookup is `get_webview`, not `get_webview_window`.
-/// Same widening delays, same detached thread, same early return when
-/// the pane is gone.
+/// Same two delays, same detached thread, same early return when
+/// the pane is gone. Same off-guard: no thread when the cursor is off.
 pub(crate) fn schedule_cursor_reapply_webview(app: AppHandle, label: String) {
+    let style = app
+        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.custom_cursor.clone()))
+        .unwrap_or_default();
+    if style.is_empty() || style == "off" {
+        return;
+    }
     let _ = std::thread::Builder::new()
         .name("appmaka-cursor-reapply".to_string())
         .spawn(move || {
-            for delay_ms in [600, 2000, 4000, 9000] {
+            for delay_ms in [600, 2500] {
                 std::thread::sleep(Duration::from_millis(delay_ms));
                 let style = app
                     .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
@@ -2377,6 +2673,22 @@ pub(crate) const TARGET_BLANK_SHIM_JS: &str = r#"(function () {
     var t = e.target;
     var a = (t && t.closest) ? t.closest('a[target="_blank"]') : null;
     if (!a || !a.href) return;
+    // Synthetic clicks (a.click() from page JS, ad overlays building
+    // and clicking hidden links) never open a popup here unless the
+    // link points at a sign-in host the guard itself allowlists — the
+    // clickjacked-overlay drive-by is exactly a scripted click on a
+    // hidden _blank link. Real user clicks always go through
+    // window.open, which gets the same policy/allowlist treatment.
+    if (!e.isTrusted) {
+      try {
+        var host = new URL(a.href, location.href).hostname.toLowerCase();
+        if (window.__appmakaAllowHosts && window.__appmakaAllowHosts.indexOf(host) === -1) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      } catch (err) { e.preventDefault(); e.stopPropagation(); return; }
+    }
     e.preventDefault();
     e.stopPropagation();
     window.open(a.href, '_blank');
@@ -2393,7 +2705,12 @@ pub(crate) const TARGET_BLANK_SHIM_JS: &str = r#"(function () {
 /// download gate fails closed for that window.
 pub(crate) const GESTURE_REPORT_JS: &str = r#"(function () {
   var last = 0;
-  function note() {
+  function note(e) {
+    // Only real user input counts: a page script dispatching a
+    // synthetic pointerdown/keydown used to arm the download gate
+    // for itself and then fire a drive-by download inside the
+    // gesture window. Synthetic events have isTrusted === false.
+    if (e && e.isTrusted === false) return;
     var now = Date.now();
     // Observable marker (set before the throttle): the E2E driver reads
     // this to tell a fired listener apart from a failed invoke.
@@ -2417,20 +2734,55 @@ pub(crate) const GESTURE_REPORT_JS: &str = r#"(function () {
 /// or for a sign-in allowlist host, and returns null otherwise. Gesture
 /// calls fall through to the popup handler for the policy decision, so
 /// the target=_blank shim keeps working.
+///
+/// Hardened (Area 3): `userActivation.isActive` alone stays live for up
+/// to ~5s after a click in Chromium, so a Play-click drive-by could
+/// still fire a timer popup inside that window. The guard additionally
+/// requires a *trusted* pointerdown/keydown seen by this script within
+/// the last 2500ms (synthetic events dispatched by page JS have
+/// `isTrusted === false` and never arm it), and it refuses
+/// `javascript:`/`data:` targets outright. The allowlist is also
+/// published as `window.__appmakaAllowHosts` so the target=_blank shim
+/// can drop scripted clicks on non-sign-in hosts.
 pub(crate) fn window_open_guard_js(allowlist: &[String]) -> String {
     let hosts = serde_json::to_string(allowlist).unwrap_or_else(|_| "[]".to_string());
     format!(
         r#"(function () {{
   var origOpen = window.open;
   var allowHosts = {hosts};
+  window.__appmakaAllowHosts = allowHosts;
+  // Built-in sign-in hosts (same list as is_builtin_oauth_host in
+  // Rust): async OAuth popups to these IdPs open even without a
+  // pre-typed allowlist entry. Subdomains match.
+  var oauthSuffixes = ['accounts.google.com', 'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com', 'github.com', 'auth0.com', 'okta.com', 'id.atlassian.com'];
+  function hostAllowed(h) {{
+    if (allowHosts.indexOf(h) !== -1) return true;
+    for (var i = 0; i < oauthSuffixes.length; i++) {{
+      var s = oauthSuffixes[i];
+      if (h === s || h.endsWith('.' + s)) return true;
+    }}
+    return false;
+  }}
+  var lastTrustedGesture = 0;
+  function markGesture(e) {{
+    if (e && e.isTrusted === false) return;
+    lastTrustedGesture = Date.now();
+  }}
+  document.addEventListener('pointerdown', markGesture, true);
+  document.addEventListener('keydown', markGesture, true);
   window.open = function (url) {{
     try {{
-      var activation = window.navigator.userActivation;
-      if (activation && activation.isActive) return origOpen.apply(window, arguments);
       if (url) {{
-        var host = new URL(url, location.href).hostname.toLowerCase();
-        if (allowHosts.indexOf(host) !== -1) return origOpen.apply(window, arguments);
+        var parsed = new URL(url, location.href);
+        var scheme = parsed.protocol.toLowerCase();
+        if (scheme === 'javascript:' || scheme === 'data:') return null;
+        var host = parsed.hostname.toLowerCase();
+        if (hostAllowed(host)) return origOpen.apply(window, arguments);
       }}
+      var recentGesture = (Date.now() - lastTrustedGesture) < 2500;
+      var activation = window.navigator.userActivation;
+      if (recentGesture && activation && activation.isActive) return origOpen.apply(window, arguments);
+      if (recentGesture && !activation) return origOpen.apply(window, arguments);
     }} catch (e) {{}}
     return null;
   }};
@@ -2660,7 +3012,12 @@ fn attach_popup_lifecycle_trace(app: &AppHandle, window: &tauri::WebviewWindow, 
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 log_popup_lifecycle(&log_app, &log_label, "close-requested");
-                crate::popup_bar::close_popup_async(&log_app, &log_label);
+                // Teardown is owned once by main.rs's CloseRequested
+                // handler — no duplicate close_popup_async here.
+            }
+            tauri::WindowEvent::Focused(true) => {
+                #[cfg(windows)]
+                focus_webview(&log_app, &log_label);
             }
             tauri::WindowEvent::Destroyed => {
                 log_popup_lifecycle(&log_app, &log_label, "destroyed");
@@ -2669,6 +3026,27 @@ fn attach_popup_lifecycle_trace(app: &AppHandle, window: &tauri::WebviewWindow, 
             _ => {}
         }
     });
+}
+
+/// Built-in sign-in hosts: popups to these IdPs open as contained oauth
+/// modals even with the default `block` policy and an empty allowlist —
+/// the user shouldn't have to pre-type Google/Microsoft into Settings
+/// to sign in. Subdomains match (login.microsoftonline.com serves
+/// tenant hosts). The popup stays contained, not a full browser window.
+fn is_builtin_oauth_host(host: &str) -> bool {
+    const OAUTH_HOSTS: [&str; 8] = [
+        "accounts.google.com",
+        "login.microsoftonline.com",
+        "login.live.com",
+        "appleid.apple.com",
+        "github.com",
+        "auth0.com",
+        "okta.com",
+        "id.atlassian.com",
+    ];
+    OAUTH_HOSTS
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
 }
 
 pub(crate) fn make_popup_handler(
@@ -2684,12 +3062,21 @@ pub(crate) fn make_popup_handler(
         ) {
             open_contained(&ctx, "popup", &url, &features)
         } else {
-            // "block": only allowlisted hosts get a contained popup.
+            // "block": only allowlisted hosts get a contained popup —
+            // plus blank popups (about:blank, opened then navigated by
+            // the SDK) and the built-in sign-in hosts. The popup is
+            // still a contained oauth modal, not a full browser window,
+            // and the page's own window.open guard still gates
+            // non-gestured opens.
+            if url.as_str() == "about:blank" || url.scheme() == "about" {
+                return open_contained(&ctx, "oauth", &url, &features);
+            }
             let host = url.host_str().unwrap_or("").to_lowercase();
             if ctx
                 .popup_allowlist
                 .iter()
                 .any(|h| h.eq_ignore_ascii_case(&host))
+                || is_builtin_oauth_host(&host)
             {
                 open_contained(&ctx, "oauth", &url, &features)
             } else {
@@ -2728,17 +3115,29 @@ fn open_contained(
     url: &url::Url,
     features: &tauri::webview::NewWindowFeatures,
 ) -> tauri::webview::NewWindowResponse<tauri::Wry> {
+    // Synchronous build first (Windows only): it honors the size/position
+    // the page asked for and keeps the opener relationship (window.open
+    // gets a live window). It runs inside the WebView2 new-window callback,
+    // so a failure here (notably 0x8007139F when environment creation
+    // collides with the parent's) must NOT log yet — the threaded fallback
+    // below usually succeeds, and logging here would pair every transient
+    // failure with a duplicate "window-open" record. The first error is
+    // carried into the fallback instead, so at most one record is ever
+    // written, and only if both attempts fail.
     #[cfg(windows)]
-    {
-        if let Some(window) = build_contained_window(ctx, kind, url, features) {
+    let first_err = match build_contained_window(ctx, kind, url, features) {
+        Ok(window) => {
             return tauri::webview::NewWindowResponse::Create { window };
         }
-    }
+        Err(e) => Some(e),
+    };
+    #[cfg(not(windows))]
+    let first_err: Option<String> = None;
     #[cfg(not(windows))]
     let _ = features;
     match kind {
-        "oauth" => spawn_oauth_modal(ctx, url),
-        _ => spawn_popup_window(ctx, url),
+        "oauth" => spawn_oauth_modal(ctx, url, first_err),
+        _ => spawn_popup_window(ctx, url, first_err),
     }
     tauri::webview::NewWindowResponse::Deny
 }
@@ -2758,7 +3157,7 @@ fn build_contained_window(
     kind: &str,
     url: &url::Url,
     features: &tauri::webview::NewWindowFeatures,
-) -> Option<tauri::WebviewWindow> {
+) -> Result<tauri::WebviewWindow, String> {
     let n = OAUTH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let label = format!("{kind}-{n}");
     let title = if kind == "oauth" {
@@ -2779,6 +3178,25 @@ fn build_contained_window(
     // This window exists because a popup was allowed; its own popups
     // are the next hop of the same flow (chain trust).
     nested_ctx.chain_allowed = true;
+    // Contained popups used to get NO adblock layers at all — no
+    // network hook, no cosmetic CSS, no scriptlets, no popup guard —
+    // so a redirect/ad popup was the least-protected window in the
+    // app. Same kit as account windows, seeded from the popup's URL.
+    let popup_guard_js = window_open_guard_js(&ctx.popup_allowlist);
+    let popup_adblock = ctx.app.try_state::<AdblockState>();
+    let popup_cosmetic_css = popup_adblock
+        .as_ref()
+        .map(|s| s.cosmetic_css_for(url.as_str()))
+        .unwrap_or_default();
+    let popup_scriptlets_js = popup_adblock
+        .as_ref()
+        .map(|s| s.scriptlet_js_for(url.as_str()))
+        .unwrap_or_default();
+    let popup_yt_skipper_js = popup_adblock
+        .as_ref()
+        .map(|s| s.yt_ad_skipper_js().to_string())
+        .unwrap_or_default();
+    let popup_page_url = crate::adblock::new_page_url(url.as_str());
     let mut builder = WebviewWindowBuilder::new(&ctx.app, &label, WebviewUrl::External(url.clone()))
         .data_directory(ctx.session_dir.clone())
         .title(&title)
@@ -2800,6 +3218,22 @@ fn build_contained_window(
     if !cursor_js.is_empty() {
         builder = builder.initialization_script(cursor_js);
     }
+    // Guard + cosmetic + scriptlets + skipper, all-frames (see the
+    // account-window builder). No gesture reporter: popup downloads
+    // are blocked by label regardless, so there is nothing to arm.
+    builder = builder
+        .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
+        .initialization_script_for_all_frames(popup_guard_js);
+    if !popup_cosmetic_css.is_empty() {
+        builder = builder
+            .initialization_script_for_all_frames(cosmetic_init_script(&popup_cosmetic_css));
+    }
+    if !popup_scriptlets_js.is_empty() {
+        builder = builder.initialization_script_for_all_frames(popup_scriptlets_js);
+    }
+    if !popup_yt_skipper_js.is_empty() {
+        builder = builder.initialization_script_for_all_frames(popup_yt_skipper_js);
+    }
     // Placement: where the page asked, else centered over the window
     // that opened it — the popup lands on the user's actual screen, not
     // blindly on the primary monitor.
@@ -2810,18 +3244,27 @@ fn build_contained_window(
     } else {
         builder = builder.center();
     }
-    if kind == "popup" {
+    // Both kinds refresh adblock layers on navigation (a sign-in hop
+    // changes host just like any other navigation); only "popup" gets
+    // the caption retint.
+    {
         let nav_app = ctx.app.clone();
         let nav_label = label.clone();
+        let nav_page_url = popup_page_url.clone();
+        let nav_is_popup = kind == "popup";
         builder = builder.on_navigation(move |nav_url: &url::Url| {
             let app = nav_app.clone();
             let lbl = nav_label.clone();
             let u = nav_url.clone();
+            let page_url = nav_page_url.clone();
             std::thread::Builder::new()
                 .name(format!("appmaka-popup-retint-{lbl}"))
                 .spawn(move || {
-                    crate::popup_chrome::tint_popup_caption(&app, &lbl, &u);
+                    if nav_is_popup {
+                        crate::popup_chrome::tint_popup_caption(&app, &lbl, &u);
+                    }
                     schedule_cursor_reapply(app.clone(), lbl.clone());
+                    reapply_adblock_for_label(&app, &page_url, &u, &lbl);
                 })
                 .ok();
             true
@@ -2830,11 +3273,37 @@ fn build_contained_window(
     match builder.build() {
         Ok(window) => {
             ensure_on_visible_monitor(&ctx.app, &window);
+            // Network blocking, inheriting the parent account's flag:
+            // without this the popup's subresource requests bypassed
+            // the engine entirely.
+            #[cfg(windows)]
+            if let Some(adblock) = ctx.app.try_state::<AdblockState>() {
+                crate::adblock::attach_network_blocking(
+                    &window,
+                    &adblock,
+                    adblock_flag_for_parent(&ctx.app, &ctx.parent_label),
+                    popup_page_url,
+                );
+            }
             if kind == "popup" {
                 crate::popup_chrome::setup_popup_chrome(&ctx.app, &window, &label, url);
                 // v0.18.7: visible "Save as app" button docked under
                 // the popup (the system-menu item is easy to miss).
-                crate::popup_bar::attach_popup_bar(&ctx.app, &window, &label);
+                // Deferred 80ms off the NewWindowRequested deferral:
+                // building the bar synchronously here held the popup
+                // open path. The liveness check is load-bearing: if
+                // the popup closed within 80ms, no orphan bar is built.
+                let bar_app = ctx.app.clone();
+                let popup_label = label.clone();
+                std::thread::Builder::new()
+                    .name(format!("appmaka-popup-bar-{popup_label}"))
+                    .spawn(move || {
+                        std::thread::sleep(Duration::from_millis(80));
+                        if let Some(popup) = bar_app.get_webview_window(&popup_label) {
+                            crate::popup_bar::attach_popup_bar(&bar_app, &popup, &popup_label);
+                        }
+                    })
+                    .ok();
             }
             // Close-lifecycle trace (see log_popup_lifecycle): a popup
             // that never logs "destroyed" after its close is the zombie.
@@ -2843,21 +3312,16 @@ fn build_contained_window(
             // v0.13.18: page-requested fullscreen works in popups too.
             #[cfg(windows)]
             attach_fullscreen_sync(&window);
-            Some(window)
+            Ok(window)
         }
         Err(e) => {
-            // Log it, but no dialog: open_contained falls back to the
-            // spawned builder when this returns None, and that usually
-            // succeeds — a "could not open" dialog in front of a popup
-            // that did open is a false alarm.
-            crate::errors::record(
-                &ctx.app,
-                "window-open",
-                &format!("Could not open the {kind} window."),
-                &format!("{kind} window failed for {}/{}: {e}", ctx.app_id, ctx.account_id),
-                false,
-            );
-            None
+            // No record here: open_contained falls back to the threaded
+            // builder, which usually succeeds, and that path writes the
+            // single "window-open" record if it fails too (carrying this
+            // error with it). Recording here would pair every transient
+            // in-handler failure — e.g. 0x8007139F from WebView2
+            // environment creation racing the parent — with a duplicate.
+            Err(format!("{kind} window failed for {}/{}: {e}", ctx.app_id, ctx.account_id))
         }
     }
 }
@@ -2935,24 +3399,24 @@ fn app_origin(app_url: &str) -> String {
 /// until the user closes it. (The old code routed "allow" popups through
 /// the OAuth modal, whose auto-close script killed same-origin popups
 /// within ~1.5 s — the "popups don't open even on Allow" bug.)
-pub(crate) fn spawn_popup_window(ctx: &PopupContext, url: &url::Url) {
+pub(crate) fn spawn_popup_window(ctx: &PopupContext, url: &url::Url, first_err: Option<String>) {
     let title = format!("{} — popup", ctx.app_name);
     let mut nested_ctx = ctx.clone();
     nested_ctx.chain_allowed = true;
-    spawn_contained_window("popup", url, &title, None, "popup", nested_ctx);
+    spawn_contained_window("popup", url, &title, None, "popup", nested_ctx, first_err);
 }
 
 /// Open an allowlisted popup as a small modal bound to the SAME session
 /// directory, so an OAuth login lands in the right account's cookie jar.
 /// The modal self-closes (best-effort) when navigation returns to the app's
 /// origin; the user can always close it by hand.
-fn spawn_oauth_modal(ctx: &PopupContext, url: &url::Url) {
+fn spawn_oauth_modal(ctx: &PopupContext, url: &url::Url, first_err: Option<String>) {
     let autoclose = oauth_autoclose_script(&app_origin(&ctx.app_url));
     let title = format!("{} — sign-in", ctx.app_name);
     let log_ctx = format!("{}/{}", ctx.app_id, ctx.account_id);
     let mut nested_ctx = ctx.clone();
     nested_ctx.chain_allowed = true;
-    spawn_contained_window("oauth", url, &title, Some(autoclose), &log_ctx, nested_ctx);
+    spawn_contained_window("oauth", url, &title, Some(autoclose), &log_ctx, nested_ctx, first_err);
 }
 
 /// Shared contained-window builder for popups and OAuth modals.
@@ -2961,11 +3425,12 @@ fn spawn_oauth_modal(ctx: &PopupContext, url: &url::Url) {
 /// frontend bundle, and `withGlobalTauri` is false crate-wide, so no Tauri
 /// IPC (`window.__TAURI__`) is ever injected into them — they cannot invoke
 /// backend commands. The only scripts ever injected are our own static
-/// snippets: the JSON-escaped OAuth auto-close script and the custom
-/// cursor (the same one account windows get). Nested popups get the
-/// standard policy handler with chain trust (popup_ctx) — this path
-/// used to hard-deny them, which broke multi-hop sign-in chains
-/// whenever it was the path taken.
+/// snippets: the JSON-escaped OAuth auto-close script, the custom
+/// cursor, the popup guard + target=_blank shim, and the domain-matched
+/// cosmetic CSS / scriptlets / YouTube skipper (the same ones account
+/// windows get). Nested popups get the standard policy handler with
+/// chain trust (popup_ctx) — this path used to hard-deny them, which
+/// broke multi-hop sign-in chains whenever it was the path taken.
 fn spawn_contained_window(
     label_prefix: &str,
     url: &url::Url,
@@ -2973,11 +3438,36 @@ fn spawn_contained_window(
     initialization_script: Option<String>,
     log_ctx: &str,
     popup_ctx: PopupContext,
+    first_err: Option<String>,
 ) {
     let n = OAUTH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let label = format!("{label_prefix}-{n}");
+    // The opener's label is the adblock-flag lookup key below; the
+    // assignment after this overwrites parent_label with the popup's
+    // own label, so capture it first. Windows-only: the flag lookup
+    // feeds the network hook, which only exists there.
+    #[cfg(windows)]
+    let opener_label = popup_ctx.parent_label.clone();
     let mut popup_ctx = popup_ctx;
     popup_ctx.parent_label = label.clone();
+    // Same adblock kit as the in-handler builder (see
+    // build_contained_window): the spawned path is the Linux path and
+    // the Windows fallback, and it used to get none of these layers.
+    let popup_guard_js = window_open_guard_js(&popup_ctx.popup_allowlist);
+    let popup_adblock = popup_ctx.app.try_state::<AdblockState>();
+    let popup_cosmetic_css = popup_adblock
+        .as_ref()
+        .map(|s| s.cosmetic_css_for(url.as_str()))
+        .unwrap_or_default();
+    let popup_scriptlets_js = popup_adblock
+        .as_ref()
+        .map(|s| s.scriptlet_js_for(url.as_str()))
+        .unwrap_or_default();
+    let popup_yt_skipper_js = popup_adblock
+        .as_ref()
+        .map(|s| s.yt_ad_skipper_js().to_string())
+        .unwrap_or_default();
+    let popup_page_url = crate::adblock::new_page_url(url.as_str());
     // The window MUST be built on a dedicated thread, never on the calling
     // (WebView2 popup) thread and never via run_on_main_thread: on Windows,
     // WebviewWindowBuilder::build() deadlocks in a synchronous context
@@ -3009,10 +3499,12 @@ fn spawn_contained_window(
                 let b_title = title.clone();
                 let b_popup_ctx = popup_ctx.clone();
                 let b_init_script = initialization_script.clone();
-                // Windows-only use (the nav-hook gate below is
-                // #[cfg(windows)]); ungated it warns on Linux.
-                #[cfg(windows)]
-                let b_label_prefix = label_prefix.clone();
+                let b_guard_js = popup_guard_js.clone();
+                let b_cosmetic_css = popup_cosmetic_css.clone();
+                let b_scriptlets_js = popup_scriptlets_js.clone();
+                let b_yt_skipper_js = popup_yt_skipper_js.clone();
+                let b_page_url = popup_page_url.clone();
+                let b_is_popup = label_prefix == "popup";
 
                 std::thread::Builder::new()
                     .name(format!("appmaka-popup-build-{b_label}"))
@@ -3041,21 +3533,52 @@ fn spawn_contained_window(
                         if !cursor_js.is_empty() {
                             builder = builder.initialization_script(cursor_js);
                         }
-                        #[cfg(windows)]
-                        if b_label_prefix == "popup" {
+                        // Guard + cosmetic + scriptlets + skipper,
+                        // all-frames (see the account-window builder).
+                        // No gesture reporter: popup downloads are
+                        // blocked by label regardless.
+                        builder = builder
+                            .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
+                            .initialization_script_for_all_frames(b_guard_js);
+                        if !b_cosmetic_css.is_empty() {
+                            builder = builder.initialization_script_for_all_frames(
+                                cosmetic_init_script(&b_cosmetic_css),
+                            );
+                        }
+                        if !b_scriptlets_js.is_empty() {
+                            builder =
+                                builder.initialization_script_for_all_frames(b_scriptlets_js);
+                        }
+                        if !b_yt_skipper_js.is_empty() {
+                            builder =
+                                builder.initialization_script_for_all_frames(b_yt_skipper_js);
+                        }
+                        // Both kinds refresh adblock layers on
+                        // navigation; only "popup" gets the retint.
+                        {
                             let nav_app = b_app.clone();
                             let nav_label = b_label.clone();
+                            let nav_page_url = b_page_url.clone();
                             builder = builder.on_navigation(move |nav_url: &url::Url| {
                                 let app = nav_app.clone();
                                 let lbl = nav_label.clone();
                                 let u = nav_url.clone();
+                                let page_url = nav_page_url.clone();
                                 std::thread::Builder::new()
                                     .name(format!("appmaka-popup-retint-{lbl}"))
                                     .spawn(move || {
-                                        crate::popup_chrome::tint_popup_caption(
-                                            &app, &lbl, &u,
-                                        );
+                                        if b_is_popup {
+                                            // Windows-only: the caption
+                                            // tint is a Win32 caption
+                                            // call; popup_chrome is
+                                            // cfg'd out elsewhere.
+                                            #[cfg(windows)]
+                                            crate::popup_chrome::tint_popup_caption(
+                                                &app, &lbl, &u,
+                                            );
+                                        }
                                         schedule_cursor_reapply(app.clone(), lbl.clone());
+                                        reapply_adblock_for_label(&app, &page_url, &u, &lbl);
                                     })
                                     .ok();
                                 true
@@ -3093,6 +3616,17 @@ fn spawn_contained_window(
                 Ok(_window) => {
                     center_window_on_cursor_monitor(&window_app, &_window);
                     ensure_on_visible_monitor(&window_app, &_window);
+                    // Network blocking, inheriting the opener's flag
+                    // (see build_contained_window).
+                    #[cfg(windows)]
+                    if let Some(adblock) = window_app.try_state::<AdblockState>() {
+                        crate::adblock::attach_network_blocking(
+                            &_window,
+                            &adblock,
+                            adblock_flag_for_parent(&window_app, &opener_label),
+                            popup_page_url,
+                        );
+                    }
                     // Close-lifecycle trace (see log_popup_lifecycle).
                     attach_popup_lifecycle_trace(&window_app, &_window, &label);
                     log_popup_lifecycle(&window_app, &label, "spawned");
@@ -3121,11 +3655,21 @@ fn spawn_contained_window(
                     eprintln!("[appmaka] {label_prefix} window failed for {log_ctx}: {e}");
                     // v0.11.0: contained windows (popups, OAuth) have no
                     // other error surface — record and pop the dialog.
+                    // This is the ONLY "window-open" record for the
+                    // request: when the in-handler build failed first,
+                    // its error rides along here instead of being
+                    // recorded separately (v0.18.14 dedup).
+                    let technical = match &first_err {
+                        Some(first) => format!(
+                            "{label_prefix} window failed for {log_ctx}: {e} (in-handler attempt also failed: {first})"
+                        ),
+                        None => format!("{label_prefix} window failed for {log_ctx}: {e}"),
+                    };
                     crate::errors::record(
                         &window_app,
                         "window-open",
                         &format!("Could not open the {label_prefix} window."),
-                        &format!("{label_prefix} window failed for {log_ctx}: {e}"),
+                        &technical,
                         true,
                     );
                 }
@@ -3266,7 +3810,12 @@ pub(crate) fn set_window_memory_target_low(window: &WebviewWindow, low: bool) {
     });
 }
 
+/// No-op twin of the Windows helper above, so cross-platform call
+/// sites compile unchanged. Currently uncalled off Windows (the main
+/// window no longer sheds memory on hide/blur, v0.18.14); kept for the
+/// next cross-platform caller instead of deleting the symmetry.
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub(crate) fn set_window_memory_target_low(_window: &WebviewWindow, _low: bool) {}
 
 /// v0.18.10: the same memory-target signal for a split pane's child
@@ -3400,7 +3949,7 @@ fn suspend_idle_windows(app: &AppHandle) {
 }
 
 /// Close account windows idle longer than their app's `auto_close_minutes`
-/// (0 = never; default 30). Closing destroys the renderer and frees its
+/// (0 = never; default 15). Closing destroys the renderer and frees its
 /// memory; the session directory on disk preserves the login so reopening
 /// restores it seamlessly. Fail closed: focused windows (or unknown focus
 /// state) are never auto-closed.
@@ -3454,7 +4003,7 @@ fn close_idle_windows(app: &AppHandle) {
 
 /// Background watchdog: every 60s, suspend account windows idle longer than
 /// their app's `auto_suspend_minutes` (0 = never), then close account windows
-/// idle longer than their app's `auto_close_minutes` (default 30, 0 = never).
+/// idle longer than their app's `auto_close_minutes` (default 15, 0 = never).
 /// Suspended windows keep their session directory, so reopening/focusing
 /// resumes the session. Closed windows are fully destroyed (renderer freed —
 /// the real RAM win, and the only automatic reclaim on Linux); the session
@@ -4931,8 +5480,24 @@ mod tests {
         // never fires mouseleave, and destroy unregisters the net.
         assert!(js.contains("window.addEventListener(\"blur\", onLeave)"), "{js}");
         assert!(js.contains("window.removeEventListener(\"blur\", onLeave)"), "{js}");
-        // The frame loop writes nothing while the pointer is out.
-        assert!(js.contains("if (!inside) { rafId = requestAnimationFrame(frame); return; }"), "{js}");
+        // The frame loop stops instead of re-queuing while the pointer
+        // is out, the page is hidden, or something is fullscreen
+        // (v0.18.14: an idle page must not pay per-frame style writes),
+        // and re-arms on the next mousemove.
+        assert!(
+            js.contains("if (!inside || document.fullscreenElement || document.hidden) return;"),
+            "{js}"
+        );
+        assert!(js.contains("function scheduleFrame()"), "{js}");
+        // Fullscreen restores the native cursor: the dots paint below
+        // a fullscreen video / modal dialog, so hiding the OS cursor
+        // there leaves no cursor at all.
+        assert!(js.contains("fullscreenchange"), "{js}");
+        assert!(js.contains("data-appmaka-cursor-on"), "{js}");
+        assert!(
+            js.contains("document.documentElement.removeAttribute(\"data-appmaka-cursor-on\")"),
+            "{js}"
+        );
         // The watchdog treats a partial trail as broken, not just total
         // removal.
         assert!(
@@ -4960,6 +5525,47 @@ mod tests {
             "{js}"
         );
         assert_eq!(js.matches("if (obs) obs.disconnect();").count(), 3, "{js}");
+    }
+
+    #[test]
+    fn builtin_oauth_hosts_match_exact_and_subdomain() {
+        // v0.18.14: sign-in popups to these IdPs open as contained oauth
+        // modals with the default block policy and an empty allowlist.
+        assert!(is_builtin_oauth_host("accounts.google.com"));
+        assert!(is_builtin_oauth_host("login.microsoftonline.com"));
+        assert!(is_builtin_oauth_host("login.live.com"));
+        assert!(is_builtin_oauth_host("appleid.apple.com"));
+        assert!(is_builtin_oauth_host("github.com"));
+        assert!(is_builtin_oauth_host("auth0.com"));
+        assert!(is_builtin_oauth_host("okta.com"));
+        assert!(is_builtin_oauth_host("id.atlassian.com"));
+        // Tenant subdomains of the IdP host.
+        assert!(is_builtin_oauth_host("contoso.login.microsoftonline.com"));
+        assert!(is_builtin_oauth_host("myapp.auth0.com"));
+        // Suffix-lookalikes and unrelated hosts stay blocked.
+        assert!(!is_builtin_oauth_host("evilaccounts.google.com"));
+        assert!(!is_builtin_oauth_host("accounts.google.com.evil.com"));
+        assert!(!is_builtin_oauth_host("google.com"));
+        assert!(!is_builtin_oauth_host(""));
+    }
+
+    #[test]
+    fn window_open_guard_trusts_recent_gesture_and_oauth_hosts() {
+        // v0.18.14: the trusted-gesture window is 2500ms (async OAuth
+        // popups fired 150–600ms after the click), and the built-in
+        // sign-in hosts are allowed without a pre-typed allowlist entry.
+        let js = window_open_guard_js(&[]);
+        assert!(js.contains(") < 2500"), "{js}");
+        assert!(js.contains("oauthSuffixes"), "{js}");
+        assert!(js.contains("function hostAllowed(h)"), "{js}");
+        assert!(js.contains("accounts.google.com"), "{js}");
+        assert!(js.contains("login.microsoftonline.com"), "{js}");
+        // javascript:/data: targets are still refused outright.
+        assert!(js.contains("javascript:'"), "{js}");
+        assert!(js.contains("'data:'"), "{js}");
+        // An allowlisted host still passes through directly.
+        let js = window_open_guard_js(&["sso.example.com".to_string()]);
+        assert!(js.contains("sso.example.com"), "{js}");
     }
 
     #[test]
@@ -5199,9 +5805,100 @@ mod tests {
         assert!(js.contains("accounts.google.com"));
         assert!(js.contains("userActivation"));
         assert!(js.contains("isActive"));
+        // Hardened (Area 3): a timer popup inside userActivation's ~5s
+        // window must not pass on activation alone — the guard also
+        // needs a trusted gesture within the last second, and it
+        // refuses javascript:/data: targets outright.
+        assert!(js.contains("isTrusted"));
+        assert!(js.contains("lastTrustedGesture"));
+        assert!(js.contains("javascript:"));
+        assert!(js.contains("data:"));
+        assert!(js.contains("__appmakaAllowHosts"));
         // No hosts: still a valid guard, empty allowlist.
         let js = window_open_guard_js(&[]);
         assert!(js.contains("allowHosts = []"));
+    }
+
+    #[test]
+    fn target_blank_shim_drops_scripted_clicks_on_non_signin_hosts() {
+        // Synthetic clicks (a.click() from page JS) only reach
+        // window.open when the link's host is in the guard's allowlist;
+        // anything else is dropped instead of opening a popup.
+        assert!(TARGET_BLANK_SHIM_JS.contains("isTrusted"));
+        assert!(TARGET_BLANK_SHIM_JS.contains("__appmakaAllowHosts"));
+        assert!(TARGET_BLANK_SHIM_JS.contains("preventDefault"));
+    }
+
+    #[test]
+    fn gesture_reporter_ignores_synthetic_events() {
+        // A page script dispatching a fake pointerdown used to arm
+        // the download gate for itself; only trusted input counts now.
+        assert!(GESTURE_REPORT_JS.contains("isTrusted === false"));
+        assert!(GESTURE_REPORT_JS.contains("note_user_gesture"));
+    }
+
+    #[test]
+    fn cosmetic_init_script_replaces_previous_style() {
+        // Nav-refresh re-evals must not stack a duplicate <style> per
+        // navigation: the script removes the previous cosmetic style
+        // before appending the new one.
+        let js = cosmetic_init_script("a{display:none !important;}");
+        assert!(js.contains("querySelectorAll"));
+        assert!(js.contains("old[i].remove()"));
+        assert!(js.contains("data-appmaka"));
+    }
+
+    /// v0.18.14 live-pid preservation: the session sweep must never
+    /// mark a WebView2 process that descends from this process, even
+    /// when its command line names the session or it is attributed to
+    /// the account — that process belongs to a live (or just-closed)
+    /// window, and killing it took down the parent in the popup retry.
+    #[test]
+    fn session_sweep_never_kills_a_live_descendant() {
+        // Command-line match alone qualifies — but not for a descendant.
+        assert!(session_webview2_kill_candidate(true, false, false));
+        assert!(!session_webview2_kill_candidate(true, false, true));
+        // Attribution alone qualifies — but not for a descendant.
+        assert!(session_webview2_kill_candidate(false, true, false));
+        assert!(!session_webview2_kill_candidate(false, true, true));
+        // Neither match nor attribution: never a candidate.
+        assert!(!session_webview2_kill_candidate(false, false, false));
+        assert!(!session_webview2_kill_candidate(false, false, true));
+    }
+
+    /// The descendant walk behind the rule above, against the real
+    /// process table: this process is its own descendant, a spawned
+    /// child is one, and our parent is not (ancestry points the other
+    /// way). The child is reaped by the test, never left behind.
+    #[test]
+    fn descendant_walk_covers_self_child_and_parent() {
+        use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+
+        let self_pid = Pid::from_u32(std::process::id());
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep must spawn for the descendant test");
+        let child_pid = Pid::from_u32(child.id());
+        let sys = System::new_with_specifics(
+            RefreshKind::nothing().with_processes(
+                ProcessRefreshKind::nothing().without_tasks(),
+            ),
+        );
+        assert!(is_descendant_of(&sys, self_pid, self_pid));
+        assert!(is_descendant_of(&sys, child_pid, self_pid));
+        // A live child with a session-matching command line is still
+        // not a kill candidate — the exact case the popup retry hit.
+        assert!(!session_webview2_kill_candidate(true, true, is_descendant_of(
+            &sys, child_pid, self_pid
+        )));
+        if let Some(self_proc) = sys.process(self_pid) {
+            if let Some(parent) = self_proc.parent() {
+                assert!(!is_descendant_of(&sys, parent, self_pid));
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 

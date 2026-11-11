@@ -20,7 +20,7 @@
 use serde::Serialize;
 #[cfg(windows)]
 use std::time::Duration;
-use tauri::{AppHandle, Runtime};
+use tauri::AppHandle;
 #[cfg(windows)]
 use std::path::PathBuf;
 #[cfg(windows)]
@@ -110,13 +110,69 @@ fn msi_file_name(version: &str) -> String {
     format!("AppMaka-{version}-update.msi")
 }
 
+/// Downgrade guard for the MSI path: this side reads the raw manifest
+/// and never goes through the updater plugin's own version check, so a
+/// stale or misrouted manifest announcing the running version (or an
+/// older one) must refuse here instead of downloading and installing
+/// it. A malformed version string also refuses — it can never compare
+/// as newer.
+#[cfg(windows)]
+fn reject_stale_version(app: &AppHandle, version: &str) -> Result<(), String> {
+    let current = app.package_info().version.to_string();
+    if !crate::semver::is_newer_version(version, &current) {
+        return Err(format!(
+            "Version {version} is not newer than the version you're running ({current}) — nothing to install."
+        ));
+    }
+    Ok(())
+}
+
+/// The deliberate-exit shutdown, shared by the MSI launch paths and
+/// the NSIS path (via `prepare_for_update_install` below): exactly the
+/// tray-Quit's triple. The flag keeps pin close-guards from diverting
+/// the exit, the session is written so the new version restores it,
+/// and the restore sentinel is cleared so the relaunch never mistakes
+/// this exit for a crash mid-restore and forces ask-mode.
+#[cfg(windows)]
+fn prepare_for_update_exit(app: &AppHandle) {
+    crate::pin::set_shutting_down();
+    crate::session::write_session(app);
+    crate::session::clear_restore_sentinel(app);
+}
+
+/// NSIS-path exit prep, called from the frontend BEFORE
+/// `update.install()`: the updater plugin launches the installer and
+/// then exits the process outright (`std::process::exit(0)`), and its
+/// own `on_before_exit` hook only clears tray icons and resource
+/// tables — it never writes the session or clears the restore
+/// sentinel, and the app cannot override that hook (the plugin's
+/// setup replaces it). So the shutdown has to happen here, before the
+/// install call, not after it. Infallible by design: a failure to
+/// write state must never block the update itself.
+#[tauri::command]
+pub fn prepare_for_update_install(app: AppHandle) {
+    crate::pin::set_shutting_down();
+    crate::session::write_session(&app);
+    crate::session::clear_restore_sentinel(&app);
+}
+
+/// Undo `prepare_for_update_install` after a failed or aborted
+/// install: the app survived the exit it prepared for, so pin
+/// close-confirms must work again. The frontend calls this in the
+/// install failure path; on a successful install the process is gone
+/// and there is nothing to undo.
+#[tauri::command]
+pub fn cancel_update_exit() {
+    crate::pin::clear_shutting_down();
+}
+
 /// Download the MSI and verify its signature, then stash the verified
 /// file in app-data for `launch_msi_update`. Emits `msi-update-progress`
 /// events while downloading. Returns the downloaded version. Every
 /// failure returns a plain-language message for the Updates UI.
 #[tauri::command]
-pub async fn download_msi_update<R: Runtime>(
-    app: AppHandle<R>,
+pub async fn download_msi_update(
+    app: AppHandle,
     nsis_url: String,
     version: String,
 ) -> Result<String, String> {
@@ -153,7 +209,7 @@ pub async fn download_msi_update<R: Runtime>(
 /// installer. Only a file verified this session can be launched — with
 /// nothing stashed this refuses instead of guessing a path.
 #[tauri::command]
-pub async fn launch_msi_update<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+pub async fn launch_msi_update(app: AppHandle) -> Result<(), String> {
     #[cfg(not(windows))]
     {
         let _ = &app;
@@ -181,11 +237,13 @@ pub async fn launch_msi_update<R: Runtime>(app: AppHandle<R>) -> Result<(), Stri
 }
 
 #[cfg(windows)]
-fn run_msi_download<R: Runtime>(
-    app: &AppHandle<R>,
+fn run_msi_download(
+    app: &AppHandle,
     nsis_url: &str,
     version: &str,
 ) -> Result<String, String> {
+    reject_stale_version(app, version)?;
+
     let msi_url = msi_url_from_nsis_url(nsis_url, version)?;
 
     let msi_bytes = download_with_progress(app, &msi_url)?;
@@ -215,7 +273,7 @@ fn run_msi_download<R: Runtime>(
 }
 
 #[cfg(windows)]
-fn run_msi_launch<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+fn run_msi_launch(app: &AppHandle) -> Result<(), String> {
     let msi_path = VERIFIED_MSI
         .lock()
         .map_err(|_| "the update state got tangled — restart AppMaka and try again.".to_string())?
@@ -227,9 +285,15 @@ fn run_msi_launch<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     // The installer is now running detached. Exit immediately — staying
     // alive even briefly lets Restart Manager see a process that refuses
     // close requests (the main window hides to the tray), which wedges
-    // the app ("Not Responding"). The `msi-update-launched` emit is
-    // best-effort; the frontend also flips to "Installer launched" when
-    // this command resolves (see App.tsx).
+    // the app ("Not Responding"). Shut down the way tray Quit does
+    // first: the flag keeps pin guards from diverting the exit, the
+    // session is written so the new version restores it, and the
+    // restore sentinel is cleared so the relaunch never mistakes this
+    // deliberate exit for a crash mid-restore. The
+    // `msi-update-launched` emit is best-effort; the frontend also
+    // flips to "Installer launched" when this command resolves (see
+    // App.tsx).
+    prepare_for_update_exit(app);
     let _ = app.emit("msi-update-launched", ());
     app.exit(0);
     #[allow(unreachable_code)]
@@ -241,8 +305,8 @@ fn run_msi_launch<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 /// `msi-update-launched` right before the app exits into the installer.
 /// Every failure returns a plain-language message for the Updates UI.
 #[tauri::command]
-pub async fn install_msi_update<R: Runtime>(
-    app: AppHandle<R>,
+pub async fn install_msi_update(
+    app: AppHandle,
     nsis_url: String,
     version: String,
 ) -> Result<(), String> {
@@ -275,11 +339,13 @@ pub async fn install_msi_update<R: Runtime>(
 }
 
 #[cfg(windows)]
-fn run_msi_update<R: Runtime>(
-    app: &AppHandle<R>,
+fn run_msi_update(
+    app: &AppHandle,
     nsis_url: &str,
     version: &str,
 ) -> Result<(), String> {
+    reject_stale_version(app, version)?;
+
     let msi_url = msi_url_from_nsis_url(nsis_url, version)?;
 
     let msi_bytes = download_with_progress(app, &msi_url)?;
@@ -299,9 +365,9 @@ fn run_msi_update<R: Runtime>(
     // The installer is now running detached. Exit immediately — staying
     // alive even briefly lets Restart Manager see a process that refuses
     // close requests (the main window hides to the tray), which wedges
-    // the app ("Not Responding"). The `msi-update-launched` emit is
-    // best-effort; the frontend also flips to "Installer launched" when
-    // the download byte count completes (see App.tsx).
+    // the app ("Not Responding"). Same deliberate-exit shutdown as
+    // `run_msi_launch` (see there) before going away.
+    prepare_for_update_exit(app);
     let _ = app.emit("msi-update-launched", ());
     app.exit(0);
     #[allow(unreachable_code)]
@@ -311,7 +377,7 @@ fn run_msi_update<R: Runtime>(
 /// Read the updater public key from the app config (the same key the NSIS
 /// updater flow verifies against).
 #[cfg(windows)]
-fn updater_pubkey<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
+fn updater_pubkey(app: &AppHandle) -> Result<String, String> {
     app.config()
         .plugins
         .0
@@ -412,13 +478,31 @@ fn base64_decode_bytes(b: &[u8]) -> Result<Vec<u8>, base64::DecodeError> {
     base64::engine::general_purpose::STANDARD.decode(b)
 }
 
+/// A failed download, in one plain sentence. A 404 means the release
+/// asset is not on the server — a misrouted manifest or a release whose
+/// uploads have not landed yet — which is recoverable by waiting or
+/// re-checking, not a broken network, so it says so instead of the
+/// generic download error.
+#[cfg(windows)]
+fn download_error(e: ureq::Error, what: &str) -> String {
+    match e {
+        ureq::Error::Status(404, _) => format!(
+            "{what} isn't on the server yet (404) — the release may still be uploading; try again in a few minutes."
+        ),
+        ureq::Error::Status(code, _) => {
+            format!("{what} failed — the server answered {code}.")
+        }
+        _ => format!("couldn't download {what}."),
+    }
+}
+
 /// Stream the MSI to memory, emitting progress events for the Updates UI.
 #[cfg(windows)]
-fn download_with_progress<R: Runtime>(app: &AppHandle<R>, url: &str) -> Result<Vec<u8>, String> {
+fn download_with_progress(app: &AppHandle, url: &str) -> Result<Vec<u8>, String> {
     let response = ureq::get(url)
         .timeout(Duration::from_secs(30))
         .call()
-        .map_err(|_| "couldn't download the update.".to_string())?;
+        .map_err(|e| download_error(e, "the update"))?;
     let total: Option<u64> = response
         .header("Content-Length")
         .and_then(|v| v.parse().ok());
@@ -456,7 +540,7 @@ fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
     ureq::get(url)
         .timeout(Duration::from_secs(30))
         .call()
-        .map_err(|_| "couldn't download the update's security check.".to_string())?
+        .map_err(|e| download_error(e, "the update's security check"))?
         .into_reader()
         .read_to_end(&mut buf)
         .map_err(|_| "couldn't download the update's security check.".to_string())?;

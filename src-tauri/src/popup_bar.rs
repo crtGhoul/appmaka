@@ -77,20 +77,38 @@ fn finish_closing(label: &str) {
 /// waits on its own UI thread). Hide first so nothing paints mid-teardown,
 /// unhook the Win32 subclass so DestroyWindow never re-enters it, then
 /// close the controller, then the window. No lock is held across any of it.
+///
+/// The unhook + controller close run on the main thread, and this
+/// function runs on the teardown worker thread (see `close_popup_async`),
+/// so the main-thread work is posted via `run_on_main_thread` and the
+/// worker waits for it — bounded at 300ms. `with_webview` posts to the
+/// main thread and returns immediately, so destroying the window right
+/// after it used to race the controller close: that race is exactly
+/// what this wait closes. A controller that hasn't closed in 300ms is
+/// torn down with its window.
 pub fn destroy_webview_then_window(window: &WebviewWindow) {
     let _ = window.hide();
     // popup_chrome is Windows-only (main.rs gates the module); elsewhere
     // there is no subclass to unhook.
     #[cfg(windows)]
-    crate::popup_chrome::unhook_popup_chrome(window);
-
-    #[cfg(windows)]
     {
-        let _ = window.with_webview(|wv| unsafe {
-            let controller = wv.controller();
-            let _ = controller.SetIsVisible(false);
-            let _ = controller.Close();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+        // app_handle() borrows the window — clone it: the closure below
+        // must be 'static, so nothing borrowed from `window` may escape.
+        let app = window.app_handle().clone();
+        let label = window.label().to_string();
+        let _ = app.clone().run_on_main_thread(move || {
+            if let Some(win) = app.get_webview_window(&label) {
+                crate::popup_chrome::unhook_popup_chrome_on_main_thread(&win);
+                let _ = win.with_webview(|wv| unsafe {
+                    let controller = wv.controller();
+                    let _ = controller.SetIsVisible(false);
+                    let _ = controller.Close();
+                });
+            }
+            let _ = tx.send(());
         });
+        let _ = rx.recv_timeout(Duration::from_millis(300));
     }
 
     let _ = window.destroy();
@@ -275,18 +293,15 @@ pub fn attach_popup_bar(app: &AppHandle, popup: &WebviewWindow, popup_label: &st
     let ev_app = app.clone();
     let ev_label = popup_label.to_string();
     popup.on_window_event(move |event| match event {
-        WindowEvent::CloseRequested { api, .. } => {
-            // Never destroy the webview synchronously inside the close
-            // dispatch — that is the popup-close freeze. Hand it to the
-            // detached teardown thread instead.
-            api.prevent_close();
-            close_popup_async(&ev_app, &ev_label);
-        }
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
             reposition_bar(&ev_app, &ev_label);
         }
         WindowEvent::Focused(focused) => {
             if *focused {
+                // Focused-back focus: route focus into the popup's
+                // webview, or clicks land on a dead page.
+                #[cfg(windows)]
+                crate::windows::focus_webview(&ev_app, &ev_label);
                 if let Some(b) = ev_app.get_webview_window(&popup_bar_label(&ev_label)) {
                     let _ = b.show();
                 }
@@ -301,9 +316,6 @@ pub fn attach_popup_bar(app: &AppHandle, popup: &WebviewWindow, popup_label: &st
             }
         }
         WindowEvent::Destroyed => {
-            if let Some(b) = ev_app.get_webview_window(&popup_bar_label(&ev_label)) {
-                let _ = b.close();
-            }
             // The popup itself is already gone; this only matters when
             // the close arrived without a CloseRequested (or the async
             // teardown raced it) — the dedup set makes a second call a

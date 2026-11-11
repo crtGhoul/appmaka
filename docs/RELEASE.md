@@ -45,6 +45,11 @@ Upload all 10 assets:
 node scripts/make-latest-json.mjs <v> ./release-assets/ "<one-paragraph notes>"
 ```
 
+The script defaults to Codeberg asset URLs (`--host=github` only for a
+GitHub-only manifest): publishing is Codeberg-first, and the same
+manifest is pushed to both repo roots, so both updater endpoints serve
+Codeberg URLs.
+
 The script embeds each `.sig` file's content VERBATIM (it is already the
 single base64 encoding of the minisign signature — never encode it again)
 and then asserts, aborting loudly before writing anything:

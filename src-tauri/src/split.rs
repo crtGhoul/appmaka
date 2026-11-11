@@ -840,7 +840,11 @@ pub fn open_split(
         }
     }
     // Show the frame (it was built hidden) and focus the first pane.
+    // The frame takes focus first so its Focused event fires and the
+    // active pane's webview gets focus through the frame handler too;
+    // the explicit pane focus below covers the show-without-focus case.
     let _ = frame.show();
+    let _ = frame.set_focus();
     // Re-apply the layout once the frame is visible and realized, in
     // case showing clobbered a bound. Main thread: GTK calls from
     // worker threads are not safe. NOTE (Linux): this changes nothing

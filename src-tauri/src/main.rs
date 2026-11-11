@@ -18,6 +18,7 @@ mod workspaces;
 mod launcher_settings;
 mod links;
 mod msi_update;
+mod semver;
 mod page_title;
 mod pin;
 mod preview;
@@ -905,6 +906,8 @@ fn show_library_view(app: &AppHandle) -> Result<(), String> {
         windows::ensure_on_visible_monitor(app, &w);
         w.show().map_err(|e| e.to_string())?;
         w.set_focus().map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        windows::focus_webview(app, "main");
         app.emit("appmaka:show-library", ())
             .map_err(|e| e.to_string())?;
     }
@@ -1030,7 +1033,7 @@ fn dismiss_session_restore(app: AppHandle) -> Result<(), String> {
 }
 
 /// Change the launcher panel translucency. The backend clamps to
-/// 0.3..=1.0; returns the updated settings so the UI paints immediately.
+/// 0.92..=1.0; returns the updated settings so the UI paints immediately.
 #[tauri::command]
 fn set_panel_opacity(app: AppHandle, opacity: f32) -> Result<LauncherSettings, String> {
     let state = app.state::<Mutex<LauncherSettings>>();
@@ -1063,19 +1066,20 @@ pub(crate) fn toggle_main_window(app: &AppHandle) {
         if visible && !minimized && on_screen {
             let _ = w.hide();
         } else {
-            let summon_start = std::time::Instant::now();
             let _ = w.unminimize();
             position_on_target_monitor(app, &w);
             windows::ensure_on_visible_monitor(app, &w);
+            let _ = w.show();
+            let _ = w.set_focus();
+            // The window-level focus above does not reach the child
+            // webview on Windows (see windows::focus_webview): without
+            // this, a summoned launcher can look alive while clicks
+            // never reach the page (the v0.18.9 dead-clicks regression).
+            // The Focused(true) handler below is the backstop for
+            // summons that arrive via other paths.
+            #[cfg(windows)]
+            windows::focus_webview(app, "main");
             let _ = app.emit("appmaka:show-launcher", ());
-            let elapsed_ms = summon_start.elapsed().as_millis();
-            crate::errors::record(
-                app,
-                "perf",
-                "Launcher summon timing",
-                &format!("Summon to visible completed in {}ms", elapsed_ms),
-                false,
-            );
         }
     }
 }
@@ -1198,6 +1202,15 @@ fn build_tray(app: &mut tauri::App) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+        // Site permissions (v0.18.14): one app-level handler covers
+        // every webview — main, account, split panes, tabbed, popup,
+        // web search, preview — because Tauri funnels all of them
+        // through prepare_webview. The decision reads the live
+        // launcher setting, so the toggle applies immediately with
+        // no reopen. Default off means the platform prompt, as before.
+        .on_permission_request(|webview, kind| {
+            crate::launcher_settings::decide_permission(&webview, kind)
+        })
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -1445,6 +1458,12 @@ fn main() {
             // Popup permissions panel E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_popup_permissions_flow(app.handle());
+            // v0.18.14 E2E driver (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_01814_flow(app.handle());
+            // Theme screenshot driver (v0.18.14 Area 2, Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_theme_shot_flow(app.handle());
             // Clipboard history (v0.9.0): local text history, poll-based
             // watcher. One 600ms tick = one clipboard read + string
             // compare; ~nothing at idle.
@@ -1531,14 +1550,20 @@ fn main() {
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         let _ = window.hide();
-                        if let Some(w) = window.app_handle().get_webview_window("main") {
-                            crate::windows::set_window_memory_target_low(&w, true);
-                        }
                     }
-                    tauri::WindowEvent::Focused(focused) => {
-                        if let Some(w) = window.app_handle().get_webview_window("main") {
-                            crate::windows::set_window_memory_target_low(&w, !*focused);
-                        }
+                    tauri::WindowEvent::Focused(true) => {
+                        // v0.18.9 dead-clicks fix, restored in v0.18.14:
+                        // the window can gain focus while its child
+                        // webview stays unfocused, so clicks never reach
+                        // the page. Route focus into the WebView2 child
+                        // (MoveFocus) whenever the window gains focus.
+                        // v0.18.12 removed this call as a stutter
+                        // suspect; the removal was never proven to help,
+                        // and dead clicks are the worse failure, so it
+                        // is back — if stutter returns on a real PC,
+                        // that is the first suspect to re-measure.
+                        #[cfg(windows)]
+                        crate::windows::focus_webview(window.app_handle(), "main");
                     }
                     _ => {}
                 }
@@ -1546,9 +1571,19 @@ fn main() {
                 // The clipboard popup is reused across summons (rebuilds
                 // cost a beat on the hotkey), so close requests just hide
                 // it. Escape / focus-loss hide it from the frontend too.
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    tauri::WindowEvent::Focused(true) => {
+                        #[cfg(windows)]
+                        crate::windows::focus_webview(
+                            window.app_handle(),
+                            crate::clipboard::WINDOW_LABEL,
+                        );
+                    }
+                    _ => {}
                 }
             } else if window.label().starts_with("preview-") {
                 // A preview window closed by hand (X button on either the
@@ -1734,6 +1769,7 @@ fn main() {
             launcher_settings::set_dictation_compat,
             launcher_settings::set_open_as_tabbed,
             launcher_settings::set_allow_popups_globally,
+            launcher_settings::set_auto_allow_permissions,
             launcher_settings::set_auto_hide_top_bar,
             // v0.8.0: hidden-programs collapse state (polish)
             launcher_settings::set_hidden_section_collapsed,
@@ -1769,6 +1805,7 @@ fn main() {
             dictation::clear_dictation_transcripts,
             dictation::copy_dictation_transcript,
             dictation::set_dictation_model,
+            dictation::set_dictation_device,
             dictation::set_dictation_hold,
             dictation::set_dictation_hotkey,
             dictation::dictation_hotkey_status,
@@ -1795,6 +1832,8 @@ fn main() {
             msi_update::download_msi_update,
             msi_update::launch_msi_update,
             msi_update::install_msi_update,
+            msi_update::prepare_for_update_install,
+            msi_update::cancel_update_exit,
             // v0.8.0: workspaces
             workspaces::list_workspaces,
             workspaces::save_workspace,

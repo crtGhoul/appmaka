@@ -64,6 +64,29 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// The top-level page URL a window is currently showing, shared with
+/// the Windows network hook. The hook reads it per request (cheap
+/// RwLock read) instead of capturing the build-time URL once: a window
+/// that navigates away from its app's home page must be judged against
+/// the page it is actually on, or domain-scoped `@@` exceptions (uBlock
+/// unbreak / quick-fixes, e.g. `domain=youtube.com`) match the wrong
+/// page. One value per window/webview; never the stale initial URL.
+/// Updated from `on_navigation` (see `AdblockState::nav_refresh_js`).
+pub type CurrentPageUrl = Arc<RwLock<String>>;
+
+/// Make a fresh current-URL value seeded with the navigation target
+/// (the last-visited URL when there is one, else the app's home URL).
+pub fn new_page_url(initial: &str) -> CurrentPageUrl {
+    Arc::new(RwLock::new(initial.to_string()))
+}
+
+/// Host (lowercased, no port) of a URL, for domain comparisons.
+pub fn page_host(page_url: &str) -> Option<String> {
+    url::Url::parse(page_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+}
+
 /// Shared adblock state, managed by Tauri. Internals are behind `Arc`s so a
 /// cheap clone can be handed to the background refresh thread.
 #[derive(Clone)]
@@ -269,6 +292,42 @@ impl AdblockState {
     /// Engine-assembled scriptlet code for a page: the shared helper
     /// definitions plus one guarded call per matching `+js(...)` rule.
     /// Empty when no engine is loaded or no rule matches (fail open).
+    /// Domain-matched cosmetic CSS + scriptlets for a navigation, when
+    /// the host changed since the last navigation. Updates the shared
+    /// current URL to the navigated URL either way (the network hook
+    /// must always see the live page), and returns None when the host
+    /// is unchanged or no engine is loaded — the build-time injection
+    /// still covers that page. The caller evals the returned JS in the
+    /// window/webview; it is one bundle (cosmetic style + scriptlets +
+    /// the host-gated YouTube ad-skipper) so a host change refreshes
+    /// every layer at once.
+    pub fn nav_refresh_js(
+        &self,
+        current: &CurrentPageUrl,
+        url: &url::Url,
+    ) -> Option<String> {
+        let new_host = page_host(url.as_str());
+        let old_host = current.read().ok().and_then(|g| page_host(&g));
+        if let Ok(mut guard) = current.write() {
+            *guard = url.to_string();
+        }
+        if new_host.is_some() && new_host == old_host {
+            return None;
+        }
+        let css = self.cosmetic_css_for(url.as_str());
+        let scriptlets = self.scriptlet_js_for(url.as_str());
+        if css.is_empty() && scriptlets.is_empty() {
+            return None;
+        }
+        let mut js = String::new();
+        if !css.is_empty() {
+            js.push_str(&crate::windows::cosmetic_init_script(&css));
+        }
+        js.push_str(&scriptlets);
+        js.push_str(scriptlets::YT_AD_SKIPPER_JS);
+        Some(js)
+    }
+
     pub fn scriptlet_js_for(&self, page_url: &str) -> String {
         let engine = match self.engine.read().ok().and_then(|g| g.clone()) {
             Some(e) => e,
@@ -332,10 +391,27 @@ pub fn attach_network_blocking(
     window: &tauri::WebviewWindow,
     state: &AdblockState,
     enabled: Arc<std::sync::atomic::AtomicBool>,
-    page_url: String,
+    page_url: CurrentPageUrl,
 ) {
     let state = state.clone();
     let _ = window.with_webview(move |platform| {
+        hook_platform(platform, &state, enabled, page_url);
+    });
+}
+
+/// Same hook for a child `Webview` (split-view panes, built with
+/// `Window::add_child`): a pane is not a `WebviewWindow`, so the
+/// window entry point cannot reach it. One shared engine behind `Arc`
+/// — this creates no second engine, only a second hook registration.
+#[cfg(windows)]
+pub fn attach_network_blocking_webview(
+    webview: &tauri::Webview,
+    state: &AdblockState,
+    enabled: Arc<std::sync::atomic::AtomicBool>,
+    page_url: CurrentPageUrl,
+) {
+    let state = state.clone();
+    let _ = webview.with_webview(move |platform| {
         hook_platform(platform, &state, enabled, page_url);
     });
 }
@@ -346,7 +422,7 @@ fn hook_platform(
     platform: tauri::webview::PlatformWebview,
     state: &AdblockState,
     enabled: Arc<std::sync::atomic::AtomicBool>,
-    page_url: String,
+    page_url: CurrentPageUrl,
 ) {
     use webview2_com::Microsoft::Web::WebView2::Win32::*;
     use webview2_com::WebResourceRequestedEventHandler;
@@ -393,7 +469,7 @@ fn hook_platform(
 fn should_block(
     args: Option<&webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2WebResourceRequestedEventArgs>,
     state: &AdblockState,
-    page_url: &str,
+    page_url: &CurrentPageUrl,
 ) -> bool {
     use webview2_com::Microsoft::Web::WebView2::Win32::*;
     use webview2_com::take_pwstr;
@@ -431,7 +507,16 @@ fn should_block(
             .map(|()| resource_context_name(&context))
             .unwrap_or("other")
     };
-    state.check_request(&uri, page_url, request_type, &method)
+    // The page URL is read live per request: on_navigation keeps it
+    // current, so domain-scoped exceptions match the page the user is
+    // actually on. A poisoned/unreadable lock fails open to "" (the
+    // engine then falls back to the request URL).
+    let source_url = page_url
+        .read()
+        .ok()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    state.check_request(&uri, &source_url, request_type, &method)
 }
 
 /// Answer a blocked request with an empty 403. Errors are swallowed: if we
@@ -480,5 +565,69 @@ fn resource_context_name(
         "document"
     } else {
         "other"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_state() -> AdblockState {
+        AdblockState {
+            engine: Arc::new(RwLock::new(None)),
+            loaded: Arc::new(RwLock::new(false)),
+            updated_at: Arc::new(RwLock::new(None)),
+            last_refresh_failed: Arc::new(RwLock::new(false)),
+            cache_dir: std::env::temp_dir(),
+            #[cfg(windows)]
+            doh: Arc::new(doh::DohSinkhole::new(
+                std::env::temp_dir().join("appmaka-doh-test.json"),
+                true,
+            )),
+        }
+    }
+
+    #[test]
+    fn page_host_lowercases_and_drops_port() {
+        assert_eq!(
+            page_host("https://WWW.YouTube.com:443/watch?v=1"),
+            Some("www.youtube.com".to_string())
+        );
+        assert_eq!(page_host("about:blank"), None);
+        assert_eq!(page_host("not a url"), None);
+    }
+
+    #[test]
+    fn nav_refresh_updates_current_url_even_without_engine() {
+        let state = empty_state();
+        let current = new_page_url("https://example.com/home");
+        // Same-host navigation: no refresh bundle, but the URL moves.
+        let same = url::Url::parse("https://example.com/other").unwrap();
+        assert!(state.nav_refresh_js(&current, &same).is_none());
+        assert_eq!(
+            current.read().unwrap().as_str(),
+            "https://example.com/other"
+        );
+        // Host change with no engine loaded: still no bundle (fail
+        // open), but the hook's source URL must follow the navigation.
+        let other = url::Url::parse("https://youtube.com/watch").unwrap();
+        assert!(state.nav_refresh_js(&current, &other).is_none());
+        assert_eq!(
+            current.read().unwrap().as_str(),
+            "https://youtube.com/watch"
+        );
+    }
+
+    #[test]
+    fn nav_refresh_skips_refresh_on_same_host() {
+        // The stale-URL bug was the hook keeping the build-time home
+        // URL forever; the refresh must fire exactly on host change.
+        // With no engine there is never a bundle, so this pins the
+        // URL-tracking half: same host keeps the value current.
+        let state = empty_state();
+        let current = new_page_url("https://a.example/path");
+        let url = url::Url::parse("https://a.example/other?x=1").unwrap();
+        assert!(state.nav_refresh_js(&current, &url).is_none());
+        assert_eq!(page_host(&current.read().unwrap()), Some("a.example".into()));
     }
 }

@@ -130,6 +130,15 @@ pub fn set_shutting_down() {
     SHUTTING_DOWN.store(true, Ordering::SeqCst);
 }
 
+/// Undo `set_shutting_down`. Only for an update install that was
+/// prepared for and then failed or was aborted: the app survived the
+/// exit it prepared for, so pin close-confirms must work again. A
+/// stuck flag would silently let pinned windows close without asking
+/// for the rest of the session.
+pub fn clear_shutting_down() {
+    SHUTTING_DOWN.store(false, Ordering::SeqCst);
+}
+
 pub fn is_shutting_down() -> bool {
     SHUTTING_DOWN.load(Ordering::SeqCst)
 }

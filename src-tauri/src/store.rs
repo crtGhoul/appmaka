@@ -40,12 +40,16 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub adblock_enabled: bool,
     /// Idle minutes after which an unfocused account window is suspended.
-    /// 0 = never. Old records without it migrate to 30.
+    /// 0 = never. Old records without it migrate to 5. Stored 30s (the
+    /// pre-0.18.14 UI default) are migrated to 5 on load, see
+    /// `normalize_legacy_suspend_default` — a stored 30 was the untouched
+    /// default, never a choice; anyone who really wants 30 can re-set it
+    /// in the app's settings.
     #[serde(default = "default_auto_suspend_minutes")]
     pub auto_suspend_minutes: u64,
     /// Idle minutes after which an unfocused account window is closed outright
     /// (the session dir survives, so reopening restores the login). 0 = never.
-    /// Old records without it migrate to 30.
+    /// Old records without it migrate to 15.
     #[serde(default = "default_auto_close_minutes")]
     pub auto_close_minutes: u32,
 }
@@ -62,8 +66,12 @@ fn default_true() -> bool {
     true
 }
 
+/// New apps suspend after 5 idle minutes. 30 was slow enough that a heavy
+/// page (muse.ai burns 2+ cores at rest under x64 emulation) kept burning
+/// for half an hour after the user switched away; 5 still leaves room to
+/// glance away and come back without a freeze/resume cycle.
 fn default_auto_suspend_minutes() -> u64 {
-    15
+    5
 }
 
 impl Default for AppSettings {
@@ -72,7 +80,7 @@ impl Default for AppSettings {
             popup_policy: "block".to_string(),
             popup_allowlist: Vec::new(),
             adblock_enabled: true,
-            auto_suspend_minutes: 15,
+            auto_suspend_minutes: 5,
             auto_close_minutes: 15,
         }
     }
@@ -429,7 +437,34 @@ impl AppStore {
         // users found confusing — it is now "Main". Rename it silently on
         // load (the user can rename any account in the library anyway).
         store.normalize_default_labels()?;
+        // Same one-time treatment for the old 30-minute suspend default.
+        store.normalize_legacy_suspend_default()?;
         Ok(store)
+    }
+
+    /// The old suspend default, in minutes, that a stored 30 means.
+    /// Kept as a named constant so the migration, the tests, and the
+    /// comment on `AppSettings::auto_suspend_minutes` can't drift apart.
+    const LEGACY_SUSPEND_DEFAULT_MINUTES: u64 = 30;
+
+    /// One-time migration: an app-level `auto_suspend_minutes` of exactly
+    /// the old default (30) becomes the new default (5). Only the
+    /// app-level value migrates — a per-account override is an explicit
+    /// user choice and is left alone, as is any other value (including an
+    /// explicit 0 = never). Persists only when something actually changed,
+    /// same as `normalize_default_labels`.
+    fn normalize_legacy_suspend_default(&self) -> Result<(), String> {
+        let changed = {
+            let mut apps = self
+                .apps
+                .lock()
+                .map_err(|e| format!("store lock poisoned: {e}"))?;
+            migrate_legacy_suspend_default(&mut apps)
+        };
+        if changed {
+            self.save()?;
+        }
+        Ok(())
     }
 
     /// Rename legacy "Default" account labels to "Main". Persists only when
@@ -1165,6 +1200,22 @@ impl AppStore {
     }
 }
 
+/// Pure core of the 30 -> 5 suspend migration, kept free of the store so
+/// unit tests can drive it without an `AppHandle`. Returns whether
+/// anything changed. Only the app-level value migrates: a per-account
+/// override of 30 is an explicit user choice and is left alone, as are
+/// 0 (never) and every other value.
+fn migrate_legacy_suspend_default(apps: &mut [WebApp]) -> bool {
+    let mut changed = false;
+    for app in apps.iter_mut() {
+        if app.settings.auto_suspend_minutes == AppStore::LEGACY_SUSPEND_DEFAULT_MINUTES {
+            app.settings.auto_suspend_minutes = default_auto_suspend_minutes();
+            changed = true;
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,8 +1227,64 @@ mod tests {
         assert_eq!(s.popup_policy, "allow");
         assert!(s.popup_allowlist.is_empty());
         assert!(s.adblock_enabled);
-        assert_eq!(s.auto_suspend_minutes, 15);
+        assert_eq!(s.auto_suspend_minutes, 5);
         assert_eq!(s.auto_close_minutes, 15);
+    }
+
+    fn test_app(suspend: u64, account_suspend: Option<u64>) -> WebApp {
+        WebApp {
+            id: "app-1".to_string(),
+            name: "Test".to_string(),
+            url: "https://example.com".to_string(),
+            icon: None,
+            color: "#ffffff".to_string(),
+            settings: AppSettings {
+                auto_suspend_minutes: suspend,
+                ..AppSettings::default()
+            },
+            accounts: vec![Account {
+                id: "acct-1".to_string(),
+                app_id: "app-1".to_string(),
+                label: "Main".to_string(),
+                color: "#ffffff".to_string(),
+                session_dir: "/tmp/sess".to_string(),
+                thumbnail: None,
+                popup_policy: None,
+                auto_suspend_minutes: account_suspend,
+                auto_close_minutes: None,
+                adblock_enabled: None,
+                keep_awake: None,
+                last_opened: 0,
+                created_at: 0,
+            }],
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn legacy_suspend_default_migrates_to_five() {
+        // The old untouched default (30) becomes the new default (5).
+        let mut apps = vec![test_app(30, None)];
+        assert!(migrate_legacy_suspend_default(&mut apps));
+        assert_eq!(apps[0].settings.auto_suspend_minutes, 5);
+        // The migration is idempotent: a second pass changes nothing.
+        assert!(!migrate_legacy_suspend_default(&mut apps));
+        assert_eq!(apps[0].effective_auto_suspend_minutes("acct-1"), 5);
+    }
+
+    #[test]
+    fn legacy_suspend_migration_leaves_real_choices_alone() {
+        // 0 (never), an explicit 10, and a per-account override of 30
+        // are all deliberate values — none of them migrates.
+        let mut apps = vec![
+            test_app(0, None),
+            test_app(10, None),
+            test_app(5, Some(30)),
+        ];
+        assert!(!migrate_legacy_suspend_default(&mut apps));
+        assert_eq!(apps[0].settings.auto_suspend_minutes, 0);
+        assert_eq!(apps[1].settings.auto_suspend_minutes, 10);
+        assert_eq!(apps[2].effective_auto_suspend_minutes("acct-1"), 30);
     }
 
     #[test]

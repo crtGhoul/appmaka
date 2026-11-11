@@ -77,7 +77,7 @@ pub struct Transcript {
 struct DictationFile {
     #[serde(default = "default_hotkey")]
     hotkey: String,
-    /// "tiny" or "base".
+    /// "tiny", "base", or "small".
     #[serde(default = "default_model")]
     model: String,
     /// Hold-to-talk (v0.14.2): hold the hotkey to record, let go to
@@ -349,7 +349,7 @@ pub fn copy_dictation_transcript(app: AppHandle, id: String) -> Result<(), Strin
 
 #[tauri::command]
 pub fn set_dictation_model(app: AppHandle, model: String) -> Result<DictationStatus, String> {
-    if model != "tiny" && model != "base" {
+    if model != "tiny" && model != "base" && model != "small" {
         return Err("Unknown speech model.".to_string());
     }
     with_data(&app, |d| d.model = model)?;

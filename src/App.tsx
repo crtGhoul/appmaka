@@ -9,6 +9,7 @@ import type { Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { isAppHidden } from "./visibility";
+import { isAtLeastVersion, isNewerVersion } from "./semver";
 import { RamDashboard } from "./RamDashboard";
 import { ForgetLoginDialog, forgetLogin } from "./ForgetLoginDialog";
 import { ErrorDialog } from "./ErrorDialog";
@@ -88,8 +89,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   popup_policy: "block",
   popup_allowlist: [],
   adblock_enabled: true,
-  auto_suspend_minutes: 30,
-  auto_close_minutes: 30,
+  auto_suspend_minutes: 5,
+  auto_close_minutes: 5,
 };
 
 const DEFAULT_COLOR = "#64748b";
@@ -1389,11 +1390,15 @@ function AppSettingsForm({
 function PopupPermissionsRow({
   app,
   globalAllow,
+  collapsed,
+  onToggle,
   onSaved,
   onError,
 }: {
   app: WebApp;
   globalAllow: boolean;
+  collapsed: boolean;
+  onToggle: () => void;
   onSaved: (app: WebApp) => void;
   onError: (msg: string) => void;
 }) {
@@ -1457,6 +1462,30 @@ function PopupPermissionsRow({
           : "Uses app setting";
     return `${account.label} — ${state}`;
   });
+
+  // Collapsed: one line — name, host, current setting. The setting
+  // comes from the row's live state, so an unsaved edit still reads
+  // true here; the marker says so until Save lands it.
+  if (collapsed) {
+    return (
+      <li className="popup-permissions-row popup-permissions-row-collapsed">
+        <button
+          type="button"
+          className="popup-permissions-summary"
+          onClick={onToggle}
+          aria-expanded={false}
+          aria-label={`${app.name}, popups ${popupPolicy === "allow" ? "allowed" : "blocked"}. Expand to edit.`}
+        >
+          <span className="popup-permissions-summary-name">{app.name}</span>
+          <span className="muted small">{hostOf(app.url)}</span>
+          {dirty && <span className="muted small">Unsaved changes</span>}
+          <span className="popup-permissions-summary-policy">
+            {popupPolicy === "allow" ? "Allow" : "Block"}
+          </span>
+        </button>
+      </li>
+    );
+  }
 
   return (
     <li className="popup-permissions-row">
@@ -1527,11 +1556,15 @@ function PopupPermissionsRow({
 function PopupPermissionsPanel({
   apps,
   launcherSettings,
+  collapsedIds,
+  onToggleRow,
   onSaved,
   onError,
 }: {
   apps: WebApp[];
   launcherSettings: LauncherSettings | null;
+  collapsedIds: Set<string>;
+  onToggleRow: (id: string) => void;
   onSaved: (app: WebApp) => void;
   onError: (msg: string) => void;
 }) {
@@ -1558,6 +1591,8 @@ function PopupPermissionsPanel({
               key={app.id}
               app={app}
               globalAllow={globalAllow}
+              collapsed={collapsedIds.has(app.id)}
+              onToggle={() => onToggleRow(app.id)}
               onSaved={onSaved}
               onError={onError}
             />
@@ -2070,17 +2105,6 @@ type UpdateStatus =
   | { kind: "launched"; version: string }
   | { kind: "failed"; message: string };
 
-/** Dotted-numeric compare: is `current` at least `target`? */
-function versionAtLeast(current: string, target: string): boolean {
-  const a = current.split(".").map((p) => parseInt(p, 10) || 0);
-  const b = target.split(".").map((p) => parseInt(p, 10) || 0);
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const d = (a[i] ?? 0) - (b[i] ?? 0);
-    if (d !== 0) return d > 0;
-  }
-  return true;
-}
-
 /**
  * "AppMaka vX.Y.Z", read from the running binary at runtime — never
  * hardcoded. Falls back to just "AppMaka" when the read fails.
@@ -2150,6 +2174,9 @@ function UpdaterSection({
   // mounts).
   const autoDownload = useRef(true);
   const pendingRecord = useRef<string | null>(null);
+  // The running version, for the downgrade guard in runCheck: a
+  // manifest announcing a version <= this one is never offered.
+  const currentVersion = useRef<string | null>(null);
   const settingsReady = useRef<Promise<void> | null>(null);
   // The version `pending.current` has actually downloaded this session.
   // install() only works on the Update object that downloaded, so a
@@ -2168,6 +2195,11 @@ function UpdaterSection({
           pendingRecord.current = s.pending_update_version;
         } catch {
           /* built-in defaults stand */
+        }
+        try {
+          currentVersion.current = await getVersion();
+        } catch {
+          /* the downgrade guard just stays off */
         }
         if (isWindows) {
           try {
@@ -2255,6 +2287,22 @@ function UpdaterSection({
         return;
       }
       if (downloadInFlight.current) return;
+      // Downgrade guard: never offer or apply a manifest version <=
+      // the running one. The plugin normally filters these itself, but
+      // a stale mirror (or a future allow-downgrades config) must not
+      // be able to talk the panel into reinstalling the current build
+      // or stepping back to an older one.
+      const current = currentVersion.current;
+      if (current && !isNewerVersion(update.version, current)) {
+        if (manual) setStatus({ kind: "uptodate" });
+        if (
+          pendingRecord.current &&
+          !isNewerVersion(pendingRecord.current, current)
+        ) {
+          void clearPendingRecord();
+        }
+        return;
+      }
       if (downloadedVersion.current === update.version && pending.current) {
         // Already downloaded this session by the object in `pending` —
         // keep that object (install() needs it) and just re-show the state.
@@ -2306,7 +2354,7 @@ function UpdaterSection({
       try {
         const current = await getVersion();
         if (!alive) return;
-        if (versionAtLeast(current, recorded)) {
+        if (isAtLeastVersion(current, recorded)) {
           await clearPendingRecord();
           return;
         }
@@ -2347,6 +2395,12 @@ function UpdaterSection({
         setStatus({ kind: "downloaded", version: update.version });
         return;
       }
+      // The NSIS install exits the process outright once the installer
+      // is launched, so the session write + sentinel clear has to happen
+      // before downloadAndInstall, not after it. The fused call gives
+      // no hook between download and install, so the flag is raised for
+      // the download too — the catch below undoes it on any failure.
+      await invoke("prepare_for_update_install");
       await update.downloadAndInstall((event) => {
         if (event.event === "Started") {
           totalBytes.current = event.data.contentLength ?? null;
@@ -2363,6 +2417,14 @@ function UpdaterSection({
       });
       setStatus({ kind: "ready", version: update.version });
     } catch (e) {
+      // A failed download-and-install leaves the app running, so undo
+      // the exit prep: a stuck shutting-down flag would silently drop
+      // pinned-window close confirms for the rest of the session. The
+      // pending note was never saved on this path, so there is nothing
+      // to keep or clear here.
+      await invoke("cancel_update_exit").catch(() => {
+        /* the app is still here either way */
+      });
       // Plain-language, and it stays visible — never a silent return to the
       // "Download & install" button.
       setStatus({ kind: "failed", message: plainUpdateError(e) });
@@ -2375,11 +2437,6 @@ function UpdaterSection({
     if (status.kind !== "downloaded") return;
     const version = status.version;
     const update = pending.current;
-    // Installing retires the note even though the app is about to exit:
-    // if the install is cancelled in the wizard, the next launch simply
-    // offers the update again.
-    downloadedVersion.current = null;
-    await clearPendingRecord();
     try {
       const installType = await invoke<string>("get_install_type");
       if (installType === "msi" && isWindows) {
@@ -2391,6 +2448,10 @@ function UpdaterSection({
         });
         try {
           await invoke("launch_msi_update");
+          // Reached only if the launch path resolved without exiting
+          // (dev builds): the install is underway, so retire the note.
+          downloadedVersion.current = null;
+          await clearPendingRecord();
           setStatus({ kind: "launched", version });
         } finally {
           unlistenLaunched();
@@ -2404,7 +2465,29 @@ function UpdaterSection({
         });
         return;
       }
-      await update.install();
+      // The NSIS install exits the process outright once the installer
+      // is launched, so the session write + sentinel clear has to happen
+      // before install(), not after it.
+      await invoke("prepare_for_update_install");
+      try {
+        await update.install();
+      } catch (e) {
+        // Install failed or was aborted: the app is still here, so undo
+        // the exit prep (a stuck shutting-down flag would silently drop
+        // pinned-window close confirms) and keep the pending note so the
+        // next launch offers the update again.
+        await invoke("cancel_update_exit").catch(() => {
+          /* the app is still here either way */
+        });
+        throw e;
+      }
+      // install() only returns on platforms where it doesn't exit the
+      // process (Linux): the new version is in place, so retire the
+      // note. On Windows the process is already gone by here — the note
+      // survives, and the next launch's version check clears it once the
+      // new version is actually running.
+      downloadedVersion.current = null;
+      await clearPendingRecord();
       if (isWindows) {
         setStatus({ kind: "launched", version });
       } else {
@@ -2710,6 +2793,11 @@ function AppShell() {
     return () => mq.removeEventListener("change", onChange);
   }, []);
   const [launcherPanelOpen, setLauncherPanelOpen] = useState(false);
+  // Popup permissions panel: ids of rows collapsed to one line. Empty
+  // means all expanded (the default); the panel-head toggle fills or
+  // clears it. Component state only — collapsing is a view choice, not
+  // a setting, so nothing is persisted.
+  const [popupCollapsedIds, setPopupCollapsedIds] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   // v0.8.0 workspaces: owned here so the launcher filter and the library
@@ -2781,8 +2869,10 @@ function AppShell() {
   const [view, setView] = useState<"launcher" | "library" | "downloads">(
     "launcher"
   );
-  // Bumped on every hotkey summon so the panel entrance animation replays
-  // (the React tree stays mounted while the window just hides/shows).
+  // Bumped on every hotkey summon so the [summonCount] effect below
+  // re-focuses and selects the search input. (It used to be the React
+  // key on the folder panel too, remounting the whole panel per summon
+  // and replaying the entrance animation; the tree stays mounted now.)
   const [summonCount, setSummonCount] = useState(0);
 
   // v0.9.5: "Ask me" session-restore offer — one-time per launch, enforced
@@ -2832,28 +2922,66 @@ function AppShell() {
   );
   const [awakeKeys, setAwakeKeys] = useState<Set<string>>(new Set());
   const [adblockKeys, setAdblockKeys] = useState<Set<string>>(new Set());
+  // v0.18.14: refreshWindowPins diffing — the summon path used to write
+  // 9 state values unconditionally, re-rendering the whole launcher on
+  // every hotkey press. Same-content writes now keep the previous
+  // reference, so React bails out. The RAM scan is cached 5s: the scan
+  // itself is the cost, not the display.
+  const lastRamScanAtRef = useRef(0);
+  const cachedRamRef = useRef<AccountMemory[]>([]);
+  // Set on arrow-key navigation only: mouse hover must not yank the
+  // highlighted tile into view (it already sits under the cursor).
+  const keyboardNavRef = useRef(false);
+  const sameSet = (a: Set<string>, b: Set<string>): boolean => {
+    if (a.size !== b.size) return false;
+    for (const v of a) if (!b.has(v)) return false;
+    return true;
+  };
+  const sameMap = <K, V>(a: Map<K, V>, b: Map<K, V>): boolean => {
+    if (a.size !== b.size) return false;
+    for (const [k, v] of a) if (b.get(k) !== v) return false;
+    return true;
+  };
   const refreshWindowPins = useCallback(async () => {
     try {
-      const ramTimeout = new Promise<AccountMemory[]>((resolve) =>
-        setTimeout(() => resolve([]), 5000)
-      );
-      const [wins, ram, sleep, tabbed] = await Promise.all([
-        invoke<OpenAccountWindow[]>("list_open_account_windows"),
-        Promise.race([
+      // 5s-cached RAM scan: within the window serve the cached values;
+      // on a slow scan fall back to them after 2500ms instead of [].
+      const ramPromise = (async (): Promise<AccountMemory[]> => {
+        const now = Date.now();
+        if (now - lastRamScanAtRef.current < 5000)
+          return cachedRamRef.current;
+        const fresh = await Promise.race([
           invoke<AccountMemory[]>("account_memory").catch(
             (): AccountMemory[] => []
           ),
-          ramTimeout,
-        ]),
+          new Promise<AccountMemory[]>((resolve) =>
+            setTimeout(() => resolve(cachedRamRef.current), 2500)
+          ),
+        ]);
+        lastRamScanAtRef.current = Date.now();
+        cachedRamRef.current = fresh;
+        return fresh;
+      })();
+      const [wins, ram, sleep, tabbed] = await Promise.all([
+        invoke<OpenAccountWindow[]>("list_open_account_windows"),
+        ramPromise,
         invoke<SleepInfo[]>("sleep_state").catch((): SleepInfo[] => []),
         invoke<TabbedWindowInfo[]>("list_tabbed_windows").catch(
           (): TabbedWindowInfo[] => []
         ),
       ]);
-      setOpenLabels(new Set(wins.map((w) => w.label)));
-      setPinnedLabels(
-        new Set(wins.filter((w) => w.pinned).map((w) => w.label))
-      );
+      // Diffed writes: same content keeps the previous reference, so
+      // React bails out instead of re-rendering the launcher per summon.
+      setOpenLabels((prev) => {
+        const next = new Set(wins.map((w) => w.label));
+        return sameSet(prev, next) ? prev : next;
+      });
+      setPinnedLabels((prev) => {
+        const next = new Set(
+          wins.filter((w) => w.pinned).map((w) => w.label)
+        );
+        return sameSet(prev, next) ? prev : next;
+      });
       const unread = new Map<string, number>();
       for (const w of wins) {
         if (w.unread != null && w.unread > 0) {
@@ -2870,14 +2998,15 @@ function AppShell() {
           }
         }
       }
-      setUnreadCounts(unread);
-      setSuspendedKeys(
-        new Set(
+      setUnreadCounts((prev) => (sameMap(prev, unread) ? prev : unread));
+      setSuspendedKeys((prev) => {
+        const next = new Set(
           wins
             .filter((w) => w.suspended)
             .map((w) => `${w.appId}:${w.accountId}`)
-        )
-      );
+        );
+        return sameSet(prev, next) ? prev : next;
+      });
       // v0.18.5: Now Playing / Awake / Adblock state for open windows.
       const playing = new Map<string, string>();
       const awake = new Set<string>();
@@ -2889,21 +3018,21 @@ function AppShell() {
         if (w.keepAwake) awake.add(key);
         if (w.adblockOn) adblocked.add(key);
       }
-      setPlayingTitles(playing);
-      setAwakeKeys(awake);
-      setAdblockKeys(adblocked);
+      setPlayingTitles((prev) => (sameMap(prev, playing) ? prev : playing));
+      setAwakeKeys((prev) => (sameSet(prev, awake) ? prev : awake));
+      setAdblockKeys((prev) => (sameSet(prev, adblocked) ? prev : adblocked));
       const ramMap = new Map<string, number>();
       for (const m of ram) {
         if (m.rssKb > 0) {
           ramMap.set(`${m.appId}:${m.accountId}`, m.rssKb);
         }
       }
-      setAccountRam(ramMap);
+      setAccountRam((prev) => (sameMap(prev, ramMap) ? prev : ramMap));
       const sleepMap = new Map<string, number>();
       for (const s of sleep) {
         sleepMap.set(`${s.appId}:${s.accountId}`, s.rssKb);
       }
-      setSleeping(sleepMap);
+      setSleeping((prev) => (sameMap(prev, sleepMap) ? prev : sleepMap));
     } catch {
       /* older backend without the command; the menu entry stays hidden */
     }
@@ -2976,15 +3105,25 @@ function AppShell() {
     void checkRestoreOffer();
     void refreshWindowPins();
     let off: (() => void) | undefined;
+    let summonTimer: ReturnType<typeof setTimeout> | undefined;
     listen("appmaka:show-launcher", () => {
-      void checkRestoreOffer();
-      void refreshWindowPins();
+      // Let the window paint and the search input take focus first:
+      // the pin refresh (9 state writes + 4 invokes) used to run in
+      // the same tick as the summon and drop the first typed character.
+      if (summonTimer !== undefined) clearTimeout(summonTimer);
+      summonTimer = setTimeout(() => {
+        void checkRestoreOffer();
+        void refreshWindowPins();
+      }, 180);
     })
       .then((f) => {
         off = f;
       })
       .catch(() => {});
-    return () => off?.();
+    return () => {
+      off?.();
+      if (summonTimer !== undefined) clearTimeout(summonTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -3347,8 +3486,13 @@ function AppShell() {
     // The main window is transparent-capable (tauri.conf.json). The
     // launcher overlay must leave the canvas unpainted so the desktop shows
     // through the frosted panel; the library view keeps the normal opaque
-    // background from styles.css.
+    // background from styles.css. Both <html> and <body> need clearing:
+    // a body's background propagates to the canvas when <html> is
+    // transparent, so clearing <html> alone still paints the window.
+    document.documentElement.dataset.view = view;
     document.documentElement.style.background =
+      view === "launcher" ? "transparent" : "";
+    document.body.style.background =
       view === "launcher" ? "transparent" : "";
     void (async () => {
       try {
@@ -3715,6 +3859,10 @@ function AppShell() {
     () => filterAppsByWorkspace(apps, activeWorkspace),
     [apps, activeWorkspace]
   );
+  const pinnedIdsSet = useMemo(
+    () => new Set(launcherSettings?.pinned ?? []),
+    [launcherSettings?.pinned]
+  );
   const items = useMemo(() => {
     return query.trim()
       ? buildResults(query, scopedApps, programs, routines, sortOpts)
@@ -3820,10 +3968,6 @@ function AppShell() {
     },
   });
 
-  useEffect(() => {
-    setActiveIndex(0);
-  }, [query]);
-
   // Keep the highlight inside the list when the items change underneath it
   // (e.g. apps finishing loading while the overlay is open).
   useEffect(() => {
@@ -3831,7 +3975,11 @@ function AppShell() {
   }, [items]);
 
   // Keep the highlighted tile visible while arrow-keying through the grid.
+  // Keyboard-only: mouse hover also moves activeIndex, and scrolling the
+  // grid under the cursor on every hover is the yank the user feels.
   useEffect(() => {
+    if (!keyboardNavRef.current) return;
+    keyboardNavRef.current = false;
     document
       .querySelector(".icon-tile.is-active")
       ?.scrollIntoView({ block: "nearest" });
@@ -3904,15 +4052,19 @@ function AppShell() {
     const last = items.length - 1;
     if (e.key === "ArrowDown") {
       e.preventDefault();
+      keyboardNavRef.current = true;
       setActiveIndex((i) => Math.min(i + GRID_COLUMNS, last));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
+      keyboardNavRef.current = true;
       setActiveIndex((i) => Math.max(i - GRID_COLUMNS, 0));
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
+      keyboardNavRef.current = true;
       setActiveIndex((i) => Math.min(i + 1, last));
     } else if (e.key === "ArrowLeft") {
       e.preventDefault();
+      keyboardNavRef.current = true;
       setActiveIndex((i) => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       // A shown command row owns Enter; otherwise activate the tile.
@@ -4017,12 +4169,14 @@ function AppShell() {
         )}
         <div
           className="folder-panel"
-          key={summonCount}
           style={{ "--folder-alpha": String(launcherSettings?.panel_opacity ?? 0.55) } as React.CSSProperties}
         >
           <SearchBar
             query={query}
-            onQuery={setQuery}
+            onQuery={(q) => {
+              setQuery(q);
+              setActiveIndex(0);
+            }}
             onKeyDown={onSearchKeyDown}
             inputRef={searchRef}
           />
@@ -4158,7 +4312,7 @@ function AppShell() {
                 onHover={setActiveIndex}
                 onActivate={(r) => void activateResult(r)}
                 renderIcon={renderResultIcon}
-                pinnedIds={new Set(launcherSettings?.pinned ?? [])}
+                pinnedIds={pinnedIdsSet}
                 badgeFor={(r) =>
                   (launcherSettings?.show_badges ?? true) && r.kind === "account"
                     ? unreadCounts.get(`${r.app.id}:${r.account.id}`)
@@ -4542,16 +4696,40 @@ function AppShell() {
       <section className="panel popup-permissions-panel">
         <div className="panel-head">
           <h2>Popup permissions</h2>
+          {apps.length > 0 && (
+            <button
+              className="text-button popup-permissions-toggle"
+              onClick={() =>
+                setPopupCollapsedIds((prev) =>
+                  apps.every((a) => prev.has(a.id))
+                    ? new Set()
+                    : new Set(apps.map((a) => a.id)),
+                )
+              }
+              aria-expanded={!apps.every((a) => popupCollapsedIds.has(a.id))}
+            >
+              {apps.every((a) => popupCollapsedIds.has(a.id)) ? "Show all" : "Collapse all"}
+            </button>
+          )}
         </div>
         <PopupPermissionsPanel
           apps={apps}
           launcherSettings={launcherSettings}
+          collapsedIds={popupCollapsedIds}
+          onToggleRow={(id) =>
+            setPopupCollapsedIds((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            })
+          }
           onSaved={replaceApp}
           onError={setError}
         />
       </section>
 
-      <section className="panel">
+      <section className="panel launcher-panel">
         <div className="panel-head">
           <h2>Launcher</h2>
           <button
@@ -4603,7 +4781,7 @@ function AppShell() {
         />
       </section>
 
-      <section className="panel">
+      <section className="panel clipboard-panel">
         <div className="panel-head">
           <h2>Clipboard</h2>
         </div>

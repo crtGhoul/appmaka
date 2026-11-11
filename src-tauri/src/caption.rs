@@ -2265,7 +2265,17 @@ mod imp {
                         z: Z::Top,
                     });
                 }
-                return Some(Plan::HideReveal(cp.hwnd));
+                // Only arm the 120ms reveal poll while the owner is the
+                // foreground window: a background fullscreen/auto-hide
+                // owner can't be moused to its top edge, so polling for
+                // it burns 8.3 wakeups/s for nothing. Plan::Hide kills
+                // the timer (see the match below).
+                let owner_active = GetForegroundWindow() == cp.owner;
+                return Some(if owner_active {
+                    Plan::HideReveal(cp.hwnd)
+                } else {
+                    Plan::Hide(cp.hwnd)
+                });
             }
             let z = if cp.fs_topmost { Z::UnTop } else { Z::Keep };
             if IsZoomed(cp.owner).as_bool() {
