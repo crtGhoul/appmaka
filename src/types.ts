@@ -193,6 +193,12 @@ export interface LauncherSettings {
    * (v0.18.7, Windows only). Backend always sends it (serde default).
    */
   auto_hide_top_bar: boolean;
+  /**
+   * Auto-allow site permissions (v0.18.14): when true, sites in any app
+   * window get microphone, camera, geolocation, and notifications
+   * without asking. Backend always sends it (serde default).
+   */
+  auto_allow_permissions: boolean;
   /** Accent color for the launcher/manager UI (v0.13.17). Backend always sends it (serde default). */
   accent: "indigo" | "violet" | "blue" | "teal" | "green" | "amber" | "rose";
   /** UI theme (v0.13.17): follow the OS, or force dark/light. Backend always sends it. */
