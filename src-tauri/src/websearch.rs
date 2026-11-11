@@ -407,16 +407,34 @@ fn build_search_window(
     // hook never blocks the navigation: it hands off to a detached
     // thread and always allows. Ungated — the reuse path already
     // reapplies on all platforms.
+    // Shared live page URL for the network hook (see windows.rs),
+    // and the state clone the nav hook refreshes adblock layers with.
+    let search_page_url = crate::adblock::new_page_url(url.as_str());
+    let search_adblock = adblock.clone();
+    // One shared URL value: the nav hook updates it, the network
+    // hook reads it. Windows-only binding: the hook only exists there.
+    #[cfg(windows)]
+    let attach_page_url = search_page_url.clone();
     {
         let nav_app = app.clone();
-        builder = builder.on_navigation(move |_nav_url: &url::Url| {
+        builder = builder.on_navigation(move |nav_url: &url::Url| {
             let app = nav_app.clone();
+            let u = nav_url.clone();
+            let nav_adblock = search_adblock.clone();
+            let nav_page_url = search_page_url.clone();
             std::thread::Builder::new()
                 .name("appmaka-search-cursor".to_string())
                 .spawn(move || {
                     crate::windows::schedule_cursor_reapply(
-                        app,
+                        app.clone(),
                         SEARCH_WINDOW_LABEL.to_string(),
+                    );
+                    crate::windows::reapply_adblock_on_navigation(
+                        &app,
+                        &nav_adblock,
+                        &nav_page_url,
+                        &u,
+                        SEARCH_WINDOW_LABEL,
                     );
                 })
                 .ok();
@@ -455,8 +473,15 @@ fn build_search_window(
         // of kicking out to the system browser.
         .on_download(crate::downloads::make_download_handler(app.clone()));
     // target=_blank shim (WebKitGTK drops the clicks otherwise) + Alt+Left/
-    // Alt+Right history nav: bare webviews have no chrome.
-    builder = builder.initialization_script(TARGET_BLANK_SHIM_JS);
+    // Alt+Right history nav: bare webviews have no chrome. Guard +
+    // cosmetic + scriptlets + skipper run in ALL frames (see the
+    // account-window builder). The gesture reporter is new here: this
+    // window has the download handler, but no gesture ever reached the
+    // gate before, so every legitimate download from a search page
+    // was blocked as "no click started it".
+    builder = builder.initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS);
+    builder = builder.initialization_script_for_all_frames(crate::windows::window_open_guard_js(&[]));
+    builder = builder.initialization_script_for_all_frames(crate::windows::GESTURE_REPORT_JS);
     builder = builder.initialization_script(NAV_KEYS_JS);
     builder = builder.initialization_script(shortcuts_overlay_js(app));
     // v0.12.0: AppMaka search chrome — return button + search field with
@@ -473,8 +498,13 @@ fn build_search_window(
     }
     let css = adblock.cosmetic_css_for(url.as_str());
     if !css.is_empty() {
-        builder = builder.initialization_script(cosmetic_init_script(&css));
+        builder = builder.initialization_script_for_all_frames(cosmetic_init_script(&css));
     }
+    let scriptlets = adblock.scriptlet_js_for(url.as_str());
+    if !scriptlets.is_empty() {
+        builder = builder.initialization_script_for_all_frames(scriptlets);
+    }
+    builder = builder.initialization_script_for_all_frames(adblock.yt_ad_skipper_js());
     // Not an account, so no per-account override: the app default (on).
     // The flag only exists where network blocking does (Windows).
     #[cfg(windows)]
@@ -483,7 +513,7 @@ fn build_search_window(
         Ok(window) => {
             crate::windows::ensure_on_visible_monitor(app, &window);
             #[cfg(windows)]
-            crate::adblock::attach_network_blocking(&window, adblock, adblock_flag, url.as_str().to_string());
+            crate::adblock::attach_network_blocking(&window, adblock, adblock_flag, attach_page_url);
             #[cfg(windows)]
             crate::windows::attach_fullscreen_sync(&window);
             // v0.9.6: DWM shadow on the frameless window + caption strip
@@ -528,6 +558,12 @@ fn build_search_window(
                         crate::session::schedule_session_write(&wipe_app);
                         // v0.9.6: keep the caption strip above the window.
                         crate::caption::page_window_moved(SEARCH_WINDOW_LABEL);
+                    }
+                    // Focused-back focus: Alt+Tab back must route focus
+                    // into the webview, or clicks land on a dead page.
+                    WindowEvent::Focused(true) => {
+                        #[cfg(windows)]
+                        crate::windows::focus_webview(&wipe_app, SEARCH_WINDOW_LABEL);
                     }
                     _ => {}
                 }
