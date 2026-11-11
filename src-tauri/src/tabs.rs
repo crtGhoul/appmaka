@@ -432,6 +432,10 @@ struct TabPage {
     popup: Option<crate::windows::PopupContext>,
     adblock_css: String,
     adblock_scriptlet: String,
+    /// Per-account adblock override (same rule as account windows).
+    /// Windows-only: it feeds the network hook, which only exists there.
+    #[cfg(windows)]
+    adblock_enabled: bool,
 }
 
 fn resolve_tab_page(
@@ -476,8 +480,14 @@ fn resolve_tab_page(
                     parent_label: String::new(),
                     chain_allowed: false,
                 }),
-                adblock_css: adblock.cosmetic_css_for(&web_app.url),
-                adblock_scriptlet: adblock.scriptlet_js_for(&web_app.url),
+                // Cosmetic/scriptlet rules are for the page the tab is
+                // actually opening (last-visited URL), not the app's
+                // home URL — a tab restored onto a sub-page got the
+                // wrong domain's rules before.
+                adblock_css: adblock.cosmetic_css_for(url_str),
+                adblock_scriptlet: adblock.scriptlet_js_for(url_str),
+                #[cfg(windows)]
+                adblock_enabled: web_app.effective_adblock_enabled(&e.account_id),
                 session_dir,
             })
         }
@@ -496,6 +506,8 @@ fn resolve_tab_page(
                 popup: None,
                 adblock_css: String::new(),
                 adblock_scriptlet: String::new(),
+                #[cfg(windows)]
+                adblock_enabled: true,
                 session_dir: dir,
             })
         }
@@ -534,6 +546,11 @@ fn build_tabbed_window(
     let label_owned = args.label.to_string();
     let geometry = args.geometry;
     let placement = args.placement;
+    // Shared live page URL for the network hook (see windows.rs).
+    let page_url = crate::adblock::new_page_url(page.url.as_str());
+    // Windows-only: the per-account flag feeds the network hook.
+    #[cfg(windows)]
+    let adblock_enabled = page.adblock_enabled;
 
     let build_tab_once = |attempt: u8| -> Result<WebviewWindow, String> {
         let app_for_thread = app.clone();
@@ -544,6 +561,9 @@ fn build_tabbed_window(
         let popup_ctx = page.popup.clone();
         let adblock_css = page.adblock_css.clone();
         let adblock_scriptlet = page.adblock_scriptlet.clone();
+        let b_page_url = page_url.clone();
+        let b_adblock = adblock.clone();
+        let b_yt_skipper_js = adblock.yt_ad_skipper_js();
         let (tx, rx) = std::sync::mpsc::channel::<Result<WebviewWindow, String>>();
 
         std::thread::Builder::new()
@@ -588,20 +608,27 @@ fn build_tabbed_window(
                         });
                     }
                 }
+                // Guard/adblock layers run in ALL frames (see the
+                // account-window builder for why).
                 builder = builder
                     .on_download(crate::downloads::make_download_handler(window_app.clone()))
-                    .initialization_script(crate::windows::TARGET_BLANK_SHIM_JS)
-                    .initialization_script(guard_js)
-                    .initialization_script(crate::windows::GESTURE_REPORT_JS)
+                    .initialization_script_for_all_frames(crate::windows::TARGET_BLANK_SHIM_JS)
+                    .initialization_script_for_all_frames(guard_js)
+                    .initialization_script_for_all_frames(crate::windows::GESTURE_REPORT_JS)
                     .initialization_script(crate::windows::NAV_KEYS_JS)
                     .initialization_script(crate::windows::shortcuts_overlay_js(&window_app));
                 if !adblock_css.is_empty() {
-                    builder = builder
-                        .initialization_script(crate::windows::cosmetic_init_script(&adblock_css));
+                    builder = builder.initialization_script_for_all_frames(
+                        crate::windows::cosmetic_init_script(&adblock_css),
+                    );
                 }
                 if !adblock_scriptlet.is_empty() {
-                    builder = builder.initialization_script(adblock_scriptlet);
+                    builder = builder.initialization_script_for_all_frames(adblock_scriptlet);
                 }
+                // Tabbed windows never got the YouTube ad-skipper (the
+                // account builder injects it unconditionally); without
+                // it video ads played straight through in tabbed mode.
+                builder = builder.initialization_script_for_all_frames(b_yt_skipper_js);
                 let cursor_js = crate::windows::saved_cursor_js(&window_app);
                 if !cursor_js.is_empty() {
                     builder = builder.initialization_script(cursor_js);
@@ -617,11 +644,16 @@ fn build_tabbed_window(
                         let app = nav_app.clone();
                         let lbl = nav_label.clone();
                         let u = nav_url.clone();
+                        let nav_adblock = b_adblock.clone();
+                        let nav_page_url = b_page_url.clone();
                         std::thread::Builder::new()
                             .name(format!("appmaka-tabbed-retint-{lbl}"))
                             .spawn(move || {
                                 tint_tabbed_caption(&app, &lbl, &u);
                                 crate::windows::schedule_cursor_reapply(app.clone(), lbl.clone());
+                                crate::windows::reapply_adblock_on_navigation(
+                                    &app, &nav_adblock, &nav_page_url, &u, &lbl,
+                                );
                             })
                             .ok();
                         true
@@ -631,7 +663,14 @@ fn build_tabbed_window(
                 {
                     let nav_app = window_app.clone();
                     let nav_label = label.clone();
-                    builder = builder.on_navigation(move |_nav_url: &url::Url| {
+                    builder = builder.on_navigation(move |nav_url: &url::Url| {
+                        crate::windows::reapply_adblock_on_navigation(
+                            &nav_app,
+                            &b_adblock,
+                            &b_page_url,
+                            nav_url,
+                            &nav_label,
+                        );
                         crate::windows::schedule_cursor_reapply(nav_app.clone(), nav_label.clone());
                         true
                     });
@@ -693,6 +732,16 @@ fn build_tabbed_window(
             })?
         }
     };
+    // Network blocking for tabbed windows: the hook was only ever
+    // attached to standalone account windows, so the same account in
+    // tabbed mode loaded ads/trackers unblocked. Same shared engine.
+    #[cfg(windows)]
+    crate::adblock::attach_network_blocking(
+        &window,
+        adblock,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(adblock_enabled)),
+        page_url,
+    );
     if needs_cursor_center {
         crate::windows::center_window_on_cursor_monitor(app, &window);
     }
