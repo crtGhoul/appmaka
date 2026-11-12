@@ -2454,6 +2454,22 @@ fn cursor_window_label(label: &str) -> bool {
         || label == crate::websearch::SEARCH_WINDOW_LABEL
 }
 
+/// Decide whether `focus_webview` should issue `MoveFocus(PROGRAMMATIC)`.
+///
+/// Only runs when both window and WebView2 controller are visible, not
+/// minimized, and Win32 keyboard focus is not already inside this webview's
+/// host HWND hierarchy — calling `MoveFocus` while WebView2 already owns focus
+/// triggers a ~1,100 Hz `LostFocus`/`GotFocus` feedback loop on Windows.
+#[cfg(any(windows, test))]
+fn should_move_focus(
+    window_visible: bool,
+    window_iconic: bool,
+    controller_visible: bool,
+    already_in_webview: bool,
+) -> bool {
+    window_visible && !window_iconic && controller_visible && !already_in_webview
+}
+
 /// v0.18.9: focus a window's webview explicitly (Windows-only).
 ///
 /// With Tauri's `unstable` feature on, every window's webview is a child
@@ -2461,15 +2477,77 @@ fn cursor_window_label(label: &str) -> bool {
 /// focus forwarding (WM_SETFOCUS -> MoveFocus). Without it the webview can
 /// sit unfocused while the window looks alive, and mouse clicks never reach
 /// the page — the 0.18.8 dead-clicks regression. `Webview::set_focus`
-/// routes to the WebView2 controller's MoveFocus, which is exactly the call
-/// the parent subclass used to make. Call it whenever a window gains focus
-/// and after show/focus paths that may not fire a Focused event.
-/// Best-effort: a missing webview (mid-teardown) is a silent no-op.
+/// routes to the WebView2 controller's MoveFocus, which is the call the
+/// parent subclass used to make.
+///
+/// Checking visibility and whether Win32 focus already sits inside this
+/// controller's host stops a self-feeding `MoveFocus` -> `LostFocus` ->
+/// `GotFocus` -> `Focused(true)` loop while keeping summon/Alt-Tab focus
+/// intact. Best-effort: a missing webview (mid-teardown) is a silent no-op.
 #[cfg(windows)]
 pub(crate) fn focus_webview(app: &AppHandle, label: &str) {
-    if let Some(webview) = app.get_webview(label) {
-        let _ = webview.set_focus();
-    }
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetGUIThreadInfo, IsChild, IsIconic, IsWindowVisible, GUITHREADINFO,
+    };
+
+    let Some(webview) = app.get_webview(label) else {
+        return;
+    };
+    let Ok(top_hwnd) = webview.window().hwnd() else {
+        return;
+    };
+    let top_hwnd_raw = top_hwnd.0 as usize;
+    let _ = webview.with_webview(move |platform| unsafe {
+        let top_hwnd = HWND(top_hwnd_raw as *mut std::ffi::c_void);
+        let controller = platform.controller();
+        let mut parent_hwnd = HWND::default();
+        let _ = controller.ParentWindow(&mut parent_hwnd);
+
+        let window_visible = IsWindowVisible(top_hwnd).as_bool()
+            && !parent_hwnd.is_invalid()
+            && IsWindowVisible(parent_hwnd).as_bool();
+        let window_iconic = IsIconic(top_hwnd).as_bool();
+
+        let mut ctrl_visible_raw = windows_core::BOOL::from(true);
+        let controller_visible = controller
+            .IsVisible(&mut ctrl_visible_raw)
+            .map(|()| ctrl_visible_raw.as_bool())
+            .unwrap_or(false);
+
+        let is_descendant = |hwnd: HWND| -> bool {
+            !hwnd.is_invalid()
+                && hwnd != top_hwnd
+                && !parent_hwnd.is_invalid()
+                && IsChild(parent_hwnd, hwnd).as_bool()
+        };
+
+        // Check both this thread's GetFocus() and the foreground thread's
+        // hwndFocus because WebView2's Chrome_WidgetWin_1 belongs to the
+        // msedgewebview2 browser process rather than appmaka.exe's UI thread.
+        let thread_focus = GetFocus();
+        let mut gui = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        let fg_focus = if GetGUIThreadInfo(0, &mut gui).is_ok() {
+            gui.hwndFocus
+        } else {
+            HWND::default()
+        };
+        let already_in_webview = is_descendant(thread_focus) || is_descendant(fg_focus);
+
+        if should_move_focus(
+            window_visible,
+            window_iconic,
+            controller_visible,
+            already_in_webview,
+        ) {
+            let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
+    });
 }
 
 /// Push the cursor style into every open app window (settings-change
@@ -5899,6 +5977,15 @@ mod tests {
         }
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn should_move_focus_guards_hidden_minimized_and_already_focused() {
+        assert!(should_move_focus(true, false, true, false));
+        assert!(!should_move_focus(false, false, true, false));
+        assert!(!should_move_focus(true, true, true, false));
+        assert!(!should_move_focus(true, false, false, false));
+        assert!(!should_move_focus(true, false, true, true));
     }
 }
 
