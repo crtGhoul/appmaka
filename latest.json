@@ -1,15 +1,15 @@
 {
-  "version": "0.18.15",
-  "notes": "AppMaka 0.18.15 — Quit actually quits. The app now exits the process outright when you quit, so it no longer stays alive with windows open. Also in here: the popup permissions panel, Ctrl+Shift+A add, small.en dictation, and the auto-allow permissions toggle.",
-  "pub_date": "2026-11-12T02:05:05Z",
+  "version": "0.18.16",
+  "notes": "AppMaka 0.18.16 — the focus-loop fix. The launcher no longer fires a 1,100-per-second focus loop that burned ~22% CPU and made the window flicker like a light. The focus call now only runs when the webview genuinely lacks focus, so idle CPU is effectively zero and the flicker is gone, with the first click still landing. Also in here: the quit fix, popup permissions panel, Ctrl+Shift+A add, small.en dictation, and auto-allow permissions toggle (off by default).",
+  "pub_date": "2026-11-12T16:49:44Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2NOR2ZNVlhxUDB1SDBDRkQ4U2hIM3psSkttTjNRSVpQb2FzVk9IS3FzTFpZTjRrV0xsYzcrZkhHdHB6L2V5STdJN3BDdDZvYlFYQkQvc3dVN01ybVFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDQ3NDE3CWZpbGU6QXBwTWFrYV8wLjE4LjE1X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjE1CnhuT1R2Q3dRNkNGR3ZqNElTblpLK3pOZ2Q1NkJ0NWRiUURpZEtOTEJKZnlZeXdLbUFSVWY5QTRKSUw2ekRrR1FmTFpIRmdNZW0xNE5naUdpd1dGTkF3PT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.15/AppMaka_0.18.15_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1pJUU1UUmdaVTlUWE5ZSHVZa1RMRDExQlVvaUZnQzFGbk1tWGFDSjBGcDN3OHV0bXo1RjI0MzJhcTZuZCtTYmlFaXFpSWIvVDM1YndOWXNwYVh3RndjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTAxMDQwCWZpbGU6QXBwTWFrYV8wLjE4LjE2X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjE2CnYwVUVtaEV1cFhRaVdsbWFHTnQzakFoM2VkRG5aWUpOU2EyQmNMcmIvWGp6NldvNThXdW5kbGh5RlZzYk5UMzRCWlM2VEJweXFlMFF0cDZpdXRSZUFRPT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.16/AppMaka_0.18.16_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1N4dGJzOHBKNjlLSUw5OVZMY21SMzNHeE9iYUlYTC9XK01ScWkxcjQwZXNlbGYycTYvSmhtYXVJMzFCcGttRXgvclNUOFNzc1paOVhFRDcxa0hFNkFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDQ5MDUxCWZpbGU6QXBwTWFrYV8wLjE4LjE1X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4xNQo2TTFEVWt2c2FFcjRyQ2lLSExac0RsOWpjUUlzSzAwV1JEZDE1Mlg2TUFJQ1NubUJxdncxdVJOa3dJVnc5ako3MHJ1M2RCVkQ5aGU4MkE0OUVvRHBBZz09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.15/AppMaka_0.18.15_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1MveUp1aFB5SEZPM1RzdWtLUzBKZnVxUVV4NndyN2hUNFpjcTczTVRKTldTZmZQbjFIL0ladHYrczMyY1JyWG5ZMTZrTG5lZlROc2tLN1p5NzhUQ1FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NDk2OTgzCWZpbGU6QXBwTWFrYV8wLjE4LjE2X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4xNgp6NkVyK2k1VUlWT2d1Z21yNEwvSHFhcGsxZy9yVTJ3bVQybzQ2WHJMQWl4K2J4aXJLNllORWY3dDRFSTB5OFlKSnA2WXJWVnVjbUJqT1h6Zy9ITkVBdz09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.16/AppMaka_0.18.16_amd64.AppImage"
     }
   }
 }
