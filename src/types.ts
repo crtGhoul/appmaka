@@ -60,6 +60,8 @@ export interface WebApp {
   url: string;
   icon: string | null;
   color: string;
+  /** Launcher section override (v0.18.20): null/undefined = auto. Backend always sends it (serde default). */
+  section?: string | null;
   settings: AppSettings;
   accounts: Account[];
   created_at: number;
@@ -182,6 +184,16 @@ export interface LauncherSettings {
    * (v0.13.0). Backend always sends it (serde default).
    */
   open_as_tabbed: boolean;
+  /**
+   * Hold Alt and drag anywhere on a page to move its window (v0.18.20,
+   * Windows only). Backend always sends it (serde default).
+   */
+  alt_drag_move: boolean;
+  /**
+   * Custom launcher sections (v0.18.20), in creation order. Backend
+   * always sends it (serde default).
+   */
+  custom_sections: string[];
   /**
    * Global popup override (v0.13.9): when true, popups open in every app
    * regardless of the per-app popup policy. Backend always sends it
