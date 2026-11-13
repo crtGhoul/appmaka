@@ -156,6 +156,11 @@ pub struct WebApp {
     pub url: String,
     pub icon: Option<String>,
     pub color: String,
+    /// Launcher section override (v0.18.20): `None` = auto (the
+    /// name+URL heuristic), `Some(name)` = the section the app was
+    /// dragged or assigned to. Old records migrate to `None`.
+    #[serde(default)]
+    pub section: Option<String>,
     /// Old records without it migrate to the current default settings.
     #[serde(default)]
     pub settings: AppSettings,
@@ -509,6 +514,7 @@ impl AppStore {
                 url: old.url,
                 icon: None,
                 color: DEFAULT_COLOR.to_string(),
+                section: None,
                 settings: AppSettings::default(),
                 accounts: vec![Account {
                     id: account_id,
@@ -614,6 +620,7 @@ impl AppStore {
             url,
             icon: None,
             color: DEFAULT_COLOR.to_string(),
+            section: None,
             settings: AppSettings::default(),
             accounts: vec![Account {
                 id: account_id,
@@ -740,6 +747,7 @@ impl AppStore {
             url,
             icon: None,
             color: DEFAULT_COLOR.to_string(),
+            section: None,
             settings: AppSettings::default(),
             accounts: vec![Account {
                 id: account_id,
@@ -937,6 +945,31 @@ impl AppStore {
                 .find(|a| a.id == id)
                 .ok_or_else(|| "App not found.".to_string())?;
             app.icon = icon;
+            app.clone()
+        };
+        self.save()?;
+        Ok(updated)
+    }
+
+    /// Set (or clear) an app's launcher section override (v0.18.20).
+    /// `None` (or a blank string) clears it back to auto. The name is
+    /// stored verbatim — the frontend only ever sends a built-in or a
+    /// custom section that exists, and the section lookup treats an
+    /// override naming a removed custom section as auto.
+    pub fn set_app_section(&self, id: &str, section: Option<String>) -> Result<WebApp, String> {
+        let section = section
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let updated = {
+            let mut apps = self
+                .apps
+                .lock()
+                .map_err(|e| format!("store lock poisoned: {e}"))?;
+            let app = apps
+                .iter_mut()
+                .find(|a| a.id == id)
+                .ok_or_else(|| "App not found.".to_string())?;
+            app.section = section;
             app.clone()
         };
         self.save()?;
@@ -1238,6 +1271,7 @@ mod tests {
             url: "https://example.com".to_string(),
             icon: None,
             color: "#ffffff".to_string(),
+            section: None,
             settings: AppSettings {
                 auto_suspend_minutes: suspend,
                 ..AppSettings::default()
@@ -1296,6 +1330,40 @@ mod tests {
         let app: WebApp = serde_json::from_str(json).unwrap();
         assert_eq!(app.settings.popup_policy, "block");
         assert_eq!(app.created_at, 0);
+        // A record written before sections existed has no override.
+        assert_eq!(app.section, None);
+    }
+
+    #[test]
+    fn set_app_section_sets_clears_and_rejects_unknown() {
+        // The store writes apps.json, so the test points it at a
+        // throwaway dir instead of the real app-data dir.
+        let dir = std::env::temp_dir().join("appmaka-test-sections");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = AppStore {
+            path: dir.join("apps.json"),
+            data_dir: dir.clone(),
+            apps: Mutex::new(vec![test_app(5, None)]),
+        };
+        let updated = store
+            .set_app_section("app-1", Some("Work".to_string()))
+            .unwrap();
+        assert_eq!(updated.section.as_deref(), Some("Work"));
+        // Persisted: the file on disk carries the override.
+        let raw = std::fs::read_to_string(dir.join("apps.json")).unwrap();
+        assert!(raw.contains("\"section\": \"Work\""));
+        // Clear it back to auto; a blank string clears too.
+        let cleared = store.set_app_section("app-1", None).unwrap();
+        assert_eq!(cleared.section, None);
+        let cleared = store
+            .set_app_section("app-1", Some("   ".to_string()))
+            .unwrap();
+        assert_eq!(cleared.section, None);
+        assert!(store
+            .set_app_section("no-such-app", Some("AI".to_string()))
+            .is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1323,6 +1391,7 @@ mod tests {
             url: "https://example.com".to_string(),
             icon: None,
             color: "#ffffff".to_string(),
+            section: None,
             settings: AppSettings {
                 adblock_enabled: true,
                 auto_suspend_minutes: 30,

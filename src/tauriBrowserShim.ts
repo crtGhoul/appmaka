@@ -44,6 +44,8 @@ const DEFAULT_LAUNCHER_SETTINGS: LauncherSettings = {
   custom_cursor: "off",
   custom_cursor_color: "violet",
   open_as_tabbed: false,
+  alt_drag_move: true,
+  custom_sections: [],
   allow_popups_globally: false,
   auto_allow_permissions: false,
   auto_hide_top_bar: false,
@@ -642,6 +644,12 @@ if (typeof window !== "undefined") {
           launcherSettings = writeStorage("appmaka:launcher", {
             ...launcherSettings,
             open_as_tabbed: Boolean(args.enabled),
+          });
+          return launcherSettings;
+        case "set_alt_drag_move":
+          launcherSettings = writeStorage("appmaka:launcher", {
+            ...launcherSettings,
+            alt_drag_move: Boolean(args.enabled),
           });
           return launcherSettings;
         case "set_allow_popups_globally":

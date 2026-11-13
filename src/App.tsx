@@ -11,10 +11,8 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { isAppHidden } from "./visibility";
 import { isAtLeastVersion, isNewerVersion } from "./semver";
 import {
-  SECTIONS,
-  SECTION_LABELS,
-  categoryOfResult,
-  type Section,
+  BUILTIN_SECTION_NAMES,
+  sectionOfResult,
 } from "./categories";
 import { RamDashboard } from "./RamDashboard";
 import { ForgetLoginDialog, forgetLogin } from "./ForgetLoginDialog";
@@ -3388,7 +3386,7 @@ function AppShell() {
 
   // v0.8.0: dispatch global hotkey presses (routines / workspaces /
   // per-command hotkeys) to the existing invoke commands.
-  useHotkeyDispatch(apps, setError);
+  useHotkeyDispatch(apps, setError, setNotice);
 
   // View-switch events from the backend: tray "Show library" and the hotkey
   // summon (which always resets to the spotlight view).
@@ -3883,36 +3881,78 @@ function AppShell() {
     () => new Set(launcherSettings?.pinned ?? []),
     [launcherSettings?.pinned]
   );
-  // Auto-sections: every tile lands in one section (AI, Games, Media,
-  // Music, Other) by its app name + URL; the chips filter the grid to
-  // one section. "All" shows everything. The filter applies to search
+  // Sections: every tile lands in one section by display name — a
+  // built-in (AI, Games, Media, Music, Other), a custom section, or
+  // "All" for everything. An app's stored override wins; without one
+  // the name+URL heuristic decides. The filter applies to search
   // results too, so a section never shows a tile from another one.
-  const [section, setSection] = useState<Section>("all");
+  const customSections = useMemo(
+    () => launcherSettings?.custom_sections ?? [],
+    [launcherSettings?.custom_sections]
+  );
+  const [section, setSection] = useState<string>("All");
   const items = useMemo(() => {
     const all = query.trim()
       ? buildResults(query, scopedApps, programs, routines, sortOpts)
       : browseAll(scopedApps, programs, sortOpts);
-    return section === "all"
+    return section === "All"
       ? all
-      : all.filter((r) => categoryOfResult(r) === section);
-  }, [query, scopedApps, programs, routines, sortOpts, section]);
+      : all.filter((r) => sectionOfResult(r, customSections) === section);
+  }, [query, scopedApps, programs, routines, sortOpts, section, customSections]);
 
-  // Sections that actually have a tile — chips for empty sections are
-  // not drawn (quiet by default). Recomputed from the unfiltered list
-  // so switching sections never strands the user on an empty chip.
+  // Chips: built-ins only when they have a tile; custom sections
+  // always appear (even empty) so a tile can be dragged into one.
+  // Recomputed from the unfiltered list so switching sections never
+  // strands the user on an empty chip.
   const availableSections = useMemo(() => {
     const all = query.trim()
       ? buildResults(query, scopedApps, programs, routines, sortOpts)
       : browseAll(scopedApps, programs, sortOpts);
-    const present = new Set(all.map((r) => categoryOfResult(r)));
-    return SECTIONS.filter((s) => s === "all" || present.has(s));
-  }, [query, scopedApps, programs, routines, sortOpts]);
+    const present = new Set(all.map((r) => sectionOfResult(r, customSections)));
+    return [
+      "All",
+      ...BUILTIN_SECTION_NAMES.filter((n) => present.has(n)),
+      ...customSections,
+    ];
+  }, [query, scopedApps, programs, routines, sortOpts, customSections]);
 
   // A section switch can shrink the grid below the keyboard cursor —
   // reset it so arrow keys start from the first tile.
   useEffect(() => {
     setActiveIndex(0);
   }, [section]);
+
+  // A custom section removed while selected would leave an empty
+  // grid — fall back to All instead.
+  useEffect(() => {
+    if (section !== "All" && !availableSections.includes(section)) {
+      setSection("All");
+    }
+  }, [section, availableSections]);
+
+  // Drag a tile onto a section chip to move the app there (v0.18.20).
+  // The dragged app id rides in a ref — the chips and the grid are
+  // siblings, so state would re-render the grid mid-drag.
+  const dragAppIdRef = useRef<string | null>(null);
+  const [dragOverSection, setDragOverSection] = useState<string | null>(null);
+
+  async function handleDropOnSection(sectionName: string) {
+    const appId = dragAppIdRef.current;
+    dragAppIdRef.current = null;
+    setDragOverSection(null);
+    if (!appId) return;
+    setError(null);
+    try {
+      // Dropping on All clears the override back to auto.
+      const updated = await invoke<WebApp>("set_app_section", {
+        appId,
+        section: sectionName === "All" ? null : sectionName,
+      });
+      replaceApp(updated);
+    } catch (err) {
+      setError(errMsg(err));
+    }
+  }
 
   // v0.7.0: built-in launcher commands (=calc, >system, ?web-search,
   // URL quick-add). Prefix commands take precedence over app/program
@@ -4350,10 +4390,22 @@ function AppShell() {
                     type="button"
                     role="tab"
                     aria-selected={section === s}
-                    className={`section-chip${section === s ? " is-active" : ""}`}
+                    className={`section-chip${section === s ? " is-active" : ""}${dragOverSection === s ? " is-drag-over" : ""}`}
                     onClick={() => setSection(s)}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                      setDragOverSection(s);
+                    }}
+                    onDragLeave={() =>
+                      setDragOverSection((cur) => (cur === s ? null : cur))
+                    }
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      void handleDropOnSection(s);
+                    }}
                   >
-                    {SECTION_LABELS[s]}
+                    {s}
                   </button>
                 ))}
               </div>
@@ -4422,6 +4474,16 @@ function AppShell() {
                 }
                 onTileAction={(r, action) => void handleTileAction(r, action)}
                 onTileContextMenu={(r, x, y) => openTileMenu(r, x, y)}
+                draggableFor={(r) => r.kind === "account" || r.kind === "app"}
+                onTileDragStart={(r) => {
+                  if (r.kind === "account" || r.kind === "app") {
+                    dragAppIdRef.current = r.app.id;
+                  }
+                }}
+                onTileDragEnd={() => {
+                  dragAppIdRef.current = null;
+                  setDragOverSection(null);
+                }}
               />
             )}
             {tileMenuNode}
@@ -4891,6 +4953,8 @@ function AppShell() {
               <LauncherSettingsPanel
                 settings={launcherSettings}
                 onSaved={setLauncherSettings}
+                apps={apps}
+                onAppUpdated={replaceApp}
                 programsCount={programs.length}
                 onProgramsRefreshed={setPrograms}
                 onError={setError}

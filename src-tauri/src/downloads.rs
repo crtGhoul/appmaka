@@ -499,8 +499,15 @@ fn plan_destination(
 /// Three seconds: a real click on a real download link fires the
 /// download immediately (the request is already in flight), while the
 /// old 10s window let ad/redirect scripts on streaming sites wait out
-/// a Play click and then fire an unwanted download inside it.
-const GESTURE_WINDOW: Duration = Duration::from_secs(3);
+/// a Play click and then fire an unwanted download inside it. 30s (up
+/// from 3s in v0.18.20): a real click can take several seconds to turn
+/// into a download — a GitHub release link 302-redirects to the CDN,
+/// a slow server can take seconds to start responding — and the 3s
+/// window was expiring first, so the gate cancelled downloads the user
+/// had just clicked. A drive-by download still has NO click at all, so
+/// a longer window does not weaken that protection; the blob:/data:
+/// executable block below still catches the worst case.
+const GESTURE_WINDOW: Duration = Duration::from_secs(30);
 
 /// File extensions whose download from a `blob:`/`data:` URL is never
 /// legitimate without an explicit save: those URLs carry no origin to
@@ -527,29 +534,31 @@ fn is_executable_download(filename: &str) -> bool {
 /// by definition. Matches spawn_contained_window's "popup-"/"oauth-"
 /// labels. Retry windows ("appmaka-retry-") are NOT in this list: they
 /// re-fire a download the user already asked for.
-const POPUP_LABEL_PREFIXES: [&str; 2] = ["popup-", "oauth-"];
-
 /// Throttle for the blocked-download notice: one per minute, so a spammy
 /// page can't flood the notice bar. Same shape as the popup-block
 /// throttle in windows.rs.
 static LAST_DOWNLOAD_BLOCK_NOTICE_SECS: AtomicU64 = AtomicU64::new(0);
 
-/// Pure gate decision, unit-tested: popup windows never download, retries
-/// are exempt, anything else needs a recent gesture. A `blob:`/`data:`
-/// executable is blocked even WITH a gesture — the gesture that armed
-/// it is usually the Play click on a streaming page, not a click on a
-/// download link — while retries (explicitly re-fired by the user from
-/// the download list) stay exempt.
+/// Pure gate decision, unit-tested: retries are exempt, anything else needs
+/// a recent gesture. A `blob:`/`data:` executable is blocked even WITH a
+/// gesture — the gesture that armed it is usually the Play click on a
+/// streaming page, not a click on a download link — while retries
+/// (explicitly re-fired by the user from the download list) stay exempt.
+///
+/// Popup windows used to be blanket-banned ("a download from a popup
+/// window is never legitimate"), but Cesar runs his Muse chat in a popup
+/// window and downloads files from it — every one of those downloads was
+/// cancelled by the ban. The gesture check is the real drive-by
+/// protection (a drive-by download has no user click), so popups now
+/// follow the same rule as every other window: a recent click allows it,
+/// no click blocks it.
 fn download_block_reason(
-    label: &str,
+    _label: &str,
     is_retry: bool,
     gestured: bool,
     url: &str,
     filename: &str,
 ) -> Option<&'static str> {
-    if POPUP_LABEL_PREFIXES.iter().any(|p| label.starts_with(p)) {
-        return Some("it came from a popup window");
-    }
     if !is_retry {
         if is_executable_download(filename)
             && (url.starts_with("blob:") || url.starts_with("data:"))
@@ -1392,15 +1401,18 @@ mod tests {
     }
 
     #[test]
-    fn download_gate_blocks_popups_and_ungestured_downloads() {
+    fn download_gate_blocks_ungestured_downloads() {
         let https_pdf = "https://example.com/report.pdf";
-        // Popup windows never download legitimately.
-        assert!(download_block_reason("popup-3", false, true, https_pdf, "a.pdf").is_some());
-        assert!(download_block_reason("oauth-1", true, true, https_pdf, "a.pdf").is_some());
-        // No gesture, no retry: blocked.
+        // No gesture, no retry: blocked — this is the drive-by rule.
         assert!(download_block_reason("acct-x-y", false, false, https_pdf, "a.pdf").is_some());
-        // A recent gesture allows it.
+        // A recent gesture allows it — including from a popup window:
+        // Cesar runs his Muse chat in a popup and downloads files from
+        // it, and the old popup blanket-ban cancelled every one of those.
         assert!(download_block_reason("acct-x-y", false, true, https_pdf, "a.pdf").is_none());
+        assert!(download_block_reason("popup-3", false, true, https_pdf, "a.pdf").is_none());
+        assert!(download_block_reason("oauth-1", false, true, https_pdf, "a.pdf").is_none());
+        // But an ungestured popup download is still blocked.
+        assert!(download_block_reason("popup-3", false, false, https_pdf, "a.pdf").is_some());
         // Retries re-fire a user-requested download: exempt even without
         // a gesture in the retry window.
         assert!(

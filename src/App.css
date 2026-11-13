@@ -818,6 +818,14 @@ input[type="color"] {
   background: rgb(var(--accent-rgb) / 0.16);
 }
 
+/* v0.18.20: a tile is being dragged over this chip — same accent
+   treatment as active, so the drop target reads at a glance. */
+.section-chip.is-drag-over {
+  color: var(--accent-text);
+  border-color: var(--accent);
+  background: rgb(var(--accent-rgb) / 0.16);
+}
+
 .icon-grid {
   display: grid;
   /* Keep in sync with GRID_COLUMNS in Launcher.tsx. */

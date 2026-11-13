@@ -116,6 +116,17 @@ fn rename_app(id: String, name: String, store: State<'_, AppStore>) -> Result<We
     store.rename_app(&id, name)
 }
 
+/// Assign an app to a launcher section, or clear the override back to
+/// auto (`section` null). Tauri exposes `app_id` as `appId` to JS.
+#[tauri::command]
+fn set_app_section(
+    app_id: String,
+    section: Option<String>,
+    store: State<'_, AppStore>,
+) -> Result<WebApp, String> {
+    store.set_app_section(&app_id, section)
+}
+
 #[tauri::command]
 fn remove_app(
     app: AppHandle,
@@ -1428,6 +1439,11 @@ fn main() {
                 }
             }
             app.manage(Mutex::new(settings));
+            // v0.18.20: Alt+drag window move — start the caption thread
+            // (if it hasn't started) so the mouse hook is live from
+            // launch for the launcher too. Windows-only; Linux is a no-op.
+            #[cfg(windows)]
+            crate::caption::ensure_alt_drag_hook(app.handle());
             // Named hotkey registry (v0.8.0): one registry for routine /
             // workspace / per-command hotkeys so the global-shortcut
             // handler can dispatch presses. register_all_saved reads
@@ -1657,6 +1673,7 @@ fn main() {
             add_app,
             update_app,
             rename_app,
+            set_app_section,
             remove_app,
             update_app_settings,
             add_account,
@@ -1788,6 +1805,9 @@ fn main() {
             launcher_settings::set_accent,
             launcher_settings::set_theme,
             launcher_settings::set_tile_size,
+            // v0.18.20: custom launcher sections
+            launcher_settings::add_custom_section,
+            launcher_settings::remove_custom_section,
             // v0.16.0: cursor color + launcher customization
             launcher_settings::set_custom_cursor_color,
             launcher_settings::set_tile_corners,
@@ -1797,6 +1817,7 @@ fn main() {
             launcher_settings::set_show_sleep_labels,
             launcher_settings::set_dictation_compat,
             launcher_settings::set_open_as_tabbed,
+            launcher_settings::set_alt_drag_move,
             launcher_settings::set_allow_popups_globally,
             launcher_settings::set_auto_allow_permissions,
             launcher_settings::set_auto_hide_top_bar,
