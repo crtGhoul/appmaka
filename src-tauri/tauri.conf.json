@@ -52,7 +52,7 @@
   },
   "identifier": "com.appforge.app",
   "productName": "AppMaka",
-  "version": "0.18.18",
+  "version": "0.18.19",
   "plugins": {
     "deep-link": {
       "desktop": {

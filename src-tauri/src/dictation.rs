@@ -384,17 +384,29 @@ fn ensure_moonshine_model(app: &AppHandle) -> Result<PathBuf, String> {
 /// it prints. The binary also dumps its full config to stdout, so the
 /// transcript is found by scanning for the JSON object line, not by
 /// reading stdout whole.
+///
+/// The options MUST be passed as --x=y (equals form). sherpa-onnx's
+/// option parser rejects the space-separated form outright:
+/// "Invalid option --moonshine-encoder (option format is --x=y)".
+/// That is the 0xffffffff failure on his PC — the Rust code passed the
+/// options space-separated (the manual Linux test had used = form, so
+/// it worked there and the bug shipped unnoticed).
 fn run_moonshine(bin: &Path, model_dir: &Path, wav: &Path) -> Result<String, String> {
     let mut cmd = std::process::Command::new(bin);
-    cmd.arg("--moonshine-encoder")
-        .arg(model_dir.join("encoder_model.ort"))
-        .arg("--moonshine-merged-decoder")
-        .arg(model_dir.join("decoder_model_merged.ort"))
-        .arg("--tokens")
-        .arg(model_dir.join("tokens.txt"))
-        .arg("--num-threads")
-        .arg("4")
-        .arg(wav);
+    cmd.arg(format!(
+        "--moonshine-encoder={}",
+        model_dir.join("encoder_model.ort").display()
+    ))
+    .arg(format!(
+        "--moonshine-merged-decoder={}",
+        model_dir.join("decoder_model_merged.ort").display()
+    ))
+    .arg(format!(
+        "--tokens={}",
+        model_dir.join("tokens.txt").display()
+    ))
+    .arg("--num-threads=4")
+    .arg(wav);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
