@@ -2503,7 +2503,32 @@ mod imp {
             if GetWindowRect(plan.owner, &mut orc).is_err() {
                 return;
             }
-            (orc.top, orc.left, orc.right)
+            // Windhawk-style reveal, v0.18.21: a maximized owner's rect
+            // bleeds past the monitor by the hidden frame (top is
+            // negative, e.g. -8), so using orc.top as the reveal edge
+            // made the condition `cursor_y <= edge + 2` unreachable —
+            // the bar could NEVER appear on a maximized window. The
+            // strip itself is placed at the work-area top for a
+            // maximized owner (see reposition_caption), so the reveal
+            // edge must match: work-area top + work-area span. A
+            // windowed owner keeps orc.top, clamped to the work-area
+            // top so the edge never sits above the screen.
+            let hmon = MonitorFromWindow(plan.owner, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(hmon, &mut mi).as_bool() && IsZoomed(plan.owner).as_bool() {
+                (mi.rcWork.top, mi.rcWork.left, mi.rcWork.right)
+            } else if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                (
+                    orc.top.max(mi.rcWork.top),
+                    orc.left,
+                    orc.right,
+                )
+            } else {
+                (orc.top, orc.left, orc.right)
+            }
         };
         let in_span = pt.x >= span_left && pt.x < span_right;
         let target = super::reveal_target(in_span, pt.y, edge, h, plan.revealed);
@@ -3657,6 +3682,12 @@ pub fn set_auto_hide_top_bar(_app: &tauri::AppHandle, _enabled: bool) {}
 /// once it drops below the strip plus a small slack, hold the current
 /// state in between — so using the strip itself never flickers it away.
 ///
+/// The show zone is 6px (up from 2px in v0.18.21): the old 2px band was
+/// nearly unhittable on a scaled display, so the bar often never
+/// appeared at all — the Windhawk hide-taskbar feel is a generous edge
+/// touch, not a pixel-perfect one. The hide slack stays, so the wider
+/// show zone cannot make the bar flicker while it is in use.
+///
 /// Windows-only in production (the only caller lives in the Windows
 /// caption impl); the unit tests call it on every target, so it stays
 /// compiled for `test` too.
@@ -3664,7 +3695,7 @@ pub fn set_auto_hide_top_bar(_app: &tauri::AppHandle, _enabled: bool) {}
 fn reveal_target(in_span: bool, cursor_y: i32, edge_y: i32, strip_h: i32, revealed: bool) -> bool {
     if !in_span || cursor_y > edge_y + strip_h + 12 {
         false
-    } else if cursor_y <= edge_y + 2 {
+    } else if cursor_y <= edge_y + 6 {
         true
     } else {
         revealed
@@ -3796,8 +3827,23 @@ mod tests {
     #[test]
     fn reveal_shows_when_cursor_touches_the_edge() {
         // Edge at y=100 (a windowed owner's top), strip 30 tall.
+        // The show zone is 6px: the cursor just needs to be in the
+        // top few pixels, not pixel-perfect on the edge.
         assert!(reveal_target(true, 100, 100, 30, false));
         assert!(reveal_target(true, 102, 100, 30, false));
+        assert!(reveal_target(true, 106, 100, 30, false));
+        // Just past the zone: holds the old state instead of showing.
+        assert!(!reveal_target(true, 107, 100, 30, false));
+        assert!(reveal_target(true, 107, 100, 30, true));
+    }
+
+    #[test]
+    fn reveal_shows_at_screen_top_for_a_maximized_window() {
+        // A maximized owner's reveal edge is the work-area top (y=0),
+        // not its negative window-rect top — so a cursor slammed to
+        // the top of the screen (y=0..6) reveals the bar.
+        assert!(reveal_target(true, 0, 0, 30, false));
+        assert!(reveal_target(true, 6, 0, 30, false));
     }
 
     #[test]
