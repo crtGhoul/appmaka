@@ -10,6 +10,12 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { isAppHidden } from "./visibility";
 import { isAtLeastVersion, isNewerVersion } from "./semver";
+import {
+  SECTIONS,
+  SECTION_LABELS,
+  categoryOfResult,
+  type Section,
+} from "./categories";
 import { RamDashboard } from "./RamDashboard";
 import { ForgetLoginDialog, forgetLogin } from "./ForgetLoginDialog";
 import { ErrorDialog } from "./ErrorDialog";
@@ -3863,11 +3869,36 @@ function AppShell() {
     () => new Set(launcherSettings?.pinned ?? []),
     [launcherSettings?.pinned]
   );
+  // Auto-sections: every tile lands in one section (AI, Games, Media,
+  // Music, Other) by its app name + URL; the chips filter the grid to
+  // one section. "All" shows everything. The filter applies to search
+  // results too, so a section never shows a tile from another one.
+  const [section, setSection] = useState<Section>("all");
   const items = useMemo(() => {
-    return query.trim()
+    const all = query.trim()
       ? buildResults(query, scopedApps, programs, routines, sortOpts)
       : browseAll(scopedApps, programs, sortOpts);
+    return section === "all"
+      ? all
+      : all.filter((r) => categoryOfResult(r) === section);
+  }, [query, scopedApps, programs, routines, sortOpts, section]);
+
+  // Sections that actually have a tile — chips for empty sections are
+  // not drawn (quiet by default). Recomputed from the unfiltered list
+  // so switching sections never strands the user on an empty chip.
+  const availableSections = useMemo(() => {
+    const all = query.trim()
+      ? buildResults(query, scopedApps, programs, routines, sortOpts)
+      : browseAll(scopedApps, programs, sortOpts);
+    const present = new Set(all.map((r) => categoryOfResult(r)));
+    return SECTIONS.filter((s) => s === "all" || present.has(s));
   }, [query, scopedApps, programs, routines, sortOpts]);
+
+  // A section switch can shrink the grid below the keyboard cursor —
+  // reset it so arrow keys start from the first tile.
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [section]);
 
   // v0.7.0: built-in launcher commands (=calc, >system, ?web-search,
   // URL quick-add). Prefix commands take precedence over app/program
@@ -4292,6 +4323,26 @@ function AppShell() {
                   (launcherSettings?.pinned?.includes(searchTag(command.query)) ?? false)
                 }
               />
+            )}
+            {availableSections.length > 1 && (
+              <div
+                className="section-chips"
+                role="tablist"
+                aria-label="App sections"
+              >
+                {availableSections.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    role="tab"
+                    aria-selected={section === s}
+                    className={`section-chip${section === s ? " is-active" : ""}`}
+                    onClick={() => setSection(s)}
+                  >
+                    {SECTION_LABELS[s]}
+                  </button>
+                ))}
+              </div>
             )}
             {loading ? (
               <p className="muted folder-hint">Loading…</p>
