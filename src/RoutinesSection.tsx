@@ -470,6 +470,11 @@ export function RoutinesSection({
                   {routine.layout === "side_by_side" ? " · side by side" : ""}
                   {routine.layout === "tabbed" ? " · tabbed" : ""}
                 </div>
+                <div className="muted small">
+                  {routine.items
+                    .map((item) => describeItem(item, apps, programs))
+                    .join(" · ")}
+                </div>
               </div>
               <button
                 onClick={() => void runNow(routine)}
