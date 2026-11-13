@@ -1,6 +1,6 @@
 # AppMaka
 
-**Current version: v0.18.6** — [Release](https://github.com/crtGhoul/appmaka/releases/tag/v0.18.6)
+**Current version: v0.18.17** — [Release](https://github.com/crtGhoul/appmaka/releases/tag/v0.18.17)
 
 Turn any website into a desktop web app. Add a site by name + URL, and it
 opens in its own dedicated window — no browser tabs, no address bar clutter.
@@ -151,4 +151,3 @@ More free tools from Cesar Velazquez: [Velazquez Lab](https://velazquez-lab.page
 - YouTube: https://www.youtube.com/@VelazquezLabs
 - Reddit: https://www.reddit.com/user/Manteqaada/
 
-> Have you used Muse? If not, you can earn a free 1B tokens when you sign up with my code: 0NS5DG — redeem it in Muse Settings > Redeem token within 48 hours of joining. Joining alone does not count.
