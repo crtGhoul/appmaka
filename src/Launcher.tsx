@@ -2,6 +2,7 @@ import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayou
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { evaluateExpression, formatCalcResult } from "./calc";
+import { BUILTIN_SECTION_NAMES, effectiveSectionName } from "./categories";
 import { HotkeyCapture } from "./HotkeyCapture";
 import {
   buildFuzzyEntry,
@@ -569,6 +570,9 @@ export const IconGrid = memo(function IconGrid({
   openFor,
   onTileAction,
   onTileContextMenu,
+  draggableFor,
+  onTileDragStart,
+  onTileDragEnd,
   numberHints,
 }: {
   items: SearchResult[];
@@ -600,6 +604,12 @@ export const IconGrid = memo(function IconGrid({
   onTileAction?: (r: SearchResult, action: string) => void;
   /** Right-click on a tile. Receives the result and the cursor position. Optional. */
   onTileContextMenu?: (r: SearchResult, x: number, y: number) => void;
+  /** Which tiles can be dragged onto a section chip (v0.18.20). Optional. */
+  draggableFor?: (r: SearchResult) => boolean;
+  /** Drag started on a tile. Optional. */
+  onTileDragStart?: (r: SearchResult) => void;
+  /** Drag ended (dropped or cancelled). Optional. */
+  onTileDragEnd?: () => void;
 }) {
   return (
     <div className="icon-grid" role="listbox" aria-label="Apps and programs">
@@ -610,6 +620,14 @@ export const IconGrid = memo(function IconGrid({
           role="option"
           aria-selected={i === activeIndex}
           className={`icon-tile${i === activeIndex ? " is-active" : ""}`}
+          draggable={draggableFor?.(r) ?? false}
+          onDragStart={(e) => {
+            // Firefox only starts a drag with a payload set.
+            e.dataTransfer.setData("text/plain", r.id);
+            e.dataTransfer.effectAllowed = "move";
+            onTileDragStart?.(r);
+          }}
+          onDragEnd={() => onTileDragEnd?.()}
           onMouseEnter={() => {
             if (i !== activeIndex) onHover(i);
           }}
@@ -911,6 +929,31 @@ export function QuickSwitchPalette({
   );
 }
 
+/**
+ * v0.18.20: small app icon for the section checklist rows. Same
+ * pattern as ProgramIcon below (cached logo, letter fallback) so the
+ * checklist reads like the launcher grid.
+ */
+export function AppRowIcon({ app }: { app: WebApp }) {
+  const [failed, setFailed] = useState(false);
+  if (!app.icon || failed) {
+    return (
+      <span className="app-icon-fallback" aria-hidden="true">
+        {app.name.charAt(0).toUpperCase() || "?"}
+      </span>
+    );
+  }
+  return (
+    <img
+      className="app-icon"
+      src={convertFileSrc(app.icon)}
+      alt=""
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 export function ProgramIcon({ program }: { program: NativeProgram }) {
   const [failed, setFailed] = useState(false);
   if (!program.icon_path || failed) {
@@ -1119,6 +1162,8 @@ function ErrorHistorySection() {
 export function LauncherSettingsPanel({
   settings,
   onSaved,
+  apps,
+  onAppUpdated,
   programsCount,
   onProgramsRefreshed,
   onError,
@@ -1126,6 +1171,10 @@ export function LauncherSettingsPanel({
 }: {
   settings: LauncherSettings;
   onSaved: (s: LauncherSettings) => void;
+  /** Apps for the bulk section checklist (v0.18.20). */
+  apps: WebApp[];
+  /** An app whose section changed — refresh it in the parent list. */
+  onAppUpdated: (app: WebApp) => void;
   programsCount: number;
   onProgramsRefreshed: (programs: NativeProgram[]) => void;
   onError: (msg: string) => void;
@@ -1197,6 +1246,21 @@ export function LauncherSettingsPanel({
   // v0.13.0: open apps/accounts as tabbed windows.
   const [openAsTabbed, setOpenAsTabbed] = useState(
     settings.open_as_tabbed ?? false
+  );
+  // v0.18.20: hold Alt and drag anywhere on a page to move its window.
+  const [altDragMove, setAltDragMove] = useState(
+    settings.alt_drag_move ?? true
+  );
+  // v0.18.20: custom launcher sections.
+  const [newSection, setNewSection] = useState("");
+  const [sectionError, setSectionError] = useState<string | null>(null);
+  const customSections = settings.custom_sections ?? [];
+  // Bulk section checklist: the section the checked apps go into.
+  // Defaults to the first built-in section that already has apps.
+  const [targetSection, setTargetSection] = useState<string>(() =>
+    BUILTIN_SECTION_NAMES.find((n) =>
+      apps.some((a) => effectiveSectionName(a, customSections) === n)
+    ) ?? "AI"
   );
   // v0.13.9: global popup override for all apps.
   const [allowPopupsGlobally, setAllowPopupsGlobally] = useState(
@@ -1548,6 +1612,71 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setOpenAsTabbed(settings.open_as_tabbed ?? false);
+    }
+  }
+
+  // v0.18.20: hold Alt and drag anywhere on a page to move its window.
+  // Applies immediately; the mouse hook gates on the setting per event.
+  async function handleAltDragMove(enabled: boolean) {
+    setAltDragMove(enabled);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("set_alt_drag_move", {
+        enabled,
+      });
+      onSaved(updated);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setAltDragMove(settings.alt_drag_move ?? true);
+    }
+  }
+
+  // v0.18.20: custom launcher sections. The backend validates the
+  // name (blank / too long / duplicate / built-in collision) and the
+  // error is shown under the row.
+  async function handleAddSection(e: React.FormEvent) {
+    e.preventDefault();
+    const name = newSection.trim();
+    if (!name) return;
+    setSectionError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("add_custom_section", {
+        name,
+      });
+      onSaved(updated);
+      setNewSection("");
+    } catch (err) {
+      setSectionError(errMsg(err));
+    }
+  }
+
+  async function handleRemoveSection(name: string) {
+    setSectionError(null);
+    try {
+      const updated = await invoke<LauncherSettings>("remove_custom_section", {
+        name,
+      });
+      onSaved(updated);
+      // The checklist's target is gone: fall back to AI so the
+      // checkboxes keep meaning something.
+      if (name === targetSection) setTargetSection("AI");
+    } catch (err) {
+      setSectionError(errMsg(err));
+    }
+  }
+
+  async function handleAppSection(app: WebApp, value: string) {
+    setSectionError(null);
+    try {
+      const updated = await invoke<WebApp>("set_app_section", {
+        appId: app.id,
+        section: value === "" ? null : value,
+      });
+      onAppUpdated(updated);
+    } catch (err) {
+      setSectionError(errMsg(err));
     }
   }
 
@@ -1914,6 +2043,96 @@ export function LauncherSettingsPanel({
           right-click menu.
         </span>
       </label>
+
+      <label className="inline-form">
+        <span>Alt+drag to move windows</span>
+        <input
+          type="checkbox"
+          checked={altDragMove}
+          onChange={(e) => void handleAltDragMove(e.target.checked)}
+          aria-label="Alt+drag to move windows"
+        />
+        <span className="help">
+          Hold Alt and drag anywhere on a page to move its window. Windows
+          11 snap layouts work while dragging, including the snap flyout at
+          the top of the screen. This also moves the launcher, which has no
+          drag region of its own.
+        </span>
+      </label>
+
+      <span className="help">
+        Sections group apps in the launcher. Drag a tile onto a section
+        chip, or pick a section here and check the apps that belong in
+        it. Unchecked apps go back to Auto and follow the built-in guess.
+      </span>
+
+      <form className="inline-form" onSubmit={(e) => void handleAddSection(e)}>
+        <label>
+          <span>New section</span>
+          <input
+            type="text"
+            value={newSection}
+            onChange={(e) => setNewSection(e.target.value)}
+            aria-label="New section name"
+            placeholder="Work"
+            maxLength={24}
+          />
+        </label>
+        <button type="submit" disabled={!newSection.trim()}>
+          Add section
+        </button>
+        {sectionError && <span className="form-error">{sectionError}</span>}
+      </form>
+
+      <label className="inline-form">
+        <span>Add checked apps to</span>
+        <select
+          value={targetSection}
+          onChange={(e) => setTargetSection(e.target.value)}
+          aria-label="Section to assign checked apps to"
+        >
+          {BUILTIN_SECTION_NAMES.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+          {customSections.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {apps.map((app) => (
+        <label key={app.id} className="inline-form">
+          <input
+            type="checkbox"
+            checked={
+              effectiveSectionName(app, customSections) === targetSection
+            }
+            onChange={(e) =>
+              void handleAppSection(
+                app,
+                e.target.checked ? targetSection : ""
+              )
+            }
+            aria-label={`${app.name} in ${targetSection}`}
+          />
+          <AppRowIcon app={app} />
+          <span>{app.name}</span>
+        </label>
+      ))}
+
+      {customSections.map((name) => (
+        <div key={name} className="inline-form">
+          <span>{name}</span>
+          <button type="button" onClick={() => void handleRemoveSection(name)}>
+            Remove
+          </button>
+          <span className="help">Apps in this section go back to Auto.</span>
+        </div>
+      ))}
 
       <label className="inline-form">
         <span>Dictation compatibility mode</span>
