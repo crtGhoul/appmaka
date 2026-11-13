@@ -2714,6 +2714,27 @@ mod imp {
                         return LRESULT(1);
                     }
                 }
+                // Alt+F4 closes the foreground page window. A frameless
+                // window (decorations:false) never gets WM_CLOSE from
+                // Alt+F4 on its own — the WebView2 control swallows the
+                // keystroke and the page does nothing with it — so the
+                // hook delivers the close itself, through the same
+                // ClosePage path as the Esc+LMB gesture. Only fires when
+                // the foreground window is one of our page windows;
+                // everywhere else the keys pass through untouched (the
+                // launcher's own Alt+F4 still reaches its hide handler).
+                const VK_F4_U32: u32 = 0x73;
+                const VK_MENU_I32: i32 = 0x12;
+                if kb.vkCode == VK_F4_U32 {
+                    let alt = (GetAsyncKeyState(VK_MENU_I32) as u16 & 0x8000) != 0;
+                    if alt {
+                        if let Some(label) = resolve_page_label(GetForegroundWindow()) {
+                            send_to_chrome(ChromeCmd::ClosePage { label });
+                            // Swallow: the page never sees the Alt+F4 that closed it.
+                            return LRESULT(1);
+                        }
+                    }
+                }
                 // v0.13.12: plain Esc leaves window fullscreen before any
                 // other Esc meaning is considered. Only fires while a
                 // page window actually covers the whole monitor.

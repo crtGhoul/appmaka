@@ -277,9 +277,30 @@ fn moonshine_model_dir(app: &AppHandle) -> Result<PathBuf, String> {
 /// Download + unpack the sherpa-onnx prebuilt (the binary that runs
 /// Moonshine). Mirrors ensure_binary_for: system tar reads .tar.bz2,
 /// and the binary being present is the verdict, not tar's exit code.
+/// On Windows the exe also needs onnxruntime.dll beside it — without
+/// that DLL the engine fails to start, so its presence is checked too.
 fn ensure_moonshine_binary(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(p) = moonshine_binary_path(app) {
-        return Ok(p);
+        #[cfg(windows)]
+        {
+            if !p
+                .parent()
+                .map(|d| d.join("onnxruntime.dll").is_file())
+                .unwrap_or(false)
+            {
+                // The exe is there but its runtime DLL is not: clear
+                // the bin dir so the re-download starts clean.
+                if let Ok(dir) = dictation_dir(app) {
+                    let _ = fs::remove_dir_all(dir.join("moonshine-bin"));
+                }
+            } else {
+                return Ok(p);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            return Ok(p);
+        }
     }
     let dir = dictation_dir(app)?;
     let archive = dir.join(SHERPA_ARCHIVE);
@@ -308,11 +329,27 @@ fn ensure_moonshine_binary(app: &AppHandle) -> Result<PathBuf, String> {
     }
 }
 
+/// The three files the Moonshine model dir must hold. A dir alone is
+/// not proof — a partial extraction leaves the dir behind with the
+/// model files missing, and the engine then fails with a bare -1.
+/// (That is what happened on his PC: the dir existed, the engine
+/// failed, and the error said nothing useful.)
+fn moonshine_model_files_present(model_dir: &Path) -> bool {
+    model_dir.join("encoder_model.ort").is_file()
+        && model_dir.join("decoder_model_merged.ort").is_file()
+        && model_dir.join("tokens.txt").is_file()
+}
+
 /// Download + unpack the Moonshine Tiny v2 model archive.
 fn ensure_moonshine_model(app: &AppHandle) -> Result<PathBuf, String> {
     let model_dir = moonshine_model_dir(app)?;
-    if model_dir.exists() {
+    if moonshine_model_files_present(&model_dir) {
         return Ok(model_dir);
+    }
+    // The dir exists but the files don't (partial extraction or a
+    // truncated download): clear it so the re-download starts clean.
+    if model_dir.exists() {
+        let _ = fs::remove_dir_all(&model_dir);
     }
     let dir = dictation_dir(app)?;
     let archive = dir.join(MOONSHINE_MODEL_ARCHIVE);
@@ -329,12 +366,12 @@ fn ensure_moonshine_model(app: &AppHandle) -> Result<PathBuf, String> {
         .arg(&models_dir)
         .output();
     let _ = fs::remove_file(&archive);
-    if model_dir.exists() {
+    if moonshine_model_files_present(&model_dir) {
         Ok(model_dir)
     } else {
         match tar {
             Ok(out) => Err(format!(
-                "Unpacking the Moonshine model failed: {}",
+                "Unpacking the Moonshine model failed (the model files are missing after unpacking): {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             )),
             Err(e) => Err(format!("Couldn't run tar to unpack the Moonshine model: {e}")),
@@ -367,9 +404,24 @@ fn run_moonshine(bin: &Path, model_dir: &Path, wav: &Path) -> Result<String, Str
         .output()
         .map_err(|e| format!("Couldn't run the Moonshine engine: {e}"))?;
     if !out.status.success() {
+        // The engine prints its real reason to stderr (missing model
+        // file, bad audio, ONNX Runtime failure). Surface the last
+        // few lines — a bare exit code tells the user nothing, and
+        // "No further details" is what his 0xffffffff error showed.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let lines: Vec<&str> = stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        let start = lines.len().saturating_sub(3);
+        let detail = if lines[start..].is_empty() {
+            String::new()
+        } else {
+            format!(" {}", lines[start..].join(" "))
+        };
         return Err(format!(
-            "The Moonshine engine failed on that recording ({}).",
-            out.status
+            "The Moonshine engine failed on that recording ({}).{}",
+            out.status, detail
         ));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -486,7 +538,9 @@ fn status(app: &AppHandle) -> DictationStatus {
     // the user actually picked.
     let (model_installed, binary_installed) = if engine == "moonshine" {
         (
-            moonshine_model_dir(app).map(|p| p.exists()).unwrap_or(false),
+            moonshine_model_dir(app)
+                .map(|p| moonshine_model_files_present(&p))
+                .unwrap_or(false),
             moonshine_binary_path(app).is_some(),
         )
     } else {
@@ -1494,6 +1548,23 @@ mod tests {
         );
         assert_eq!(moonshine_text_from_stdout("no json here\n"), None);
         assert_eq!(moonshine_text_from_stdout(""), None);
+    }
+
+    #[test]
+    fn moonshine_model_needs_all_three_files() {
+        // A dir alone is not proof: a partial extraction leaves the dir
+        // with the model files missing, and the engine then fails with
+        // a bare -1. The check must look at the files, not the dir.
+        let dir = std::env::temp_dir().join("appmaka-test-moonshine-model");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!moonshine_model_files_present(&dir));
+        std::fs::write(dir.join("encoder_model.ort"), b"x").unwrap();
+        std::fs::write(dir.join("decoder_model_merged.ort"), b"x").unwrap();
+        assert!(!moonshine_model_files_present(&dir));
+        std::fs::write(dir.join("tokens.txt"), b"x").unwrap();
+        assert!(moonshine_model_files_present(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
