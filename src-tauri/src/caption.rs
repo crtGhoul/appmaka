@@ -43,6 +43,41 @@ pub fn esc_gesture_closes(g: EscGesture) -> bool {
     g.esc_down && g.lmb_held && g.foreground_is_page
 }
 
+/// One decoded Alt+drag candidate event (v0.18.20).
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AltDragGesture {
+    /// The Alt key is physically held right now.
+    pub alt_held: bool,
+    /// The left mouse button is physically held right now.
+    pub lmb_held: bool,
+    /// The cursor is over one of our page windows or the launcher.
+    pub target_is_page: bool,
+    /// The cursor moved past the system drag threshold since button-down.
+    pub moved: bool,
+    /// The alt_drag_move setting is on.
+    pub enabled: bool,
+    /// Dictation compatibility mode is on (global hooks off).
+    pub dictation_compat: bool,
+}
+
+/// True when an Alt+drag should start a native window move: Alt held,
+/// left button held, over one of our windows, past the drag threshold,
+/// setting on, dictation compat off. Every other combination passes
+/// through untouched — a plain Alt+click never moves anything.
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
+pub fn alt_drag_starts(g: AltDragGesture) -> bool {
+    g.alt_held && g.lmb_held && g.target_is_page && g.moved && g.enabled && !g.dictation_compat
+}
+
+/// Pure: has the cursor moved past the system drag threshold from the
+/// button-down point? Either axis past the threshold counts, matching
+/// how Windows itself arms a drag.
+#[cfg_attr(not(any(test, windows)), allow(dead_code))]
+pub fn drag_past_threshold(start: (i32, i32), cur: (i32, i32), threshold: i32) -> bool {
+    (cur.0 - start.0).abs() > threshold || (cur.1 - start.1).abs() > threshold
+}
+
 /// Fullscreen test for a page window (v0.13.12): does `rect`
 /// (left, top, right, bottom) fully cover `monitor` (same shape), with
 /// 2px of slack? A borderless fullscreen window covers its whole
@@ -197,7 +232,8 @@ mod snap_tests {
 #[cfg(windows)]
 mod imp {
     use super::{
-        esc_gesture_closes, max_toggle, snap_zone_rect, EscGesture, MaxToggle, SnapZone,
+        alt_drag_starts, drag_past_threshold, esc_gesture_closes, max_toggle, snap_zone_rect,
+        AltDragGesture, EscGesture, MaxToggle, SnapZone,
     };
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -396,11 +432,31 @@ mod imp {
     const FS_REVEAL_TIMER: usize = 0xF501;
     const FS_REVEAL_POLL_MS: u32 = 120;
 
+    /// Alt+drag state machine (v0.18.20). Lives in Chrome (chrome thread
+    /// only); the mouse hook proc reads/writes it through short
+    /// try_borrow_mut calls, never holding the borrow across a Win32 call.
+    #[derive(Clone, Copy)]
+    enum AltDragState {
+        Idle,
+        /// Alt+left-down over one of our windows, waiting for the cursor
+        /// to move past the drag threshold.
+        Armed { hwnd: isize, start_x: i32, start_y: i32 },
+        /// Native drag posted; the move loop owns the mouse until button-up.
+        /// (No HWND stored: nothing needs it while the loop runs.)
+        Dragging,
+    }
+
     struct Chrome {
         app: AppHandle,
         tx: mpsc::Sender<ChromeCmd>,
         wake: HANDLE,
         hook: HHOOK,
+        /// Alt+drag mouse hook (v0.18.20), installed once at thread start.
+        alt_drag_hook: HHOOK,
+        alt_drag: AltDragState,
+        /// Launcher HWND, resolved at thread start (0 = unknown). The
+        /// launcher has no caption strip, so it isn't in by_hwnd.
+        launcher_hwnd: isize,
         captions: HashMap<String, Caption>,
         /// caption HWND -> page label, for the Esc hook's foreground check.
         by_hwnd: HashMap<isize, String>,
@@ -2628,6 +2684,212 @@ mod imp {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Alt+drag window move: WH_MOUSE_LL on the chrome thread (v0.18.20)
+    // ------------------------------------------------------------------
+
+    /// Start the chrome thread (if it hasn't started) so the Alt+drag
+    /// mouse hook is live from launch — the launcher needs the drag too,
+    /// and it has no caption strip to start the thread with. Called once
+    /// from app setup on Windows. The hook itself installs at thread
+    /// start; this only ensures the thread exists. Infallible: a failure
+    /// just means no Alt+drag.
+    pub fn ensure_alt_drag_hook(app: &AppHandle) {
+        let _ = ensure_chrome(app);
+    }
+
+    /// Install the Alt+drag mouse hook if none is installed. Runs on the
+    /// chrome thread at thread start (a low-level hook's proc runs on the
+    /// installing thread, which needs a message loop). Installs
+    /// unconditionally — the proc gates on the setting per event, so
+    /// toggling needs no reinstall.
+    unsafe fn install_alt_drag_hook(app: &AppHandle) {
+        let already = with_chrome(|ch| Some(!ch.alt_drag_hook.is_invalid()));
+        if already == Some(true) {
+            return;
+        }
+        match SetWindowsHookExW(WH_MOUSE_LL, Some(alt_drag_proc), None, 0) {
+            Ok(hook) => {
+                with_chrome(|ch| {
+                    if ch.alt_drag_hook.is_invalid() {
+                        ch.alt_drag_hook = hook;
+                    } else {
+                        // A re-entrant path installed one first; drop ours.
+                        let _ = UnhookWindowsHookEx(hook);
+                    }
+                    Some(())
+                });
+            }
+            Err(e) => caption_log(app, &format!("Alt+drag mouse hook failed: {e}")),
+        }
+    }
+
+    /// Top-level window at a screen point, if any. No borrow held.
+    unsafe fn top_level_at(x: i32, y: i32) -> Option<isize> {
+        let hwnd = WindowFromPoint(POINT { x, y });
+        if hwnd.is_invalid() {
+            return None;
+        }
+        let top = GetAncestor(hwnd, GA_ROOT);
+        if top.is_invalid() {
+            return None;
+        }
+        Some(top.0 as isize)
+    }
+
+    /// Map a top-level HWND to a drag target: a page window itself, the
+    /// owner of one of our caption strips, or the launcher. Pure map
+    /// lookups — the caller resolves the HWND first, with no borrow held.
+    fn resolve_drag_target(ch: &Chrome, top: isize) -> Option<isize> {
+        if ch.by_hwnd.contains_key(&top) {
+            return Some(top);
+        }
+        if let Some((_, cp)) = ch
+            .captions
+            .iter()
+            .find(|(_, cp)| cp.hwnd.0 as isize == top)
+        {
+            return Some(cp.owner.0 as isize);
+        }
+        if ch.launcher_hwnd != 0 && top == ch.launcher_hwnd {
+            return Some(top);
+        }
+        None
+    }
+
+    unsafe extern "system" fn alt_drag_proc(
+        n_code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        // Never unwind across the FFI boundary: a panic in a hook proc
+        // aborts the process. Fail open — pass the input through.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            alt_drag_proc_inner(n_code, wparam, lparam)
+        })) {
+            Ok(lr) => lr,
+            Err(_) => CallNextHookEx(None, n_code, wparam, lparam),
+        }
+    }
+
+    /// Alt+drag state machine. Passes every event through untouched: the
+    /// hook only ever ADDS a native drag post, it never swallows input.
+    /// A plain Alt+click arms nothing; only movement past the system drag
+    /// threshold with Alt held starts a move, and the move itself is a
+    /// posted WM_NCLBUTTONDOWN/HTCAPTION, so Windows owns the drag and
+    /// the drag-to-top snap-layouts flyout comes free.
+    unsafe fn alt_drag_proc_inner(n_code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // Pass everything through by default.
+        if n_code < 0 {
+            return CallNextHookEx(None, n_code, wparam, lparam);
+        }
+        let w = wparam.0 as u32;
+        if w != WM_LBUTTONDOWN && w != WM_MOUSEMOVE && w != WM_LBUTTONUP {
+            return CallNextHookEx(None, n_code, wparam, lparam);
+        }
+        let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+        const VK_MENU_I32: i32 = 0x12;
+        const VK_LBUTTON_I32: i32 = 0x01;
+        let alt_held = || (GetAsyncKeyState(VK_MENU_I32) as u16 & 0x8000) != 0;
+        let lmb_held = || (GetAsyncKeyState(VK_LBUTTON_I32) as u16 & 0x8000) != 0;
+
+        if w == WM_LBUTTONUP {
+            // Button released: whatever was armed or dragging is over.
+            with_chrome(|ch| {
+                ch.alt_drag = AltDragState::Idle;
+                Some(())
+            });
+            return CallNextHookEx(None, n_code, wparam, lparam);
+        }
+
+        if w == WM_LBUTTONDOWN {
+            // Only arm when Alt is held: a plain click never starts a drag.
+            if !alt_held() {
+                return CallNextHookEx(None, n_code, wparam, lparam);
+            }
+            // Resolve the target with no borrow held (Win32 calls),
+            // then a short borrow only for the map lookups.
+            let Some(top) = top_level_at(ms.pt.x, ms.pt.y) else {
+                return CallNextHookEx(None, n_code, wparam, lparam);
+            };
+            let target = with_chrome(|ch| resolve_drag_target(ch, top));
+            let Some(target) = target else {
+                return CallNextHookEx(None, n_code, wparam, lparam);
+            };
+            // Gate on the setting + dictation compat (non-blocking reads;
+            // unreadable reads as off).
+            let app = with_chrome(|ch| Some(ch.app.clone()));
+            let Some(app) = app else {
+                return CallNextHookEx(None, n_code, wparam, lparam);
+            };
+            let (enabled, compat) = crate::launcher_settings::alt_drag_gates(&app);
+            if !enabled || compat {
+                return CallNextHookEx(None, n_code, wparam, lparam);
+            }
+            with_chrome(|ch| {
+                ch.alt_drag = AltDragState::Armed {
+                    hwnd: target,
+                    start_x: ms.pt.x,
+                    start_y: ms.pt.y,
+                };
+                Some(())
+            });
+            return CallNextHookEx(None, n_code, wparam, lparam);
+        }
+
+        // WM_MOUSEMOVE: only an armed drag cares.
+        let state = with_chrome(|ch| Some(ch.alt_drag));
+        let Some(AltDragState::Armed {
+            hwnd,
+            start_x,
+            start_y,
+        }) = state
+        else {
+            return CallNextHookEx(None, n_code, wparam, lparam);
+        };
+        // Alt or the button released mid-arm: stand down, no drag.
+        if !alt_held() || !lmb_held() {
+            with_chrome(|ch| {
+                ch.alt_drag = AltDragState::Idle;
+                Some(())
+            });
+            return CallNextHookEx(None, n_code, wparam, lparam);
+        }
+        let threshold = GetSystemMetrics(SM_CXDRAG).max(1);
+        let app = with_chrome(|ch| Some(ch.app.clone()));
+        let (enabled, compat) = match app {
+            Some(app) => crate::launcher_settings::alt_drag_gates(&app),
+            None => (false, true),
+        };
+        let g = AltDragGesture {
+            alt_held: true,
+            lmb_held: true,
+            target_is_page: true,
+            moved: drag_past_threshold((start_x, start_y), (ms.pt.x, ms.pt.y), threshold),
+            enabled,
+            dictation_compat: compat,
+        };
+        if !alt_drag_starts(g) {
+            return CallNextHookEx(None, n_code, wparam, lparam);
+        }
+        // Past the threshold with Alt held: hand the move to Windows.
+        // PostMessage (async) — the modal move loop starts when the
+        // target window processes it, and the hook never blocks inside
+        // the loop. The native loop gives drag-to-top snap layouts.
+        let drag_lparam = ((ms.pt.y as u32) << 16) | (ms.pt.x as u32 & 0xffff);
+        let _ = PostMessageW(
+            Some(HWND(hwnd as *mut _)),
+            WM_NCLBUTTONDOWN,
+            WPARAM(HTCAPTION as usize),
+            LPARAM(drag_lparam as isize),
+        );
+        with_chrome(|ch| {
+            ch.alt_drag = AltDragState::Dragging;
+            Some(())
+        });
+        CallNextHookEx(None, n_code, wparam, lparam)
+    }
+
     /// Foreground HWND -> page label, if it is one of ours: a caption strip
     /// resolves to its page, a page window to itself. Uses try_borrow:
     /// the hook proc runs on the chrome thread and must never panic on a
@@ -3045,16 +3307,33 @@ mod imp {
     ) {
         unsafe { register_class() };
         let app_log = app.clone();
+        // Resolve the launcher HWND before moving the app handle in: the
+        // main window exists by the time this thread starts (startup or
+        // first page window), and the hook proc must never do a Tauri
+        // lookup — it reads only this cached value. 0 = unknown; page
+        // windows still get Alt+drag through by_hwnd.
+        let launcher_hwnd = app
+            .get_webview_window("main")
+            .and_then(|w| w.hwnd().ok())
+            .map(|h| h.0 as isize)
+            .unwrap_or(0);
         CHROME.with(|c| {
             *c.borrow_mut() = Some(Chrome {
                 app,
                 tx,
                 wake,
                 hook: HHOOK::default(),
+                alt_drag_hook: HHOOK::default(),
+                alt_drag: AltDragState::Idle,
+                launcher_hwnd,
                 captions: HashMap::new(),
                 by_hwnd: HashMap::new(),
             });
         });
+        // v0.18.20: Alt+drag move — install the mouse hook once, on this
+        // thread (low-level hooks need a message loop). The proc gates on
+        // the setting per event, so toggling needs no reinstall.
+        unsafe { install_alt_drag_hook(&app_log) };
 
         let handles = [wake];
         loop {
@@ -3305,13 +3584,18 @@ mod imp {
 
 #[cfg(windows)]
 pub use imp::{
-    page_window_closed, page_window_moved, page_window_opened, page_window_set_tint,
-    refresh_esc_hook, set_auto_hide_top_bar, tabbed_window_opened, tabbed_window_set_tint,
-    tabbed_window_updated, tint_log, TabStripData,
+    ensure_alt_drag_hook, page_window_closed, page_window_moved, page_window_opened,
+    page_window_set_tint, refresh_esc_hook, set_auto_hide_top_bar, tabbed_window_opened,
+    tabbed_window_set_tint, tabbed_window_updated, tint_log, TabStripData,
 };
 
 #[cfg(not(windows))]
 pub fn refresh_esc_hook(_app: &tauri::AppHandle) {}
+
+/// v0.18.20 non-Windows stub: Alt+drag is a Windows-only mouse hook.
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub fn ensure_alt_drag_hook(_app: &tauri::AppHandle) {}
 
 #[cfg(not(windows))]
 pub fn page_window_opened(
@@ -3458,6 +3742,46 @@ mod tests {
         let mon2 = (-1920, 0, 0, 1080);
         assert!(rect_covers_monitor(mon2, mon2));
         assert!(!rect_covers_monitor(mon, mon2));
+    }
+
+    fn alt_drag(
+        alt_held: bool,
+        lmb_held: bool,
+        target_is_page: bool,
+        moved: bool,
+        enabled: bool,
+        dictation_compat: bool,
+    ) -> AltDragGesture {
+        AltDragGesture {
+            alt_held,
+            lmb_held,
+            target_is_page,
+            moved,
+            enabled,
+            dictation_compat,
+        }
+    }
+
+    #[test]
+    fn alt_drag_starts_only_on_a_real_drag() {
+        // Alt + button + our window + past the threshold + setting on.
+        assert!(alt_drag_starts(alt_drag(true, true, true, true, true, false)));
+        // A plain Alt+click (no movement) never moves the window.
+        assert!(!alt_drag_starts(alt_drag(true, true, true, false, true, false)));
+        // No Alt, no button, wrong window, setting off, dictation compat.
+        assert!(!alt_drag_starts(alt_drag(false, true, true, true, true, false)));
+        assert!(!alt_drag_starts(alt_drag(true, false, true, true, true, false)));
+        assert!(!alt_drag_starts(alt_drag(true, true, false, true, true, false)));
+        assert!(!alt_drag_starts(alt_drag(true, true, true, true, false, false)));
+        assert!(!alt_drag_starts(alt_drag(true, true, true, true, true, true)));
+    }
+
+    #[test]
+    fn drag_threshold_uses_either_axis() {
+        assert!(drag_past_threshold((100, 100), (105, 100), 4));
+        assert!(drag_past_threshold((100, 100), (100, 95), 4));
+        assert!(!drag_past_threshold((100, 100), (104, 100), 4));
+        assert!(!drag_past_threshold((100, 100), (100, 100), 4));
     }
 
     #[test]
