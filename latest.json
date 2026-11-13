@@ -1,15 +1,15 @@
 {
-  "version": "0.18.17",
-  "notes": "AppMaka 0.18.17 — cursor fixes, auto-sections, and Moonshine dictation. The custom cursor now covers the Save-as-app strip and preview headers, and it no longer freezes over iframes. The launcher sorts your apps into AI, Games, Media, and Music sections automatically. And dictation has a new Moonshine engine — faster and hears better than Whisper tiny on short takes.",
-  "pub_date": "2026-11-13T03:17:25Z",
+  "version": "0.18.18",
+  "notes": "Moonshine repair, Alt+F4 close, and show/hide for every settings section.",
+  "pub_date": "2026-11-13T05:31:26Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1lTU1JUQ0JaMjdYYkNqZS9yNU42UUQyd3BBQkZwMTN1SWMyVTRXY3hzcGIwVGpBV2sxVFBlbWl1Tk5jTHVXb3lVUUtvWnl5YU8zNkhNZVF4aW1rQUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTM5NTAxCWZpbGU6QXBwTWFrYV8wLjE4LjE3X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjE3CjR3SWM0TU55Lzd4VzBpWktGaGJxcmdYQnhnYnhWaUNHWWhYa0hrV0lzc0lWcThIU3lxd2tkczF3ZzJYRmZYemVmZUFKMGYwLzlibUs3cEs0djVEVUFBPT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.17/AppMaka_0.18.17_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1N4UE5WeHR1VXhRWUt2VUNkQTlWVm1tUkViZ3hCaC84NmpyNEFNMEJVU1lhN2pMcGFqNnBDODlDUWR5b3R5V1h1ZEdPZ3V6Z2pqaS9zQytvWGh0QmdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTQ3Nzc5CWZpbGU6QXBwTWFrYV8wLjE4LjE4X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjE4CmdGQVNrVnBXcnBMVFNidzhQVlM5ZVBsY2dUUm9haUNXNVovbWxsazRCSzRCZ2RjL3pPdDNNei8wa0FyZVdhQ1ZQRFdlTldiTk05Sjc4d2M4NzFtREJ3PT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.18/AppMaka_0.18.18_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1JEMk82SnBROU1UVERQZG1HVzlCYUdVdW5jK2I1SElOUWpGSDM1V1lYRUhxMkdxeGpnQ3M2UkFnNTFBL0JCRnlkSTFvV3p2Wng3VXdIUVIxcW41TXdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTM5ODIzCWZpbGU6QXBwTWFrYV8wLjE4LjE3X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4xNwpzVG4xdi9WTjlUZ3I5TWRTN1lxN3ZueUU4bktXc0s1dGxlMGZ4aS8zS2Z4SHJEa0piRG5VQ2FaTi9QRlllY0p2RmFDRjNJa2JvcmhjVm9pWEFaWGtBUT09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.17/AppMaka_0.18.17_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1RLTlVUSGczcnJMWnQ1U0c2SVJZMnVnS3JvTzVqajBpQ0xNN2VCWGpkdzNpNWtoLzBWZG9Yc29OZEtTZU1PdkZaZEcxOWc0cFZMVXdHU2REaVpSb1FRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTQ3MjMyCWZpbGU6QXBwTWFrYV8wLjE4LjE4X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4xOApqVmZFd0ZTMSsxUzB2U3VQU2RjRzJEU012SUo2cENyQlpzZUlCeVFxMzRzd3R6ZWozaytPTHNQV3FoNnpjT0dPVUpSd1JDNzBoOGs0S1dCdFh4aUpBUT09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.18/AppMaka_0.18.18_amd64.AppImage"
     }
   }
 }
