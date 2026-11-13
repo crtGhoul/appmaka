@@ -268,6 +268,20 @@ fn item_display_name(
     }
 }
 
+/// Turn per-item results into the command result: Ok(summary) when at
+/// least one item opened, Err(summary) when nothing did. The summary
+/// already names the dead items ("Nothing opened. Gmail failed: ..."),
+/// so the caller — the hotkey path included — surfaces a real reason
+/// instead of a silent no-op. Pure logic, unit-tested.
+fn run_outcome(results: &[(String, Result<(), String>)]) -> Result<String, String> {
+    let summary = summarize(results);
+    if results.iter().any(|(_, r)| r.is_ok()) {
+        Ok(summary)
+    } else {
+        Err(summary)
+    }
+}
+
 /// Pure summary builder: plain-language "Opened X of Y" plus per-failure
 /// reasons. Extracted for testing (no AppHandle/State needed).
 fn summarize(results: &[(String, Result<(), String>)]) -> String {
@@ -412,7 +426,7 @@ pub async fn run_routine(
             )
             .map_err(|e| format!("couldn't open the tabbed window: {e}"))?;
         }
-        return Ok(summarize(&results));
+        return run_outcome(&results);
     }
 
     // v0.9.0 side-by-side layout: tile the routine's ACCOUNT windows as
@@ -474,7 +488,7 @@ pub async fn run_routine(
         };
         results.push((name, outcome));
     }
-    Ok(summarize(&results))
+    run_outcome(&results)
 }
 
 #[cfg(test)]
@@ -584,6 +598,36 @@ mod tests {
         let all_fail = summarize(&[fail("Muse", "Account not found.")]);
         assert!(all_fail.starts_with("Nothing opened. "));
         assert!(all_fail.contains("Muse failed: Account not found."));
+    }
+
+    #[test]
+    fn run_outcome_cases() {
+        let ok = |n: &str| (n.to_string(), Ok(()));
+        let fail = |n: &str, e: &str| (n.to_string(), Err(e.to_string()));
+
+        // All dead: Err naming them — the hotkey path surfaces this
+        // instead of silently doing nothing.
+        let all_dead = run_outcome(&[fail("Gmail", "Account not found.")]);
+        assert!(all_dead.is_err());
+        let msg = all_dead.unwrap_err();
+        assert!(msg.starts_with("Nothing opened. "));
+        assert!(msg.contains("Gmail failed: Account not found."));
+
+        // Partial: opens the live ones, Ok summary still names the dead.
+        let partial = run_outcome(&[
+            ok("Gmail"),
+            fail("Muse", "Account not found."),
+        ]);
+        assert!(partial.is_ok());
+        let msg = partial.unwrap();
+        assert!(msg.starts_with("Opened 1 of 2. "));
+        assert!(msg.contains("Muse failed: Account not found."));
+
+        // All live: plain Ok summary.
+        assert_eq!(
+            run_outcome(&[ok("Gmail"), ok("Muse")]).unwrap(),
+            "Opened all 2."
+        );
     }
 
     #[test]
