@@ -34,12 +34,18 @@ function errMsg(err: unknown): string {
 
 export function useHotkeyDispatch(
   apps: WebApp[],
-  onError: (msg: string) => void
+  onError: (msg: string) => void,
+  // v0.18.20: routine runs report back here too. The Ok summary used to
+  // be discarded on the hotkey path, so a routine that opened nothing
+  // looked like it never ran. Errors still go to onError.
+  onNotice?: (msg: string) => void
 ) {
   const appsRef = useRef(apps);
   appsRef.current = apps;
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+  const onNoticeRef = useRef(onNotice);
+  onNoticeRef.current = onNotice;
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -50,7 +56,11 @@ export function useHotkeyDispatch(
       const { kind, target } = event.payload;
       if (kind === "routine" && target.routine_id) {
         // Sibling-owned command (routines worker, v0.8.0).
-        void invoke("run_routine", { routineId: target.routine_id }).catch(fail);
+        void invoke<string>("run_routine", {
+          routineId: target.routine_id,
+        })
+          .then((summary) => onNoticeRef.current?.(summary))
+          .catch(fail);
       } else if (kind === "workspace" && target.workspace_id) {
         // Sibling-owned command (workspaces worker, v0.8.0).
         void invoke("set_active_workspace", {
