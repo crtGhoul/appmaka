@@ -1,15 +1,15 @@
 {
-  "version": "0.18.20",
-  "notes": "Launcher sections: drag app tiles onto section chips, pick a section and check off apps in a checklist in Launcher Settings to bulk-assign them, and create custom sections. Alt+drag to move any window — hold Alt and drag anywhere on a page and Windows moves it with snap layouts, which also fixes the launcher having no drag region. Now Playing buttons fixed: the player controls now reach inside YouTube Music and Spotify's shadow DOM, so play, pause, next, and previous actually work. Downloads fixed: files downloaded from inside AppMaka were cancelled — popup windows were blanket-banned and the click window was only 3 seconds, so a redirect could expire it. Popups now follow the same click rule as other windows, and the window is 30 seconds. Routines that open nothing now say so instead of failing silently, naming the items that no longer exist. Verified here: 280 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, Windows installer cross-built and signed on Linux (real-PC test still the gate).",
-  "pub_date": "2026-11-13T15:47:52Z",
+  "version": "0.18.21",
+  "notes": "Top bar auto-hide, Windhawk-style: the hidden top bar now appears reliably when the mouse touches the top edge. Two causes fixed — a maximized window's top edge was negative (the window rect bleeds past the monitor), so the reveal could never trigger, and the show zone was only 2 pixels. The reveal now uses the work-area top for maximized windows and a 6-pixel show zone. Verified here: 281 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, Windows installer cross-built and signed on Linux (real-PC test still the gate).",
+  "pub_date": "2026-11-13T18:13:33Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2FkODNRZXBwSHl1a3p2c3pxOTRkM0ZxRjZCNGVHTndLenV0OGpyWTNBQ3RpSnN2QzFNR1ZzN0lkdmhLQjNnRC9yOVFrZFh2MCs5QmRqVGtURWV4MkFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTg0ODYzCWZpbGU6QXBwTWFrYV8wLjE4LjIwX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjIwCmo0TjFuL21QTmF3S1NlV0NFVHFKTk04T0paWmRuVDhTcTB2K05tVGZKb21LdXJ2R0pxWjdqdHZYTDl1ZUtza0tCdnhsTGZ0dGpIZ3FBRnRacDUyUURBPT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.20/AppMaka_0.18.20_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1VMbFF2T1ZSMWVzWWppeXp2MG5KbHJrNm5DVWJHUk5RU3RoTmVyS2d0b21RYS9xaXdYRlNra05mU1d5Tks4WGJscXBlV25rQk9EQmhWUVR5eFFXbWdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTkzNjA2CWZpbGU6QXBwTWFrYV8wLjE4LjIxX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjIxCnlOdHJ3VXFwUGhmZmF2cWFOYVRFdmFjNUxScjY5ZC96Uks1Yys3TE0vR3UzUUc5OWY3SGNmMHA0SFA3UXY3NVlLbTJpWStJNU93U1h6V3M2MEJEZkNRPT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.21/AppMaka_0.18.21_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1pjUXp0S3FFZm9YYzRTeTBDM1F2dkFzeDE5bXowWDNuMmpXMDJxT0pFL3JLY3pqd05WLyt4Tmp4RW1SOHk3ejBSdTFIZ2g4SERwVS9SRlVHU0VMWVE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTg0NTk1CWZpbGU6QXBwTWFrYV8wLjE4LjIwX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yMApOeVhCcVpyWVpvUDBwNlhQNXA4MDR1L1BQSW0vSU9wd3RBYy9LOWJyWjNKQ29GaHlOZWJLeVNwdFJQUzlJTUl2ZjJ5aG53cjdOOG95NVVSMkZYSnpCdz09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.20/AppMaka_0.18.20_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2VDWlIvcWgvZjBROEh5WU1WOXBFUzdUa0hNV0JoS1V3Z1dnVytaTkFvVHVud2NCSytMZkltS2xMYWw3b3ExMWtENXZsZW9DODJlZ2szYW9XVWF2Q0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTkzMzQxCWZpbGU6QXBwTWFrYV8wLjE4LjIxX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yMQpxd3l3d3dINnBoakZIUXdzT2VsUzV0aXFLQ0VoK1kzRlR3V3RUWk9KaEZSU1lWSk82bmtqeEpHMTlvVThRWWxFQ3VQdytLVklNSWhTdTNmSTJZN2REZz09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.21/AppMaka_0.18.21_amd64.AppImage"
     }
   }
 }
