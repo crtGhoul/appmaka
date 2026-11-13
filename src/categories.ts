@@ -176,3 +176,40 @@ export function categoryOfResult(r: SearchResult): AppCategory {
   if (r.kind === "program") return categorizeApp(r.program.name);
   return "other";
 }
+
+/** Built-in section display names, in chip order. */
+export const BUILTIN_SECTION_NAMES = ["AI", "Games", "Media", "Music", "Other"];
+
+/** Section display name for one app: the stored override wins when
+ * it names a section that still exists (built-in or custom, matched
+ * case-insensitively and normalized to the stored spelling); anything
+ * else — no override, or an override naming a custom section that
+ * was removed — falls back to the name+URL heuristic. */
+export function effectiveSectionName(
+  app: { name: string; url?: string; section?: string | null },
+  customSections: string[]
+): string {
+  const override = app.section?.trim();
+  if (override) {
+    const builtin = BUILTIN_SECTION_NAMES.find(
+      (b) => b.toLowerCase() === override.toLowerCase()
+    );
+    if (builtin) return builtin;
+    const custom = customSections.find(
+      (c) => c.toLowerCase() === override.toLowerCase()
+    );
+    if (custom) return custom;
+  }
+  return SECTION_LABELS[categorizeApp(app.name, app.url)];
+}
+
+/** Section display name for one launcher tile. Apps and accounts use
+ * the app's effective section; programs use the heuristic on the
+ * program name; routines, searches and workspaces sit in Other. */
+export function sectionOfResult(r: SearchResult, customSections: string[]): string {
+  if (r.kind === "account" || r.kind === "app") {
+    return effectiveSectionName(r.app, customSections);
+  }
+  if (r.kind === "program") return SECTION_LABELS[categorizeApp(r.program.name)];
+  return "Other";
+}
