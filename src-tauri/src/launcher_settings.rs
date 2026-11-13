@@ -146,6 +146,12 @@ pub struct LauncherSettings {
     /// (v0.13.0). Old files migrate to false (plain windows).
     #[serde(default)]
     pub open_as_tabbed: bool,
+    /// Hold Alt and drag anywhere on a page to move its window (v0.18.20):
+    /// the native drag gives Windows 11 snap layouts for free, and it
+    /// also covers the launcher, which has no drag region of its own.
+    /// Old files migrate to true.
+    #[serde(default = "default_true")]
+    pub alt_drag_move: bool,
     /// Global popup override (v0.13.9): when true, popups open as plain
     /// contained windows in every app, regardless of the per-app popup
     /// policy/allowlist. Read live at popup time by the new-window
@@ -227,6 +233,12 @@ pub struct LauncherSettings {
     pub dock_profiles: Vec<DockProfile>,
     #[serde(default = "default_dock_active_profile")]
     pub dock_active_profile: String,
+    /// Custom launcher sections (v0.18.20): display names the user
+    /// made up, in creation order. Old files migrate to an empty list.
+    /// An app whose override names a section that no longer exists
+    /// falls back to auto on the frontend.
+    #[serde(default)]
+    pub custom_sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -311,6 +323,7 @@ impl Default for LauncherSettings {
             startup_mode: StartupMode::default(),
             custom_cursor: default_custom_cursor(),
             open_as_tabbed: false,
+            alt_drag_move: true,
             allow_popups_globally: false,
             auto_allow_permissions: false,
             auto_hide_top_bar: false,
@@ -331,6 +344,7 @@ impl Default for LauncherSettings {
             dock_hotkey: String::new(),
             dock_profiles: Vec::new(),
             dock_active_profile: default_dock_active_profile(),
+            custom_sections: Vec::new(),
         }
     }
 }
@@ -560,6 +574,73 @@ pub fn set_tile_size(app: AppHandle, size: String) -> Result<LauncherSettings, S
     Ok(settings.clone())
 }
 
+/// Validate a new custom-section name against the ones already stored.
+/// Returns the trimmed name. Rejects blanks, names over 24 chars,
+/// duplicates (case-insensitive), and names that collide with the
+/// built-in sections or the "All" chip — those names already mean
+/// something in the launcher, so reusing one would move tiles
+/// somewhere the user didn't ask for.
+fn validate_custom_section_name(name: &str, existing: &[String]) -> Result<String, String> {
+    const BUILTIN: [&str; 6] = ["ai", "games", "media", "music", "other", "all"];
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Section name is required.".to_string());
+    }
+    if name.chars().count() > 24 {
+        return Err("Section name is too long (24 characters max).".to_string());
+    }
+    if BUILTIN.contains(&name.to_lowercase().as_str()) {
+        return Err(format!("\"{name}\" is already a built-in section."));
+    }
+    if existing
+        .iter()
+        .any(|e| e.to_lowercase() == name.to_lowercase())
+    {
+        return Err(format!("A section named \"{name}\" already exists."));
+    }
+    Ok(name)
+}
+
+/// Add a custom launcher section (v0.18.20). At most 12, so the chip
+/// row stays usable. JS: `invoke("add_custom_section", { name })`.
+#[tauri::command]
+pub fn add_custom_section(app: AppHandle, name: String) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    let name = validate_custom_section_name(&name, &settings.custom_sections)?;
+    if settings.custom_sections.len() >= 12 {
+        return Err(
+            "You already have 12 custom sections. Remove one to add another.".to_string(),
+        );
+    }
+    settings.custom_sections.push(name);
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Remove a custom launcher section (v0.18.20). Apps assigned to it
+/// fall back to auto — their override names a section that no longer
+/// exists, which the frontend treats as unset. JS:
+/// `invoke("remove_custom_section", { name })`.
+#[tauri::command]
+pub fn remove_custom_section(app: AppHandle, name: String) -> Result<LauncherSettings, String> {
+    let name = name.trim().to_string();
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    let pos = settings
+        .custom_sections
+        .iter()
+        .position(|e| e.to_lowercase() == name.to_lowercase())
+        .ok_or_else(|| "No custom section with that name.".to_string())?;
+    settings.custom_sections.remove(pos);
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
 /// Read the dictation-compatibility setting from live state (false
 /// when state is unavailable). The hook installers consult this so
 /// the mode also holds for hooks installed after a restart. Only the
@@ -569,6 +650,22 @@ pub fn dictation_compat_enabled(app: &AppHandle) -> bool {
     app.try_state::<Mutex<LauncherSettings>>()
         .and_then(|s| s.lock().ok().map(|s| s.dictation_compat))
         .unwrap_or(false)
+}
+
+/// Alt+drag window move + dictation compat, read without blocking: the
+/// mouse hook proc calls this on Alt+clicks, and a blocking lock would
+/// stall all mouse input while another thread saves settings.
+/// Unreadable state reads as (off, on): no drag starts.
+/// Windows-only: the only caller is the Windows mouse hook proc.
+#[cfg(windows)]
+pub fn alt_drag_gates(app: &AppHandle) -> (bool, bool) {
+    app.try_state::<Mutex<LauncherSettings>>()
+        .and_then(|s| {
+            s.try_lock()
+                .ok()
+                .map(|g| (g.alt_drag_move, g.dictation_compat))
+        })
+        .unwrap_or((false, true))
 }
 
 /// Apply the dictation-compatibility mode to the global hooks: the
@@ -739,6 +836,24 @@ pub fn set_open_as_tabbed(
         .lock()
         .map_err(|e| format!("settings state poisoned: {e}"))?;
     settings.open_as_tabbed = enabled;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
+/// Set whether holding Alt and dragging moves a page window (v0.18.20).
+/// JS: `invoke("set_alt_drag_move", { enabled })`. No hook dance needed:
+/// the mouse hook stays installed and gates on the setting per event,
+/// so toggling applies immediately.
+#[tauri::command]
+pub fn set_alt_drag_move(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.alt_drag_move = enabled;
     save(&app, &settings)?;
     Ok(settings.clone())
 }
@@ -945,5 +1060,51 @@ mod tests {
         };
         let raw = serde_json::to_string(&s).unwrap();
         assert!(raw.contains("\"startup_mode\":\"ask\""));
+    }
+
+    #[test]
+    fn custom_sections_default_empty_and_round_trip() {
+        // Old files without the field migrate to an empty list.
+        let s: LauncherSettings = serde_json::from_str("{}").unwrap();
+        assert!(s.custom_sections.is_empty());
+        let s: LauncherSettings =
+            serde_json::from_str(r#"{"custom_sections":["Work","Family"]}"#).unwrap();
+        assert_eq!(s.custom_sections, vec!["Work", "Family"]);
+    }
+
+    #[test]
+    fn alt_drag_move_defaults_on_and_round_trips() {
+        // Old files without the field migrate to on (the default).
+        let s: LauncherSettings = serde_json::from_str("{}").unwrap();
+        assert!(s.alt_drag_move);
+        assert!(LauncherSettings::default().alt_drag_move);
+        let s: LauncherSettings =
+            serde_json::from_str(r#"{"alt_drag_move":false}"#).unwrap();
+        assert!(!s.alt_drag_move);
+    }
+
+    #[test]
+    fn custom_section_name_validation() {
+        let existing = vec!["Work".to_string()];
+        // Trims, keeps the user's spelling.
+        assert_eq!(
+            validate_custom_section_name("  Family  ", &existing).unwrap(),
+            "Family"
+        );
+        // Blank, too long, duplicate, built-in collision.
+        assert!(validate_custom_section_name("   ", &existing).is_err());
+        assert!(validate_custom_section_name(&"x".repeat(25), &existing).is_err());
+        assert_eq!(
+            validate_custom_section_name(&"x".repeat(24), &existing).unwrap(),
+            "x".repeat(24)
+        );
+        assert!(validate_custom_section_name("work", &existing).is_err());
+        assert!(validate_custom_section_name("WORK", &existing).is_err());
+        for builtin in ["AI", "Games", "Media", "Music", "Other", "All", "ai", "all"] {
+            assert!(
+                validate_custom_section_name(builtin, &existing).is_err(),
+                "{builtin} must be rejected"
+            );
+        }
     }
 }
