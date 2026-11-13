@@ -1,15 +1,15 @@
 {
-  "version": "0.18.18",
-  "notes": "Moonshine repair, Alt+F4 close, and show/hide for every settings section.",
-  "pub_date": "2026-11-13T05:31:26Z",
+  "version": "0.18.19",
+  "notes": "Moonshine dictation fix: the engine passed its options space-separated, but sherpa-onnx requires --x=y form, so every Moonshine recording failed with a bare exit code. The options are now passed as --moonshine-encoder=..., --moonshine-merged-decoder=..., --tokens=..., --num-threads=4. Verified here: the space-separated form reproduces the exact error, the equals form transcribes correctly, 273 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, Windows installer cross-built and signed on Linux (real-PC test still the gate).",
+  "pub_date": "2026-11-13T14:29:41Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1N4UE5WeHR1VXhRWUt2VUNkQTlWVm1tUkViZ3hCaC84NmpyNEFNMEJVU1lhN2pMcGFqNnBDODlDUWR5b3R5V1h1ZEdPZ3V6Z2pqaS9zQytvWGh0QmdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTQ3Nzc5CWZpbGU6QXBwTWFrYV8wLjE4LjE4X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjE4CmdGQVNrVnBXcnBMVFNidzhQVlM5ZVBsY2dUUm9haUNXNVovbWxsazRCSzRCZ2RjL3pPdDNNei8wa0FyZVdhQ1ZQRFdlTldiTk05Sjc4d2M4NzFtREJ3PT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.18/AppMaka_0.18.18_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1FEaHdzRStpR20vNTdEemtiUFhjLzg4WkRza2FtMkxobjZrblNpNGVncHNBVkxuYzJ0TVVrdFA2eCt1WG5sOS9OdEcwQkVpbTdmRkVHcUNsNVRvT2dZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTgwMTQ4CWZpbGU6QXBwTWFrYV8wLjE4LjE5X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjE5CjdvbGhuNjBhQjl2cXd0aGtTc3MyWjY1N1lhWnAvQ3hTU2xYalhZREo0THRGSm13WWtlYTA0WWl5dS81RXBTYjUzNmhKV01MbWpzdjFYTDAyeklBbERBPT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.19/AppMaka_0.18.19_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1RLTlVUSGczcnJMWnQ1U0c2SVJZMnVnS3JvTzVqajBpQ0xNN2VCWGpkdzNpNWtoLzBWZG9Yc29OZEtTZU1PdkZaZEcxOWc0cFZMVXdHU2REaVpSb1FRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTQ3MjMyCWZpbGU6QXBwTWFrYV8wLjE4LjE4X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4xOApqVmZFd0ZTMSsxUzB2U3VQU2RjRzJEU012SUo2cENyQlpzZUlCeVFxMzRzd3R6ZWozaytPTHNQV3FoNnpjT0dPVUpSd1JDNzBoOGs0S1dCdFh4aUpBUT09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.18/AppMaka_0.18.18_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1V2RitzM2g3VmIybnN6UXFnUkM3d0VDVThXUG9zYTN0cmIwMVI5VzRsQ3VHdHpJMWRHYk1DZlFaaFdabE5hOGZOdmxRb3ZqYUlwbHJYQ0pETlVTcGdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTc5ODYwCWZpbGU6QXBwTWFrYV8wLjE4LjE5X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4xOQpRNktwZVlpbnNYcFZlYVpoTTNYeWFBRHNMVmd4TU9vUlVZdnRYK2krY2dMUThqSWYyckV4UzhyU2QweTI2QytYaXFqbVNGVUJFRmJvL2pOamZSYWpEQT09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.19/AppMaka_0.18.19_amd64.AppImage"
     }
   }
 }
