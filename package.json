@@ -19,11 +19,11 @@
   "private": true,
   "scripts": {
     "build": "tsc && vite build",
-    "test": "node --test scripts/semver.test.ts",
+    "test": "node --test scripts/semver.test.ts scripts/categories.test.ts",
     "dev": "vite --host 0.0.0.0 --port 3000",
     "preview": "vite preview",
     "tauri": "tauri"
   },
   "type": "module",
-  "version": "0.18.16"
+  "version": "0.18.17"
 }
