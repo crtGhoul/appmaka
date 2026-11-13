@@ -2804,6 +2804,20 @@ function AppShell() {
   // clears it. Component state only — collapsing is a view choice, not
   // a setting, so nothing is persisted.
   const [popupCollapsedIds, setPopupCollapsedIds] = useState<Set<string>>(new Set());
+  // Settings/library panels: keys of sections collapsed to just their
+  // heading + a Show button. Empty means all expanded (the default).
+  // Same rule as the popup rows above — a view choice, not persisted.
+  // The Launcher panel keeps its own older boolean (launcherPanelOpen)
+  // instead of joining this set, so its existing behaviour is untouched.
+  const [collapsedPanels, setCollapsedPanels] = useState<Set<string>>(new Set());
+  const togglePanel = (key: string) =>
+    setCollapsedPanels((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  const panelOpen = (key: string) => !collapsedPanels.has(key);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   // v0.8.0 workspaces: owned here so the launcher filter and the library
@@ -4510,7 +4524,18 @@ function AppShell() {
       {banners}
 
       <section className="panel">
-        <h2>Add a web app</h2>
+        <div className="panel-head">
+          <h2>Add a web app</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("add")}
+            aria-expanded={panelOpen("add")}
+          >
+            {panelOpen("add") ? "Hide" : "Show"}
+          </button>
+        </div>
+        {panelOpen("add") && (
+          <>
         <QuickAddForm onAdded={addCreatedApp} onError={setError} />
         <PreviewSignInForm onError={setError} />
         <details className="manual-add">
@@ -4555,10 +4580,23 @@ function AppShell() {
             </p>
           )}
         </details>
+          </>
+        )}
       </section>
 
       <section className="panel">
-        <h2>Library</h2>
+        <div className="panel-head">
+          <h2>Library</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("library")}
+            aria-expanded={panelOpen("library")}
+          >
+            {panelOpen("library") ? "Hide" : "Show"}
+          </button>
+        </div>
+        {panelOpen("library") && (
+          <>
         {(() => {
           const total = [...sleeping.values()].reduce((a, b) => a + b, 0);
           return total > 0 && (launcherSettings?.show_sleep_labels ?? true) ? (
@@ -4682,12 +4720,22 @@ function AppShell() {
             })}
           </ul>
         )}
+          </>
+        )}
       </section>
 
       <section className="panel">
         <div className="panel-head">
           <h2>Workspaces</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("workspaces")}
+            aria-expanded={panelOpen("workspaces")}
+          >
+            {panelOpen("workspaces") ? "Hide" : "Show"}
+          </button>
         </div>
+        {panelOpen("workspaces") && (
         <WorkspacesSection
           apps={apps}
           list={workspaceList}
@@ -4696,13 +4744,23 @@ function AppShell() {
           pinned={launcherSettings?.pinned ?? []}
           onTogglePin={(itemId) => void handleTogglePin(itemId)}
         />
+        )}
       </section>
 
       <section className="panel">
         <div className="panel-head">
           <h2>Split view</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("split")}
+            aria-expanded={panelOpen("split")}
+          >
+            {panelOpen("split") ? "Hide" : "Show"}
+          </button>
         </div>
+        {panelOpen("split") && (
         <SplitSection apps={apps} onError={setError} />
+        )}
       </section>
 
       <section className="panel">
@@ -4710,15 +4768,24 @@ function AppShell() {
           <h2>Memory</h2>
           <button
             className="text-button"
+            onClick={() => togglePanel("memory")}
+            aria-expanded={panelOpen("memory")}
+          >
+            {panelOpen("memory") ? "Hide" : "Show"}
+          </button>
+          <button
+            className="text-button"
             onClick={() => setRamOpen(true)}
           >
             Open memory dashboard
           </button>
         </div>
+        {panelOpen("memory") && (
         <p className="muted small">
           See how much memory each open account window uses (approximate),
           and close them all at once.
         </p>
+        )}
       </section>
 
       <section className="panel">
@@ -4726,27 +4793,52 @@ function AppShell() {
           <h2>Downloads</h2>
           <button
             className="text-button"
+            onClick={() => togglePanel("downloads")}
+            aria-expanded={panelOpen("downloads")}
+          >
+            {panelOpen("downloads") ? "Hide" : "Show"}
+          </button>
+          <button
+            className="text-button"
             onClick={() => setView("downloads")}
           >
             Open downloads
           </button>
         </div>
+        {panelOpen("downloads") && (
         <p className="muted small">
           Files you downloaded from inside AppMaka, with progress while they
           download.
         </p>
+        )}
       </section>
 
       <section className="panel">
         <div className="panel-head">
           <h2>Link handling</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("links")}
+            aria-expanded={panelOpen("links")}
+          >
+            {panelOpen("links") ? "Hide" : "Show"}
+          </button>
         </div>
+        {panelOpen("links") && (
         <LinkRules />
+        )}
       </section>
 
       <section className="panel popup-permissions-panel">
         <div className="panel-head">
           <h2>Popup permissions</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("popups")}
+            aria-expanded={panelOpen("popups")}
+          >
+            {panelOpen("popups") ? "Hide" : "Show"}
+          </button>
           {apps.length > 0 && (
             <button
               className="text-button popup-permissions-toggle"
@@ -4763,6 +4855,7 @@ function AppShell() {
             </button>
           )}
         </div>
+        {panelOpen("popups") && (
         <PopupPermissionsPanel
           apps={apps}
           launcherSettings={launcherSettings}
@@ -4778,6 +4871,7 @@ function AppShell() {
           onSaved={replaceApp}
           onError={setError}
         />
+        )}
       </section>
 
       <section className="panel launcher-panel">
@@ -4819,7 +4913,16 @@ function AppShell() {
       <section className="panel">
         <div className="panel-head">
           <h2>Routines</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("routines")}
+            aria-expanded={panelOpen("routines")}
+          >
+            {panelOpen("routines") ? "Hide" : "Show"}
+          </button>
         </div>
+        {panelOpen("routines") && (
+          <>
         <p className="muted small">
           Open a set of apps and accounts with one click or one keystroke.
           For example, "Morning" can open your work email, your main chat
@@ -4830,39 +4933,74 @@ function AppShell() {
           programs={programs}
           onChanged={(list) => setRoutines(list)}
         />
+          </>
+        )}
       </section>
 
       <section className="panel clipboard-panel">
         <div className="panel-head">
           <h2>Clipboard</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("clipboard")}
+            aria-expanded={panelOpen("clipboard")}
+          >
+            {panelOpen("clipboard") ? "Hide" : "Show"}
+          </button>
         </div>
+        {panelOpen("clipboard") && (
+          <>
         <p className="muted small">
           Keep a searchable history of everything you copy, on this PC only.
         </p>
         <ClipboardSection />
+          </>
+        )}
       </section>
 
       <section className="panel">
         <div className="panel-head">
           <h2>User scripts</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("scripts")}
+            aria-expanded={panelOpen("scripts")}
+          >
+            {panelOpen("scripts") ? "Hide" : "Show"}
+          </button>
         </div>
+        {panelOpen("scripts") && (
+          <>
         <p className="muted small">
           Your own small scripts, run on the pages you choose — a
           Tampermonkey-style header says which sites each one touches.
           Scripts using risky constructs are listed but never run.
         </p>
         <UserScriptsSection />
+          </>
+        )}
       </section>
 
       <section className="panel">
         <div className="panel-head">
           <h2>Updates</h2>
+          <button
+            className="text-button"
+            onClick={() => togglePanel("updates")}
+            aria-expanded={panelOpen("updates")}
+          >
+            {panelOpen("updates") ? "Hide" : "Show"}
+          </button>
         </div>
+        {panelOpen("updates") && (
+          <>
         <VersionLine />
         <UpdaterSection
           autoCheck={launcherSettings?.auto_update_check ?? false}
           isWindows={platform?.os === "windows"}
         />
+          </>
+        )}
       </section>
 
       <footer className="footer muted">
