@@ -327,7 +327,7 @@ pub fn start_preview(
         };
         let json_id = serde_json::to_string(&id).unwrap_or_else(|_| "\"\"".to_string());
         let json_url = serde_json::to_string(&url).unwrap_or_else(|_| "\"\"".to_string());
-        let control = WebviewWindowBuilder::new(
+        let mut control_builder = WebviewWindowBuilder::new(
             app,
             control_window_label(&id),
             WebviewUrl::App("preview-header.html".into()),
@@ -338,9 +338,17 @@ pub fn start_preview(
         .initialization_script(format!(
             "window.__APPMAKA_PREVIEW_ID__={json_id};\
              window.__APPMAKA_PREVIEW_URL__={json_url};"
-        ))
-        .build()
-        .map_err(|e| format!("could not open preview controls: {e}"))?;
+        ));
+        // The header is a separate window above the site: without the
+        // cursor init script the drawn pointer parks on the page behind
+        // it while the native cursor moves in the header.
+        let cursor_js = crate::windows::saved_cursor_js(app);
+        if !cursor_js.is_empty() {
+            control_builder = control_builder.initialization_script(cursor_js);
+        }
+        let control = control_builder
+            .build()
+            .map_err(|e| format!("could not open preview controls: {e}"))?;
         let _ = control.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
             x: cx,
             y: cy,
