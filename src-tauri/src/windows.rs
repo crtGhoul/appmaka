@@ -2288,6 +2288,16 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
     document.addEventListener("mousemove", onMove, {{ passive: true }});
     window.addEventListener("mouseenter", onEnter, {{ passive: true }});
     document.addEventListener("mouseleave", onLeave);
+    // An iframe is a second document: moving into one fires no
+    // mousemove on this document and no mouseleave, so the drawn dot
+    // would sit frozen at the frame's edge while the native cursor
+    // (kept auto over frames) moves inside it — two pointers at once.
+    // Park the dots on frame entry; the next mousemove on this
+    // document re-shows them via showAt.
+    function onFrameEnter(e) {{
+      if (e.target && e.target.tagName === "IFRAME") onLeave();
+    }}
+    document.addEventListener("mouseover", onFrameEnter, {{ passive: true }});
     // The document can lose the pointer without a mouseleave (focus
     // moves to another window or the native caption strip): without a
     // second net the dots would sit frozen at their last position.
@@ -2372,6 +2382,7 @@ pub(crate) fn cursor_chrome_js(style: &str, hex: &str, rgb: &str) -> String {
       document.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseenter", onEnter);
       document.removeEventListener("mouseleave", onLeave);
+      document.removeEventListener("mouseover", onFrameEnter);
       window.removeEventListener("blur", onLeave);
       document.removeEventListener("fullscreenchange", onFullscreenChange);
       if (obs) obs.disconnect();
@@ -2449,8 +2460,10 @@ fn cursor_window_label(label: &str) -> bool {
         || label.starts_with("tabbed-")
         || label.starts_with("popup-")
         || label.starts_with("oauth-")
+        || label.starts_with("popupbar-")
         || label.starts_with(crate::split::SPLIT_PANE_LABEL_PREFIX)
         || (label.starts_with("preview-") && label.ends_with("-site"))
+        || (label.starts_with("preview-") && label.ends_with("-header"))
         || label == crate::websearch::SEARCH_WINDOW_LABEL
 }
 
@@ -5792,7 +5805,12 @@ mod tests {
         assert!(cursor_window_label("popup-3"));
         assert!(cursor_window_label("oauth-1"));
         assert!(cursor_window_label("preview-abc-site"));
-        assert!(!cursor_window_label("preview-abc-header"));
+        // The popup "Save as app" bar and the preview header are
+        // separate windows over the page: they get the cursor too, or
+        // the drawn pointer parks behind them while the native cursor
+        // moves in the strip.
+        assert!(cursor_window_label("popupbar-popup-3"));
+        assert!(cursor_window_label("preview-abc-header"));
         assert!(!cursor_window_label("main"));
         assert!(!cursor_window_label("clipboard"));
     }

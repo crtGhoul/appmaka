@@ -267,7 +267,7 @@ pub fn attach_popup_bar(app: &AppHandle, popup: &WebviewWindow, popup_label: &st
             height: mh,
         },
     );
-    let bar = match WebviewWindowBuilder::new(
+    let mut bar_builder = WebviewWindowBuilder::new(
         app,
         popup_bar_label(popup_label),
         WebviewUrl::App("popupbar.html".into()),
@@ -277,9 +277,16 @@ pub fn attach_popup_bar(app: &AppHandle, popup: &WebviewWindow, popup_label: &st
     .skip_taskbar(true)
     .focused(false)
     .inner_size(w, h)
-    .position(x, y)
-    .build()
-    {
+    .position(x, y);
+    // The bar is a separate window over the popup: without the cursor
+    // init script the drawn pointer parks on the page behind it while
+    // the native cursor moves in the bar — the same two-cursor effect
+    // as an iframe edge.
+    let cursor_js = crate::windows::saved_cursor_js(app);
+    if !cursor_js.is_empty() {
+        bar_builder = bar_builder.initialization_script(cursor_js);
+    }
+    let bar = match bar_builder.build() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("[appmaka] popup bar failed for {popup_label}: {e}");

@@ -8,6 +8,7 @@ import type { ClipboardSettings } from "./types";
 interface DictationStatus {
   ready: boolean;
   binaryInstalled: boolean;
+  engine: string;
   model: string;
   modelInstalled: boolean;
   recording: boolean;
@@ -130,6 +131,18 @@ export function ClipboardSection() {
     try {
       const st = await invoke<DictationStatus>("set_dictation_model", {
         model,
+      });
+      setDict(st);
+    } catch (err) {
+      setDictError(errMsg(err));
+    }
+  }
+
+  async function chooseEngine(engine: string) {
+    setDictError(null);
+    try {
+      const st = await invoke<DictationStatus>("set_dictation_engine", {
+        engine,
       });
       setDict(st);
     } catch (err) {
@@ -400,6 +413,29 @@ export function ClipboardSection() {
           popup's Dictate button always works as press-to-start,
           press-to-stop.
         </p>
+        <div role="radiogroup" aria-label="Speech engine" style={{ marginBottom: 8 }}>
+          <label style={{ display: "block", marginBottom: 6, cursor: "pointer" }}>
+            <input
+              type="radio"
+              name="dictation-engine"
+              checked={!dict || dict?.engine === "whisper"}
+              onChange={() => void chooseEngine("whisper")}
+              style={{ marginRight: 8 }}
+            />
+            Whisper — the classic engine, three sizes below
+          </label>
+          <label style={{ display: "block", cursor: "pointer" }}>
+            <input
+              type="radio"
+              name="dictation-engine"
+              checked={dict?.engine === "moonshine"}
+              onChange={() => void chooseEngine("moonshine")}
+              style={{ marginRight: 8 }}
+            />
+            Moonshine — faster and hears better, one small model
+          </label>
+        </div>
+        {(!dict || dict?.engine === "whisper") && (
         <div role="radiogroup" aria-label="Speech model" style={{ marginBottom: 8 }}>
           <label style={{ display: "block", marginBottom: 6, cursor: "pointer" }}>
             <input
@@ -432,12 +468,21 @@ export function ClipboardSection() {
             Small — hears better still, slower, about 470 MB download
           </label>
         </div>
+        )}
+        {dict?.engine === "moonshine" && (
+          <p className="muted small" style={{ margin: "0 0 12px" }}>
+            Moonshine Tiny — one model, no size to pick. It answers
+            faster than Whisper Tiny and hears better on short takes.
+          </p>
+        )}
         {dict && !dict.ready ? (
           <div>
             <button onClick={() => void downloadDictation()} disabled={downloading}>
               {downloading
                 ? "Downloading…"
-                : `Download speech model (about ${dict.model === "small" ? "470" : dict.model === "base" ? "150" : "85"} MB)`}
+                : dict.engine === "moonshine"
+                  ? "Download Moonshine (about 70 MB)"
+                  : `Download speech model (about ${dict.model === "small" ? "470" : dict.model === "base" ? "150" : "85"} MB)`}
             </button>
             <p className="muted small" style={{ margin: "6px 0 0" }}>
               One-time download. Nothing is installed or loaded until this

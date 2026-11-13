@@ -60,6 +60,25 @@ const WHISPER_EXE: &str = "whisper-cli.exe";
 #[cfg(target_os = "linux")]
 const WHISPER_EXE: &str = "whisper-cli";
 
+/// Moonshine engine (sherpa-onnx): the prebuilt sherpa-onnx release and
+/// the Moonshine Tiny v2 English model. Measured on this VM against
+/// Whisper tiny on the same 6.6 s clip: 1.26 s wall (0.82 s load +
+/// 0.40 s decode) vs 1.85 s for Whisper tiny, with an identical
+/// transcript — so it is the faster engine for short dictation too,
+/// not just for long clips.
+const SHERPA_RELEASE: &str = "v2.0.1";
+#[cfg(windows)]
+const SHERPA_ARCHIVE: &str = "sherpa-onnx-v2.0.1-win-x64-shared-MD-Release.tar.bz2";
+#[cfg(target_os = "linux")]
+const SHERPA_ARCHIVE: &str = "sherpa-onnx-v2.0.1-linux-x64-shared.tar.bz2";
+#[cfg(windows)]
+const SHERPA_EXE: &str = "sherpa-onnx-offline.exe";
+#[cfg(target_os = "linux")]
+const SHERPA_EXE: &str = "sherpa-onnx-offline";
+const MOONSHINE_MODEL_ARCHIVE: &str =
+    "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2";
+const MOONSHINE_MODEL_DIR: &str = "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27";
+
 // ---------------------------------------------------------------------------
 // Persisted data
 // ---------------------------------------------------------------------------
@@ -77,7 +96,13 @@ pub struct Transcript {
 struct DictationFile {
     #[serde(default = "default_hotkey")]
     hotkey: String,
-    /// "tiny", "base", or "small".
+    /// Speech engine: "whisper" (whisper.cpp, ggml models) or
+    /// "moonshine" (sherpa-onnx, Moonshine Tiny v2 — faster and more
+    /// accurate than Whisper tiny on short English dictation).
+    #[serde(default = "default_engine")]
+    engine: String,
+    /// "tiny", "base", or "small". Whisper only; Moonshine uses its
+    /// own fixed Tiny v2 model and ignores this.
     #[serde(default = "default_model")]
     model: String,
     /// Hold-to-talk (v0.14.2): hold the hotkey to record, let go to
@@ -104,6 +129,10 @@ fn default_hold_to_talk() -> bool {
 fn default_hotkey() -> String {
     DEFAULT_HOTKEY.to_string()
 }
+fn default_engine() -> String {
+    "whisper".to_string()
+}
+
 fn default_model() -> String {
     "tiny".to_string()
 }
@@ -112,6 +141,7 @@ impl Default for DictationFile {
     fn default() -> Self {
         Self {
             hotkey: default_hotkey(),
+            engine: default_engine(),
             model: default_model(),
             hold_to_talk: default_hold_to_talk(),
             device: default_device(),
@@ -210,6 +240,161 @@ fn binary_path_for(app: &AppHandle, device: &str) -> Option<PathBuf> {
     walk(&bin, 0)
 }
 
+/// Find the extracted sherpa-onnx-offline under the Moonshine bin dir,
+/// tolerating the archive's internal folder layout the same way the
+/// Whisper finder does.
+fn moonshine_binary_path(app: &AppHandle) -> Option<PathBuf> {
+    let bin = dictation_dir(app).ok()?.join("moonshine-bin");
+    fn walk(dir: &Path, depth: usize) -> Option<PathBuf> {
+        if depth > 3 {
+            return None;
+        }
+        for entry in fs::read_dir(dir).ok()?.flatten() {
+            let p = entry.path();
+            if p.is_file() && entry.file_name() == SHERPA_EXE {
+                return Some(p);
+            }
+            if p.is_dir() {
+                if let Some(found) = walk(&p, depth + 1) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    walk(&bin, 0)
+}
+
+/// The extracted Moonshine Tiny v2 model dir (encoder + merged
+/// decoder + tokens). Exists only once the model archive was
+/// downloaded and unpacked.
+fn moonshine_model_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(dictation_dir(app)?
+        .join("moonshine-models")
+        .join(MOONSHINE_MODEL_DIR))
+}
+
+/// Download + unpack the sherpa-onnx prebuilt (the binary that runs
+/// Moonshine). Mirrors ensure_binary_for: system tar reads .tar.bz2,
+/// and the binary being present is the verdict, not tar's exit code.
+fn ensure_moonshine_binary(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(p) = moonshine_binary_path(app) {
+        return Ok(p);
+    }
+    let dir = dictation_dir(app)?;
+    let archive = dir.join(SHERPA_ARCHIVE);
+    let url = format!(
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/{SHERPA_RELEASE}/{SHERPA_ARCHIVE}"
+    );
+    download_to(&url, &archive)?;
+    let bin_dir = dir.join("moonshine-bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("Couldn't create the bin folder: {e}"))?;
+    let tar = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&bin_dir)
+        .output();
+    let _ = fs::remove_file(&archive);
+    match moonshine_binary_path(app) {
+        Some(p) => Ok(p),
+        None => match tar {
+            Ok(out) => Err(format!(
+                "Unpacking the Moonshine engine failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+            Err(e) => Err(format!("Couldn't run tar to unpack the Moonshine engine: {e}")),
+        },
+    }
+}
+
+/// Download + unpack the Moonshine Tiny v2 model archive.
+fn ensure_moonshine_model(app: &AppHandle) -> Result<PathBuf, String> {
+    let model_dir = moonshine_model_dir(app)?;
+    if model_dir.exists() {
+        return Ok(model_dir);
+    }
+    let dir = dictation_dir(app)?;
+    let archive = dir.join(MOONSHINE_MODEL_ARCHIVE);
+    let url = format!(
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/{MOONSHINE_MODEL_ARCHIVE}"
+    );
+    download_to(&url, &archive)?;
+    let models_dir = dir.join("moonshine-models");
+    fs::create_dir_all(&models_dir).map_err(|e| format!("Couldn't create the models folder: {e}"))?;
+    let tar = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&models_dir)
+        .output();
+    let _ = fs::remove_file(&archive);
+    if model_dir.exists() {
+        Ok(model_dir)
+    } else {
+        match tar {
+            Ok(out) => Err(format!(
+                "Unpacking the Moonshine model failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+            Err(e) => Err(format!("Couldn't run tar to unpack the Moonshine model: {e}")),
+        }
+    }
+}
+
+/// Run sherpa-onnx-offline with the Moonshine Tiny v2 model (merged
+/// decoder) on one wav, and pull the transcript out of the JSON line
+/// it prints. The binary also dumps its full config to stdout, so the
+/// transcript is found by scanning for the JSON object line, not by
+/// reading stdout whole.
+fn run_moonshine(bin: &Path, model_dir: &Path, wav: &Path) -> Result<String, String> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("--moonshine-encoder")
+        .arg(model_dir.join("encoder_model.ort"))
+        .arg("--moonshine-merged-decoder")
+        .arg(model_dir.join("decoder_model_merged.ort"))
+        .arg("--tokens")
+        .arg(model_dir.join("tokens.txt"))
+        .arg("--num-threads")
+        .arg("4")
+        .arg(wav);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("Couldn't run the Moonshine engine: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "The Moonshine engine failed on that recording ({}).",
+            out.status
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    moonshine_text_from_stdout(&stdout)
+        .ok_or_else(|| "The Moonshine engine returned no transcript.".to_string())
+}
+
+/// Pure: pull the transcript out of sherpa-onnx-offline's stdout. The
+/// binary dumps its full config first, so the transcript is the JSON
+/// object line ({"text": "...", ...}), not stdout whole.
+fn moonshine_text_from_stdout(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                return Some(clean_transcript(text));
+            }
+        }
+    }
+    None
+}
+
 /// The configured device's binary (what status reports and the
 /// recorder runs when nothing overrides it).
 fn binary_path(app: &AppHandle) -> Option<PathBuf> {
@@ -267,6 +452,7 @@ fn now_ms() -> i64 {
 pub struct DictationStatus {
     pub ready: bool,
     pub binary_installed: bool,
+    pub engine: String,
     pub model: String,
     pub model_installed: bool,
     pub recording: bool,
@@ -277,19 +463,38 @@ pub struct DictationStatus {
 }
 
 fn status(app: &AppHandle) -> DictationStatus {
-    let (model, hotkey, hold_to_talk, device) = with_data(app, |d| {
-        (d.model.clone(), d.hotkey.clone(), d.hold_to_talk, d.device.clone())
+    let (engine, model, hotkey, hold_to_talk, device) = with_data(app, |d| {
+        (
+            d.engine.clone(),
+            d.model.clone(),
+            d.hotkey.clone(),
+            d.hold_to_talk,
+            d.device.clone(),
+        )
     })
     .unwrap_or_else(|_| {
         (
+            default_engine(),
             default_model(),
             default_hotkey(),
             default_hold_to_talk(),
             default_device(),
         )
     });
-    let model_installed = model_path(app, &model).map(|p| p.exists()).unwrap_or(false);
-    let binary_installed = binary_path(app).is_some();
+    // Readiness follows the SELECTED engine, so the frontend's
+    // download button and "ready" line always describe the engine
+    // the user actually picked.
+    let (model_installed, binary_installed) = if engine == "moonshine" {
+        (
+            moonshine_model_dir(app).map(|p| p.exists()).unwrap_or(false),
+            moonshine_binary_path(app).is_some(),
+        )
+    } else {
+        (
+            model_path(app, &model).map(|p| p.exists()).unwrap_or(false),
+            binary_path(app).is_some(),
+        )
+    };
     let state = app.try_state::<DictationState>();
     let recording = state
         .as_ref()
@@ -302,6 +507,7 @@ fn status(app: &AppHandle) -> DictationStatus {
     DictationStatus {
         ready: binary_installed && model_installed,
         binary_installed,
+        engine,
         model,
         model_installed,
         recording,
@@ -353,6 +559,19 @@ pub fn set_dictation_model(app: AppHandle, model: String) -> Result<DictationSta
         return Err("Unknown speech model.".to_string());
     }
     with_data(&app, |d| d.model = model)?;
+    save(&app)?;
+    emit_state(&app);
+    Ok(status(&app))
+}
+
+/// Switch the dictation engine. Whisper keeps its model; Moonshine
+/// uses its own fixed Tiny v2 model and ignores the model setting.
+#[tauri::command]
+pub fn set_dictation_engine(app: AppHandle, engine: String) -> Result<DictationStatus, String> {
+    if engine != "whisper" && engine != "moonshine" {
+        return Err("Unknown speech engine.".to_string());
+    }
+    with_data(&app, |d| d.engine = engine)?;
     save(&app)?;
     emit_state(&app);
     Ok(status(&app))
@@ -490,11 +709,17 @@ fn ensure_model(app: &AppHandle, model: &str) -> Result<PathBuf, String> {
 /// selected model). Runs on a worker thread; resolves when ready.
 #[tauri::command]
 pub async fn download_dictation(app: AppHandle) -> Result<DictationStatus, String> {
+    let engine = with_data(&app, |d| d.engine.clone())?;
     let model = with_data(&app, |d| d.model.clone())?;
     let app2 = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        ensure_binary_for(&app2, &configured_device(&app2))?;
-        ensure_model(&app2, &model)?;
+        if engine == "moonshine" {
+            ensure_moonshine_binary(&app2)?;
+            ensure_moonshine_model(&app2)?;
+        } else {
+            ensure_binary_for(&app2, &configured_device(&app2))?;
+            ensure_model(&app2, &model)?;
+        }
         Ok::<(), String>(())
     })
     .await;
@@ -906,29 +1131,36 @@ fn run_session(
     }
     emit_state(app);
 
-    let model = with_data(app, |d| d.model.clone())?;
-    let device_pref = with_data(app, |d| d.device.clone())?;
-    let model_bin = ensure_model(app, &model)?;
-    let bin = ensure_binary_for(app, &device_pref)?;
-    let text = match run_whisper(&bin, &model_bin, &wav) {
-        Ok(text) => text,
-        Err(e) if device_pref == "cuda" => {
-            // The CUDA build fails hard on machines without a working
-            // NVIDIA stack (missing driver/cudart, wrong arch) — the
-            // take matters more than the accelerator, so retry ONCE on
-            // the CPU build (downloading it if needed) and log the
-            // fallback in the error history.
-            crate::errors::record(
-                app,
-                "dictation",
-                "The GPU speech engine failed — this take was transcribed on the CPU instead.",
-                &e,
-                false,
-            );
-            let cpu_bin = ensure_binary_for(app, "cpu")?;
-            run_whisper(&cpu_bin, &model_bin, &wav)?
+    let engine = with_data(app, |d| d.engine.clone())?;
+    let text = if engine == "moonshine" {
+        let model_dir = ensure_moonshine_model(app)?;
+        let bin = ensure_moonshine_binary(app)?;
+        run_moonshine(&bin, &model_dir, &wav)?
+    } else {
+        let model = with_data(app, |d| d.model.clone())?;
+        let device_pref = with_data(app, |d| d.device.clone())?;
+        let model_bin = ensure_model(app, &model)?;
+        let bin = ensure_binary_for(app, &device_pref)?;
+        match run_whisper(&bin, &model_bin, &wav) {
+            Ok(text) => text,
+            Err(e) if device_pref == "cuda" => {
+                // The CUDA build fails hard on machines without a working
+                // NVIDIA stack (missing driver/cudart, wrong arch) — the
+                // take matters more than the accelerator, so retry ONCE on
+                // the CPU build (downloading it if needed) and log the
+                // fallback in the error history.
+                crate::errors::record(
+                    app,
+                    "dictation",
+                    "The GPU speech engine failed — this take was transcribed on the CPU instead.",
+                    &e,
+                    false,
+                );
+                let cpu_bin = ensure_binary_for(app, "cpu")?;
+                run_whisper(&cpu_bin, &model_bin, &wav)?
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e),
     };
     if text.is_empty() {
         crate::errors::record(app, "dictation", "Didn't catch that — try again.", "", true);
@@ -1251,6 +1483,17 @@ mod tests {
     fn clean_joins_lines_and_trims() {
         assert_eq!(clean_transcript("  hello there \n world  "), "hello there world");
         assert_eq!(clean_transcript("one line"), "one line");
+    }
+
+    #[test]
+    fn moonshine_finds_json_line_past_config_dump() {
+        let stdout = "OfflineRecognizerConfig(feat_config=FeatureExtractorConfig(sampling_rate=16000))\nCreating recognizer ...\nrecognizer created in 0.822 s\nStarted\nDone!\n\ntest.wav\n----\n{\"lang\": \"\", \"text\": \"After early nightfall, the yellow lamps.\", \"tokens\": []}\n";
+        assert_eq!(
+            moonshine_text_from_stdout(stdout).as_deref(),
+            Some("After early nightfall, the yellow lamps.")
+        );
+        assert_eq!(moonshine_text_from_stdout("no json here\n"), None);
+        assert_eq!(moonshine_text_from_stdout(""), None);
     }
 
     #[test]

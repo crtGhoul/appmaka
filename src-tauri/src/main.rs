@@ -1834,6 +1834,7 @@ fn main() {
             dictation::clear_dictation_transcripts,
             dictation::copy_dictation_transcript,
             dictation::set_dictation_model,
+            dictation::set_dictation_engine,
             dictation::set_dictation_device,
             dictation::set_dictation_hold,
             dictation::set_dictation_hotkey,
