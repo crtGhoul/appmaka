@@ -4742,30 +4742,82 @@ pub(crate) fn toggle_account_keep_awake(app: &AppHandle, label: &str) -> Option<
 /// Uses HTMLMediaElement (`<video>`, `<audio>`) first, then site-specific
 /// media controls (YouTube, Spotify, SoundCloud, Apple Music, Twitch) and
 /// generic ARIA media buttons as fallbacks.
+///
+/// The queries pierce shadow DOM: YouTube / YouTube Music / Spotify render
+/// their player and its buttons inside web-component shadow roots, so a
+/// plain top-document querySelectorAll finds nothing and the buttons
+/// silently do nothing (the 0.18.19 report — the bar showed the track
+/// playing but prev/play/next did nothing). `all()` walks every shadow
+/// root recursively and collects matches from all of them.
 fn media_control_js(action: &str) -> &'static str {
     match action {
         "media_play_pause" => r#"(function(){
             try {
-                var media = Array.from(document.querySelectorAll('video, audio'));
+                function all(sel){
+                    var out = [];
+                    function walk(root){
+                        try {
+                            var els = root.querySelectorAll(sel);
+                            for (var i = 0; i < els.length; i++) out.push(els[i]);
+                            var nodes = root.querySelectorAll('*');
+                            for (var j = 0; j < nodes.length; j++) {
+                                var sr = nodes[j].shadowRoot;
+                                if (sr) walk(sr);
+                            }
+                        } catch (_) {}
+                    }
+                    walk(document);
+                    return out;
+                }
+                function labelOf(el){
+                    return ((el.getAttribute('aria-label') || '') + ' ' +
+                        (el.getAttribute('title') || '') + ' ' +
+                        (el.className && el.className.baseVal !== undefined ? el.className.baseVal : (el.className || ''))).toLowerCase();
+                }
+                var media = all('video, audio');
                 var playing = media.find(function(m){ return !m.paused && !m.ended; });
                 if (playing) { playing.pause(); return; }
                 var paused = media.find(function(m){ return m.paused && (m.currentTime > 0 || m.readyState >= 2); }) || media[0];
                 if (paused) { paused.play().catch(function(){}); return; }
-                var btn = document.querySelector(
-                    '.ytp-play-button, [data-testid="control-button-playpause"], .playControl, ' +
-                    'button[aria-label*="Pause" i], button[aria-label*="Play" i], [title*="Pause" i], [title*="Play" i]'
-                );
+                var btns = all('button, [role="button"]');
+                var btn = btns.find(function(b){
+                    var l = labelOf(b);
+                    return /play|pause/.test(l) &&
+                        !/playlist|playback speed|play next|playlists/.test(l);
+                }) || all('.ytp-play-button, [data-testid="control-button-playpause"], .playControl')[0];
                 if (btn && typeof btn.click === 'function') { btn.click(); }
             } catch (_) {}
         })();"#,
         "media_next" => r#"(function(){
             try {
-                var btn = document.querySelector(
-                    '.ytp-next-button, [data-testid="control-button-skip-forward"], .skipControl__next, ' +
-                    'button[aria-label*="Next" i], [title*="Next" i]'
-                );
+                function all(sel){
+                    var out = [];
+                    function walk(root){
+                        try {
+                            var els = root.querySelectorAll(sel);
+                            for (var i = 0; i < els.length; i++) out.push(els[i]);
+                            var nodes = root.querySelectorAll('*');
+                            for (var j = 0; j < nodes.length; j++) {
+                                var sr = nodes[j].shadowRoot;
+                                if (sr) walk(sr);
+                            }
+                        } catch (_) {}
+                    }
+                    walk(document);
+                    return out;
+                }
+                function labelOf(el){
+                    return ((el.getAttribute('aria-label') || '') + ' ' +
+                        (el.getAttribute('title') || '') + ' ' +
+                        (el.className && el.className.baseVal !== undefined ? el.className.baseVal : (el.className || ''))).toLowerCase();
+                }
+                var btns = all('button, [role="button"]');
+                var btn = btns.find(function(b){
+                    var l = labelOf(b);
+                    return /\bnext\b/.test(l) && !/play next|next up|up next/.test(l);
+                }) || all('.ytp-next-button, [data-testid="control-button-skip-forward"], .skipControl__next')[0];
                 if (btn && typeof btn.click === 'function') { btn.click(); return; }
-                var media = document.querySelector('video, audio');
+                var media = all('video, audio')[0];
                 if (media && isFinite(media.duration)) {
                     media.currentTime = Math.min(media.duration, media.currentTime + 10);
                 }
@@ -4773,12 +4825,34 @@ fn media_control_js(action: &str) -> &'static str {
         })();"#,
         "media_prev" => r#"(function(){
             try {
-                var btn = document.querySelector(
-                    '.ytp-prev-button, [data-testid="control-button-skip-back"], .skipControl__previous, ' +
-                    'button[aria-label*="Previous" i], [title*="Previous" i]'
-                );
+                function all(sel){
+                    var out = [];
+                    function walk(root){
+                        try {
+                            var els = root.querySelectorAll(sel);
+                            for (var i = 0; i < els.length; i++) out.push(els[i]);
+                            var nodes = root.querySelectorAll('*');
+                            for (var j = 0; j < nodes.length; j++) {
+                                var sr = nodes[j].shadowRoot;
+                                if (sr) walk(sr);
+                            }
+                        } catch (_) {}
+                    }
+                    walk(document);
+                    return out;
+                }
+                function labelOf(el){
+                    return ((el.getAttribute('aria-label') || '') + ' ' +
+                        (el.getAttribute('title') || '') + ' ' +
+                        (el.className && el.className.baseVal !== undefined ? el.className.baseVal : (el.className || ''))).toLowerCase();
+                }
+                var btns = all('button, [role="button"]');
+                var btn = btns.find(function(b){
+                    var l = labelOf(b);
+                    return /\bprevious\b/.test(l);
+                }) || all('.ytp-prev-button, [data-testid="control-button-skip-back"], .skipControl__previous')[0];
                 if (btn && typeof btn.click === 'function') { btn.click(); return; }
-                var media = document.querySelector('video, audio');
+                var media = all('video, audio')[0];
                 if (media) {
                     media.currentTime = Math.max(0, media.currentTime - 10);
                 }
