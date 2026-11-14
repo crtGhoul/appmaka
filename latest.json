@@ -1,15 +1,15 @@
 {
-  "version": "0.18.22",
-  "notes": "Top bar auto-hide, part 2: the reveal poll is now re-armed when a window is focused. The poll only runs while the owner is the foreground window and is killed when a reposition runs while the owner is backgrounded — so a window that was backgrounded and then focused again never got its poll back, and the top bar never appeared no matter where the mouse went. Focusing a window now re-seats its strip and re-arms the poll, so the taskbar-style top-edge reveal works after switching windows. Verified here: 281 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, and the Windows installer cross-built and signed on Linux (real-PC test still the gate).",
-  "pub_date": "2026-11-14T14:17:46Z",
+  "version": "0.18.23",
+  "notes": "Downloads actually fixed: the popup gesture reporter was missing. Since 0.18.20 popup downloads follow the same click rule as every window, but the tiny script that reports clicks was never injected into the two popup window builders — their comments still said popups were banned by label. So no click in a popup (including the Muse chat window) ever armed the download gate, and every popup download was cancelled as 'no click started it'. Both popup builders now inject the gesture reporter, and every download-capable window was audited: all 6 now have the reporter. Verified here: 281 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, and the Windows installer cross-built and signed on Linux (real-PC test still the gate).",
+  "pub_date": "2026-11-14T15:00:37Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2NpYXJyK2VoT0VyeEFzQklQclZuR0V2ZkM1aGlTampnV0d3Y2x2ZFFrY2Vhb1hjTC9FOXJXbmFZSFNRbDZGOWhOMUZMQmxtU3RDSm8zZ1k5aWtuZkFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjY1ODU3CWZpbGU6QXBwTWFrYV8wLjE4LjIyX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjIyCmwrY0N0N0JNMnltL0J5czAwWldSc2ZLbnRNNmIvL1FiTUNSNmo0cFhhZWVTcHd6VUlzUmhIL0pDOHJ0Q2N6ei9aRW0zR1g2WUZjRXdoZnF1cGNtb0RnPT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.22/AppMaka_0.18.22_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2VnaTJLRE5rNjNMNlhUWG5Qcms2SnRwK0xzSjFMOU45RG1KMHYwVkgyZEpybnJJUjQxVUQrVExNRXNyQUFHdGdnT0J1VXgzbHZ5UHBqY3o4VjJib3dZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjY4NDI5CWZpbGU6QXBwTWFrYV8wLjE4LjIzX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjIzCmtBbk9UZ2tEQWZNRGFZVTJZUXU5RjIraXJvaDN1RGdsOS8rSDU1eGZiYkUvNjV0Kysrc0NzN1R1bVl5bjZwdDNsM05aeHFKVnJSSkE1bnM4QzQ5VERnPT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.23/AppMaka_0.18.23_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1g2QS9BYzlHd2IvQ3MxYnF3aDBDYS9xbmRzRmlKbjd3WVc4NTI1S1hiczl4U3ltTW9xZitHZHRoMkNNMVpOMWk1YzA1em9WekU3dDJVL0lCUUtCZVFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjY1NTg2CWZpbGU6QXBwTWFrYV8wLjE4LjIyX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yMgpiRkx0MjRrU0JoY1Q0Yllsc2RYL3BBTERJUVFCZmhhRytsdXl3YjhKaUd5eGFjM0JaUFpvb3duMTAvODhiUDlWbGZUOEpBVVErU2kraEVReUQ3dGdEUT09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.22/AppMaka_0.18.22_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1JZV05ySGw0cXJML0gyM014ZWs4U09oT2VOd3praG1qSlNpb3p4eUYxWEYvZ2s5bnhZMXpxdWRld1BTdXp2K3ZFd0w3T2Y5L2w4VFFYVmlOY29jcmdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjY4MTU0CWZpbGU6QXBwTWFrYV8wLjE4LjIzX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yMwp4SlVmb2Z6UEhoekdjTkpkZ29PMTBKUi9JRkkzQWpzNkRrL1Q1UENtRXRQVUNhZERzTDFGSktONUpaL2pjVGNGeUQzbnBsYXNlQmxwVFNGRTN2MFJBdz09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.23/AppMaka_0.18.23_amd64.AppImage"
     }
   }
 }
