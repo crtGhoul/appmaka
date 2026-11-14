@@ -153,8 +153,12 @@ $appsJson = @'
    "accounts": [{"id": "sec-a", "app_id": "sec", "label": "Main", "color": "#57606a", "session_dir": "sec-a"}]}
 ]
 '@
-[System.IO.File]::WriteAllText((Join-Path $appData 'apps.json'), $appsJson)
-[System.IO.File]::WriteAllText((Join-Path $appData 'launcher.json'), '{"hotkey": "Alt+Space", "seen_intro": true}')
+# v0.18.24: WriteAllText defaults to UTF-8 WITH a BOM, and AppMaka's
+# JSON loaders used to reject a BOM-prefixed apps.json as corrupt (wiping
+# the launcher). Write BOM-less UTF-8 so seeded files parse cleanly.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText((Join-Path $appData 'apps.json'), $appsJson, $utf8NoBom)
+[System.IO.File]::WriteAllText((Join-Path $appData 'launcher.json'), '{"hotkey": "Alt+Space", "seen_intro": true}', $utf8NoBom)
 Write-ProbeLog 'seeded apps.json (4 example + sec) + launcher.json'
 
 # ---------------------------------------------------------------------------
@@ -424,8 +428,11 @@ foreach ($key in $results.Keys) {
 }
 $lines += ''
 $lines += "overall: $(if ($failed -eq 0) { 'ALL CHECKS PASSED' } else { "$failed check(s) FAILED" })"
-[System.IO.File]::WriteAllLines((Join-Path $outDir 'results.md'), $lines)
-$results | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $outDir 'results.json')
+# v0.18.24: WriteAllLines/Set-Content default to UTF-8 WITH a BOM on
+# Windows PowerShell 5.1; write BOM-less UTF-8 so results parse cleanly.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllLines((Join-Path $outDir 'results.md'), $lines, $utf8NoBom)
+$results | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $outDir 'results.json') -Encoding utf8NoBOM
 Write-ProbeLog '--- summary ---'
 foreach ($key in $results.Keys) {
     $r = $results[$key]
