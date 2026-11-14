@@ -3322,11 +3322,17 @@ fn build_contained_window(
         builder = builder.initialization_script(cursor_js);
     }
     // Guard + cosmetic + scriptlets + skipper, all-frames (see the
-    // account-window builder). No gesture reporter: popup downloads
-    // are blocked by label regardless, so there is nothing to arm.
+    // account-window builder). The gesture reporter IS here now
+    // (v0.18.23): popup downloads are no longer banned by label —
+    // since 0.18.20 they follow the same gesture rule as every window —
+    // but the reporter was never added to the popup builders, so no
+    // click in a popup ever armed the gate and every popup download
+    // was cancelled as "no click started it". That was the whole
+    // downloads bug: Cesar's Muse chat runs in a popup window.
     builder = builder
         .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
-        .initialization_script_for_all_frames(popup_guard_js);
+        .initialization_script_for_all_frames(popup_guard_js)
+        .initialization_script_for_all_frames(GESTURE_REPORT_JS);
     if !popup_cosmetic_css.is_empty() {
         builder = builder
             .initialization_script_for_all_frames(cosmetic_init_script(&popup_cosmetic_css));
@@ -3638,11 +3644,15 @@ fn spawn_contained_window(
                         }
                         // Guard + cosmetic + scriptlets + skipper,
                         // all-frames (see the account-window builder).
-                        // No gesture reporter: popup downloads are
-                        // blocked by label regardless.
+                        // Gesture reporter included (v0.18.23): same
+                        // reason as build_contained_window — popup
+                        // downloads follow the gesture rule since
+                        // 0.18.20, and without the reporter no click
+                        // in a popup could ever arm the gate.
                         builder = builder
                             .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
-                            .initialization_script_for_all_frames(b_guard_js);
+                            .initialization_script_for_all_frames(b_guard_js)
+                            .initialization_script_for_all_frames(GESTURE_REPORT_JS);
                         if !b_cosmetic_css.is_empty() {
                             builder = builder.initialization_script_for_all_frames(
                                 cosmetic_init_script(&b_cosmetic_css),
