@@ -1,15 +1,15 @@
 {
-  "version": "0.18.23",
-  "notes": "Downloads actually fixed: the popup gesture reporter was missing. Since 0.18.20 popup downloads follow the same click rule as every window, but the tiny script that reports clicks was never injected into the two popup window builders — their comments still said popups were banned by label. So no click in a popup (including the Muse chat window) ever armed the download gate, and every popup download was cancelled as 'no click started it'. Both popup builders now inject the gesture reporter, and every download-capable window was audited: all 6 now have the reporter. Verified here: 281 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, and the Windows installer cross-built and signed on Linux (real-PC test still the gate).",
-  "pub_date": "2026-11-14T15:00:37Z",
+  "version": "0.18.24",
+  "notes": "Fixes a false database-corruption wipe: apps.json (and launcher, routines, workspaces, downloads, session, links, custom programs) written with a UTF-8 BOM by Windows tools no longer fails to parse — the BOM is stripped before parsing, so your apps stop vanishing. A genuinely corrupt apps.json now logs the real parse error before being backed up. Also fixes dark-mode dialog text that was unreadable (dark text on a dark background) in the account settings dialog.",
+  "pub_date": "2026-11-14T18:53:49Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2VnaTJLRE5rNjNMNlhUWG5Qcms2SnRwK0xzSjFMOU45RG1KMHYwVkgyZEpybnJJUjQxVUQrVExNRXNyQUFHdGdnT0J1VXgzbHZ5UHBqY3o4VjJib3dZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjY4NDI5CWZpbGU6QXBwTWFrYV8wLjE4LjIzX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjIzCmtBbk9UZ2tEQWZNRGFZVTJZUXU5RjIraXJvaDN1RGdsOS8rSDU1eGZiYkUvNjV0Kysrc0NzN1R1bVl5bjZwdDNsM05aeHFKVnJSSkE1bnM4QzQ5VERnPT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.23/AppMaka_0.18.23_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1dmUlprbG4vMHNzVXZ1TStlMitoMjlYNExjRnNLS2JibldtdnNqY0pVL1F1aXpwTlNXUDVKMUxwMzZaNEQyWWpKMHFGbjAzOXlKT0FkbGgrcWEyNlE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjgyNDE4CWZpbGU6QXBwTWFrYV8wLjE4LjI0X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjI0Ck1IbjhvZ2svV3RkWGdCSXFzTWJoZ2tQazdwREgyQzEzQVhUU2JDbVRFdXI1cDlzbUd6OHVjNTlDTDFoejdhb1dJOXJ4cHlHTjNZMjk2clpSekNmdkJ3PT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.24/AppMaka_0.18.24_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1JZV05ySGw0cXJML0gyM014ZWs4U09oT2VOd3praG1qSlNpb3p4eUYxWEYvZ2s5bnhZMXpxdWRld1BTdXp2K3ZFd0w3T2Y5L2w4VFFYVmlOY29jcmdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjY4MTU0CWZpbGU6QXBwTWFrYV8wLjE4LjIzX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yMwp4SlVmb2Z6UEhoekdjTkpkZ29PMTBKUi9JRkkzQWpzNkRrL1Q1UENtRXRQVUNhZERzTDFGSktONUpaL2pjVGNGeUQzbnBsYXNlQmxwVFNGRTN2MFJBdz09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.23/AppMaka_0.18.23_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2Q0N3MrRTJ2cWhOWVUwT0l2bVJxSmIwdGpYeTcxY2laTjJNWkVVZ3VoZFpKbFZoM3o0ZUdXR1ZsL2F5WURiWFg4UHpwNjk4a2FvanZSZHJTQ0tTOEFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjgyMDk2CWZpbGU6QXBwTWFrYV8wLjE4LjI0X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yNAoweHMzVkhrb05nRncvQlNZem82VFh3OXh5VkRxM3NhQ0VkRGNIUE5Edm8vbVJVc3F3eGNBQnJwbkFpNm0vcjZzWENrSVhQeEpBSWphL0E3dklpVkhBdz09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.24/AppMaka_0.18.24_amd64.AppImage"
     }
   }
 }
