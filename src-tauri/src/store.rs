@@ -404,31 +404,45 @@ impl AppStore {
         let path = dir.join("apps.json");
 
         let apps = match fs::read_to_string(&path) {
-            Ok(contents) => match serde_json::from_str::<Vec<WebApp>>(&contents) {
-                Ok(apps) => apps,
-                // Not the current shape: maybe the pre-accounts v0 shape.
-                Err(_) => match serde_json::from_str::<Vec<LegacyWebApp>>(&contents) {
-                    Ok(legacy) => {
-                        let migrated = Self::migrate_legacy(legacy, &dir)?;
-                        // Persist the migrated shape so this only happens once.
-                        let json = serde_json::to_string_pretty(&migrated)
-                            .map_err(|e| format!("could not serialize migrated apps: {e}"))?;
-                        let tmp = path.with_extension("json.tmp");
-                        fs::write(&tmp, json)
-                            .map_err(|e| format!("could not write apps.json: {e}"))?;
-                        fs::rename(&tmp, &path)
-                            .map_err(|e| format!("could not write apps.json: {e}"))?;
-                        migrated
-                    }
-                    Err(_) => {
-                        // Corrupt file: back it up beside itself, start fresh.
-                        let backup =
-                            dir.join(format!("apps.json.corrupt-{}.bak", unix_millis()));
-                        let _ = fs::rename(&path, &backup);
-                        Vec::new()
-                    }
-                },
-            },
+            Ok(contents) => {
+                // v0.18.24: Windows tools (PowerShell Set-Content, Notepad,
+                // text editors) often write UTF-8 with a leading BOM
+                // (U+FEFF). serde_json rejects it ("expected value at line 1
+                // column 1"), which used to declare a perfectly good
+                // apps.json corrupt and wipe the launcher. Strip it first.
+                let clean = contents.trim_start_matches('\u{feff}');
+                match serde_json::from_str::<Vec<WebApp>>(clean) {
+                    Ok(apps) => apps,
+                    // Not the current shape: maybe the pre-accounts v0 shape.
+                    Err(first_err) => match serde_json::from_str::<Vec<LegacyWebApp>>(clean) {
+                        Ok(legacy) => {
+                            let migrated = Self::migrate_legacy(legacy, &dir)?;
+                            // Persist the migrated shape so this only happens once.
+                            let json = serde_json::to_string_pretty(&migrated)
+                                .map_err(|e| format!("could not serialize migrated apps: {e}"))?;
+                            let tmp = path.with_extension("json.tmp");
+                            fs::write(&tmp, json)
+                                .map_err(|e| format!("could not write apps.json: {e}"))?;
+                            fs::rename(&tmp, &path)
+                                .map_err(|e| format!("could not write apps.json: {e}"))?;
+                            migrated
+                        }
+                        Err(legacy_err) => {
+                            // Genuinely unparseable: log the real errors
+                            // before moving it aside, so a real corruption
+                            // is diagnosable instead of a silent wipe.
+                            eprintln!(
+                                "[appmaka] apps.json unparseable ({first_err}; legacy: {legacy_err}); backing up and starting fresh"
+                            );
+                            // Corrupt file: back it up beside itself, start fresh.
+                            let backup =
+                                dir.join(format!("apps.json.corrupt-{}.bak", unix_millis()));
+                            let _ = fs::rename(&path, &backup);
+                            Vec::new()
+                        }
+                    },
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(format!("could not read apps.json: {e}")),
         };
@@ -1332,6 +1346,21 @@ mod tests {
         assert_eq!(app.created_at, 0);
         // A record written before sections existed has no override.
         assert_eq!(app.section, None);
+    }
+
+    #[test]
+    fn bom_prefixed_apps_json_parses_cleanly() {
+        // v0.18.24: Windows tools write UTF-8 with a leading BOM; without
+        // the strip, serde_json rejects the file and AppStore::load would
+        // declare it corrupt and wipe the launcher.
+        let json = "\u{feff}[{\"id\": \"app-1\", \"name\": \"Test\", \"url\": \"https://example.com\", \"icon\": null, \"color\": \"#ffffff\", \"accounts\": []}]";
+        // The BOM alone must fail — that is the bug being fixed.
+        assert!(serde_json::from_str::<Vec<WebApp>>(json).is_err());
+        // After the strip AppStore::load applies, it parses.
+        let clean = json.trim_start_matches('\u{feff}');
+        let apps: Vec<WebApp> = serde_json::from_str(clean).unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].name, "Test");
     }
 
     #[test]

@@ -195,13 +195,20 @@ impl DownloadState {
         let history_file = dir.join("download-history.json");
 
         let settings = match fs::read_to_string(&settings_file) {
-            Ok(contents) => serde_json::from_str::<DownloadSettings>(&contents)
-                .unwrap_or_default(),
+            // v0.18.24: strip a leading UTF-8 BOM (Windows editors)
+            // before parsing, so downloads.json is not silently dropped
+            // to defaults.
+            Ok(contents) => serde_json::from_str::<DownloadSettings>(
+                contents.trim_start_matches('\u{feff}'),
+            )
+            .unwrap_or_default(),
             Err(_) => DownloadSettings::default(),
         };
 
         let mut downloads: Vec<DownloadEntry> = match fs::read_to_string(&history_file) {
-            Ok(contents) => match serde_json::from_str::<Vec<DownloadEntry>>(&contents) {
+            Ok(contents) => match serde_json::from_str::<Vec<DownloadEntry>>(
+                contents.trim_start_matches('\u{feff}'),
+            ) {
                 Ok(entries) => entries,
                 Err(_) => {
                     let _ = fs::rename(&history_file, dir.join("download-history.json.corrupt"));
@@ -1145,7 +1152,11 @@ pub fn set_download_dir(state: State<DownloadState>, path: String) -> Result<(),
     if let Err(e) = persist_settings(&state.settings_file, &settings) {
         let _ = state.with_store(|store| {
             if let Ok(old) = fs::read_to_string(&state.settings_file) {
-                if let Ok(parsed) = serde_json::from_str::<DownloadSettings>(&old) {
+                // v0.18.24: strip a leading UTF-8 BOM (Windows editors)
+                // before parsing.
+                if let Ok(parsed) =
+                    serde_json::from_str::<DownloadSettings>(old.trim_start_matches('\u{feff}'))
+                {
                     store.settings = parsed;
                 }
             }

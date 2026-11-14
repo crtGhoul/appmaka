@@ -1961,6 +1961,26 @@ input[type="color"] {
   border-color: #34373e;
 }
 
+/* v0.18.24: the dialog background went dark but its text colors never
+ * did — .dialog, its field labels, and .help were hardcoded light-theme
+ * dark grays (#1f2329 / #3a3e45 / #6b7078), so on the dark background the
+ * radio labels and legends were black-on-black and the help text was
+ * barely readable. Dark overrides below use the same light grays the
+ * rest of the dark UI already uses for body text (#eceef1) and help
+ * text (#b9bec7). */
+:root[data-theme="dark"] .dialog {
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .dialog label > span:first-child,
+:root[data-theme="dark"] .dialog .field-label {
+  color: #eceef1;
+}
+
+:root[data-theme="dark"] .dialog .help {
+  color: #b9bec7;
+}
+
 :root[data-theme="dark"] .app-card,
 :root[data-theme="dark"] .account-row,
 :root[data-theme="dark"] .hidden-row {

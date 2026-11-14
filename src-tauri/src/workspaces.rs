@@ -105,7 +105,9 @@ fn load_file(app: &AppHandle) -> WorkspaceFile {
     file_path(app)
         .ok()
         .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|c| serde_json::from_str::<WorkspaceFile>(&c).ok())
+        // v0.18.24: strip a leading UTF-8 BOM (Windows editors) before
+        // parsing, so workspaces.json is not silently dropped to empty.
+        .and_then(|c| serde_json::from_str::<WorkspaceFile>(c.trim_start_matches('\u{feff}')).ok())
         .map(|f| WorkspaceFile {
             workspaces: f
                 .workspaces

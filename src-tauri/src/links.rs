@@ -60,7 +60,11 @@ fn load_config(app: &AppHandle) -> LinkConfig {
         }
     };
     match fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        // v0.18.24: strip a leading UTF-8 BOM (Windows editors) before
+        // parsing, so links.json is not silently dropped to defaults.
+        Ok(contents) => {
+            serde_json::from_str(contents.trim_start_matches('\u{feff}')).unwrap_or_default()
+        }
         // Missing or unreadable file: start from defaults (opt-in OFF).
         Err(_) => LinkConfig::default(),
     }
