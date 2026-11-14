@@ -60,7 +60,9 @@ pub fn load(app: &AppHandle) -> Vec<CustomProgram> {
     programs_path(app)
         .ok()
         .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|c| serde_json::from_str::<Vec<CustomProgram>>(&c).ok())
+        // v0.18.24: strip a leading UTF-8 BOM (Windows editors) before
+        // parsing, so custom-programs.json is not silently dropped to empty.
+        .and_then(|c| serde_json::from_str::<Vec<CustomProgram>>(c.trim_start_matches('\u{feff}')).ok())
         .map(|v| {
             v.into_iter()
                 .filter(|p| !p.id.is_empty() && !p.exe_path.is_empty())
