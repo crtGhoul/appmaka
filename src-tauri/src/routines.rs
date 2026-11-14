@@ -116,7 +116,9 @@ pub fn load(app: &AppHandle) -> Vec<Routine> {
     routines_path(app)
         .ok()
         .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|c| serde_json::from_str::<Vec<Routine>>(&c).ok())
+        // v0.18.24: strip a leading UTF-8 BOM (Windows editors) before
+        // parsing, so routines.json is not silently dropped to empty.
+        .and_then(|c| serde_json::from_str::<Vec<Routine>>(c.trim_start_matches('\u{feff}')).ok())
         .map(|v| v.into_iter().filter(|r| !r.id.is_empty()).collect())
         .unwrap_or_default()
 }
