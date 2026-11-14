@@ -1495,6 +1495,18 @@ pub fn open_account_placed(
                     // focus above does not reach a child webview.
                     #[cfg(windows)]
                     focus_webview(&track_app, &track_label);
+                    // v0.18.22: re-seat the caption strip on focus. The
+                    // auto-hide reveal poll is only armed while the
+                    // owner is the foreground window, and it is killed
+                    // whenever a reposition runs while the owner is
+                    // background — so without this, a window that was
+                    // backgrounded and then focused again never gets
+                    // its poll back, and the top bar never appears no
+                    // matter where the mouse goes (the taskbar-style
+                    // reveal only works while the poll is alive).
+                    // Repositioning on focus re-arms it.
+                    #[cfg(windows)]
+                    crate::caption::page_window_moved(&track_label);
                     // Read the suspend flag BEFORE touch_window runs:
                     // touch clears it on focus, and the badge decision
                     // below needs the state the window was in when the
