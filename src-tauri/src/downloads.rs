@@ -552,6 +552,14 @@ static LAST_DOWNLOAD_BLOCK_NOTICE_SECS: AtomicU64 = AtomicU64::new(0);
 /// protection (a drive-by download has no user click), so popups now
 /// follow the same rule as every other window: a recent click allows it,
 /// no click blocks it.
+///
+/// INVARIANT (v0.18.23): this gate is only as good as the gesture
+/// reporter. Every window builder that attaches `make_download_handler`
+/// MUST also inject `GESTURE_REPORT_JS` — the popup builders forgot it
+/// for months (their comments said popups were banned by label), so no
+/// click in a popup ever armed the gate and every popup download was
+/// cancelled. If you add a new download-capable window, add the
+/// reporter in the same change or its downloads silently never work.
 fn download_block_reason(
     _label: &str,
     is_retry: bool,
