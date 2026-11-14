@@ -412,7 +412,10 @@ pub fn load(app: &AppHandle) -> LauncherSettings {
     let merged = || -> Option<LauncherSettings> {
         let path = settings_path(app).ok()?;
         let raw = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&raw).ok()
+        // v0.18.24: strip a leading UTF-8 BOM (Windows editors) before
+        // parsing, so launcher.json is not silently dropped to defaults.
+        let clean = raw.trim_start_matches('\u{feff}');
+        serde_json::from_str(clean).ok()
     };
     let mut s = merged().unwrap_or_default();
     if s.hotkey.trim().is_empty() {
