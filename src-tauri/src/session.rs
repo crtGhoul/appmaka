@@ -118,8 +118,10 @@ pub fn parse_session(raw: &str) -> Session {
         #[serde(default)]
         windows: Vec<serde_json::Value>,
     }
-    let raw: Raw =
-        serde_json::from_str(raw).unwrap_or(Raw { windows: Vec::new() });
+    // v0.18.24: strip a leading UTF-8 BOM (Windows editors) before
+    // parsing, so session.json is not silently dropped to empty.
+    let raw: Raw = serde_json::from_str(raw.trim_start_matches('\u{feff}'))
+        .unwrap_or(Raw { windows: Vec::new() });
     let windows = raw
         .windows
         .into_iter()
