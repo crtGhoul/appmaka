@@ -1,15 +1,15 @@
 {
-  "version": "0.18.21",
-  "notes": "Top bar auto-hide, Windhawk-style: the hidden top bar now appears reliably when the mouse touches the top edge. Two causes fixed — a maximized window's top edge was negative (the window rect bleeds past the monitor), so the reveal could never trigger, and the show zone was only 2 pixels. The reveal now uses the work-area top for maximized windows and a 6-pixel show zone. Verified here: 281 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, Windows installer cross-built and signed on Linux (real-PC test still the gate).",
-  "pub_date": "2026-11-13T18:13:33Z",
+  "version": "0.18.22",
+  "notes": "Top bar auto-hide, part 2: the reveal poll is now re-armed when a window is focused. The poll only runs while the owner is the foreground window and is killed when a reposition runs while the owner is backgrounded — so a window that was backgrounded and then focused again never got its poll back, and the top bar never appeared no matter where the mouse went. Focusing a window now re-seats its strip and re-arms the poll, so the taskbar-style top-edge reveal works after switching windows. Verified here: 281 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, and the Windows installer cross-built and signed on Linux (real-PC test still the gate).",
+  "pub_date": "2026-11-14T14:17:46Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1VMbFF2T1ZSMWVzWWppeXp2MG5KbHJrNm5DVWJHUk5RU3RoTmVyS2d0b21RYS9xaXdYRlNra05mU1d5Tks4WGJscXBlV25rQk9EQmhWUVR5eFFXbWdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTkzNjA2CWZpbGU6QXBwTWFrYV8wLjE4LjIxX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjIxCnlOdHJ3VXFwUGhmZmF2cWFOYVRFdmFjNUxScjY5ZC96Uks1Yys3TE0vR3UzUUc5OWY3SGNmMHA0SFA3UXY3NVlLbTJpWStJNU93U1h6V3M2MEJEZkNRPT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.21/AppMaka_0.18.21_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2NpYXJyK2VoT0VyeEFzQklQclZuR0V2ZkM1aGlTampnV0d3Y2x2ZFFrY2Vhb1hjTC9FOXJXbmFZSFNRbDZGOWhOMUZMQmxtU3RDSm8zZ1k5aWtuZkFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjY1ODU3CWZpbGU6QXBwTWFrYV8wLjE4LjIyX3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjIyCmwrY0N0N0JNMnltL0J5czAwWldSc2ZLbnRNNmIvL1FiTUNSNmo0cFhhZWVTcHd6VUlzUmhIL0pDOHJ0Q2N6ei9aRW0zR1g2WUZjRXdoZnF1cGNtb0RnPT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.22/AppMaka_0.18.22_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2VDWlIvcWgvZjBROEh5WU1WOXBFUzdUa0hNV0JoS1V3Z1dnVytaTkFvVHVud2NCSytMZkltS2xMYWw3b3ExMWtENXZsZW9DODJlZ2szYW9XVWF2Q0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NTkzMzQxCWZpbGU6QXBwTWFrYV8wLjE4LjIxX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yMQpxd3l3d3dINnBoakZIUXdzT2VsUzV0aXFLQ0VoK1kzRlR3V3RUWk9KaEZSU1lWSk82bmtqeEpHMTlvVThRWWxFQ3VQdytLVklNSWhTdTNmSTJZN2REZz09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.21/AppMaka_0.18.21_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1g2QS9BYzlHd2IvQ3MxYnF3aDBDYS9xbmRzRmlKbjd3WVc4NTI1S1hiczl4U3ltTW9xZitHZHRoMkNNMVpOMWk1YzA1em9WekU3dDJVL0lCUUtCZVFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjY1NTg2CWZpbGU6QXBwTWFrYV8wLjE4LjIyX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yMgpiRkx0MjRrU0JoY1Q0Yllsc2RYL3BBTERJUVFCZmhhRytsdXl3YjhKaUd5eGFjM0JaUFpvb3duMTAvODhiUDlWbGZUOEpBVVErU2kraEVReUQ3dGdEUT09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.22/AppMaka_0.18.22_amd64.AppImage"
     }
   }
 }
