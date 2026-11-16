@@ -48,6 +48,42 @@ pub fn account_window_label(app_id: &str, account_id: &str) -> String {
     format!("acct-{app_id}-{account_id}")
 }
 
+/// Reverse of `account_window_label`, for page-side commands (the login
+/// detector): the (app_id, account_id) a webview belongs to, from its
+/// label. Page-supplied ids are never trusted — the label is assigned
+/// by Rust at window build time. Three shapes:
+/// - `acct-{app_id}-{account_id}`: parsed (app ids are `app-…`,
+///   account ids `acct-…`, so the first `-acct-` is the boundary).
+/// - `splitpane-{group}-{app_id}-{account_id}`: looked up in
+///   SplitState, so no label format is assumed.
+/// - `tabbed-{group}-g{gen}`: the ACTIVE tab's ids, from TabState —
+///   the live webview always shows the active tab.
+pub(crate) fn account_ids_for_label(
+    app: &AppHandle,
+    label: &str,
+) -> Option<(String, String)> {
+    if let Some(rest) = label.strip_prefix("acct-") {
+        let idx = rest.find("-acct-")?;
+        let app_id = rest[..idx].to_string();
+        let account_id = rest[idx + 1..].to_string();
+        if app_id.is_empty() || account_id.is_empty() {
+            return None;
+        }
+        return Some((app_id, account_id));
+    }
+    if label.starts_with(crate::split::SPLIT_PANE_LABEL_PREFIX) {
+        return app
+            .try_state::<crate::split::SplitState>()
+            .and_then(|s| crate::split::pane_ids_for_label(&s, label));
+    }
+    if crate::tabs::is_tabbed_label(label) {
+        return app
+            .try_state::<crate::tabs::TabState>()
+            .and_then(|s| crate::tabs::active_tab_ids_for_label(&s, label));
+    }
+    None
+}
+
 /// Physical cursor coordinates `(x, y)` on the desktop, if available.
 fn physical_cursor_point(app: &AppHandle) -> Option<(i32, i32)> {
     #[cfg(windows)]
@@ -1335,6 +1371,9 @@ pub fn open_account_placed(
                     .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
                     .initialization_script_for_all_frames(b_guard_js)
                     .initialization_script_for_all_frames(GESTURE_REPORT_JS)
+                    // Login detector: main frame only, so an iframe login
+                    // never offers to save for the top-level domain.
+                    .initialization_script(LOGIN_DETECTOR_JS)
                     .initialization_script(NAV_KEYS_JS)
                     .initialization_script(b_shortcuts_js);
                 if !b_cursor_js.is_empty() {
@@ -1735,6 +1774,9 @@ pub(crate) fn open_split_pane_webview(
                     .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
                     .initialization_script_for_all_frames(b_guard_js)
                     .initialization_script_for_all_frames(GESTURE_REPORT_JS)
+                    // Login detector: main frame only (see the account
+                    // builder for why).
+                    .initialization_script(LOGIN_DETECTOR_JS)
                     .initialization_script(NAV_KEYS_JS)
                     .initialization_script(b_shortcuts_js);
                 if !b_cursor_js.is_empty() {
@@ -2828,6 +2870,158 @@ pub(crate) const GESTURE_REPORT_JS: &str = r#"(function () {
   document.addEventListener("pointerdown", note, true);
   document.addEventListener("keydown", note, true);
 })();"#;
+
+/// In-page login detector + save/fill prompts (v0.18.26). Runs in the
+/// MAIN frame only — an iframe login must never offer to save for the
+/// top-level domain. The password is staged to Rust the moment a login
+/// form is submitted (in-memory only, never on disk); the banner only
+/// offers, and nothing is saved until the user clicks Save. The banner
+/// is drawn by this script because no AppMaka React runs inside an
+/// account webview. Traditional (navigating) logins show the banner on
+/// the page after login via `staged_password_state`; logins that stay
+/// on the page (AJAX) show it shortly after submit.
+pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
+  var BAR = "position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;gap:10px;padding:8px 14px;background:#1e2025;color:#eceef1;font:13px/1.4 system-ui,sans-serif;border-bottom:1px solid #3a3e45;box-shadow:0 2px 12px rgba(0,0,0,.4);";
+  var SAVE = "background:#8b5cf6;color:#fff;border:none;border-radius:4px;padding:4px 12px;font:13px system-ui,sans-serif;cursor:pointer;flex:none;";
+  var GHOST = "background:transparent;color:#b9bec7;border:1px solid #3a3e45;border-radius:4px;padding:4px 12px;font:13px system-ui,sans-serif;cursor:pointer;flex:none;";
+  var X = "background:transparent;color:#b9bec7;border:none;font:13px system-ui,sans-serif;cursor:pointer;padding:4px 6px;flex:none;";
+  var PILL = "position:fixed;top:10px;right:12px;z-index:2147483647;display:flex;align-items:center;gap:8px;padding:6px 12px;background:#1e2025;color:#eceef1;font:13px/1.4 system-ui,sans-serif;border:1px solid #3a3e45;border-radius:999px;box-shadow:0 2px 12px rgba(0,0,0,.4);";
+
+  var saveBar = null;
+  var fillPill = null;
+  var fillChecked = false;
+  var fillObs = null;
+
+  function invoke(cmd, args) {
+    try {
+      var internals = window.__TAURI_INTERNALS__;
+      if (internals && internals.invoke) return internals.invoke(cmd, args || {});
+    } catch (e) {}
+    return Promise.reject(new Error("no tauri"));
+  }
+  function mk(tag, text, style) {
+    var n = document.createElement(tag);
+    if (text != null) n.textContent = text;
+    if (style) n.setAttribute("style", style);
+    return n;
+  }
+  function trustedBtn(label, style, onClick) {
+    var b = mk("button", label, style);
+    b.addEventListener("click", function (e) {
+      if (e.isTrusted) onClick();
+    });
+    return b;
+  }
+
+  function hideSaveBar() {
+    if (saveBar && saveBar.parentNode) saveBar.parentNode.removeChild(saveBar);
+    saveBar = null;
+  }
+  function showSaveBar(domain) {
+    if (saveBar || !document.body) return;
+    var bar = mk("div", null, BAR);
+    bar.setAttribute("data-appmaka-pw-banner", "1");
+    bar.appendChild(mk("span", "Save password for " + domain + "?"));
+    bar.appendChild(trustedBtn("Save", SAVE, function () {
+      invoke("confirm_staged_password").then(hideSaveBar, function (err) {
+        var s = bar.querySelector("[data-appmaka-pw-msg]");
+        if (s) s.textContent = (err && err.message) || String(err || "could not save");
+      });
+    }));
+    bar.appendChild(trustedBtn("Never", GHOST, function () {
+      invoke("never_save_password").then(hideSaveBar, hideSaveBar);
+    }));
+    bar.appendChild(trustedBtn("\u00d7", X, hideSaveBar));
+    var msg = mk("span", "", "color:#b9bec7;");
+    msg.setAttribute("data-appmaka-pw-msg", "1");
+    bar.appendChild(msg);
+    document.body.appendChild(bar);
+    saveBar = bar;
+  }
+  function checkStaged() {
+    invoke("staged_password_state").then(function (domain) {
+      if (domain) showSaveBar(domain);
+    }, function () {});
+  }
+
+  function hideFillPill() {
+    if (fillPill && fillPill.parentNode) fillPill.parentNode.removeChild(fillPill);
+    fillPill = null;
+  }
+  function showFillPill(username) {
+    if (fillPill || !document.body) return;
+    var pill = mk("div", null, PILL);
+    pill.appendChild(mk("span", "Fill login for " + username + "?"));
+    pill.appendChild(trustedBtn("Fill login", SAVE, function () {
+      invoke("fill_login_for_window").then(hideFillPill, hideFillPill);
+    }));
+    pill.appendChild(trustedBtn("\u00d7", X, hideFillPill));
+    document.body.appendChild(pill);
+    fillPill = pill;
+  }
+  function checkFill() {
+    if (fillChecked) return;
+    if (!document.querySelector('input[type="password"]')) return;
+    fillChecked = true;
+    if (fillObs) { fillObs.disconnect(); fillObs = null; }
+    invoke("vault_prompt_state").then(function (info) {
+      if (info && info.username) showFillPill(info.username);
+    }, function () {});
+  }
+
+  function usernameIn(form) {
+    var sels = ['input[type="email"]', 'input[autocomplete="username"]', 'input[name*="user" i]', 'input[name*="email" i]', 'input[name*="login" i]', 'input[type="text"]'];
+    for (var i = 0; i < sels.length; i++) {
+      var f = form.querySelector(sels[i]);
+      if (f && f.value) return f.value;
+    }
+    return "";
+  }
+
+  document.addEventListener("submit", function (e) {
+    // Only real user submits: a page script dispatching a synthetic
+    // submit must never stage a credential.
+    if (!e.isTrusted) return;
+    var form = e.target;
+    if (!form || !form.querySelector) return;
+    var pass = form.querySelector('input[type="password"]');
+    if (!pass || !pass.value) return;
+    var pw = pass.value;
+    invoke("stage_password", { username: usernameIn(form), password: pw }).then(function () {}, function () {});
+    pw = "";
+    // Logins that stay on the page (AJAX) show the offer shortly
+    // after submit; navigating logins show it on the next page load.
+    // A slow navigation can flash the banner briefly here — the
+    // one-time offer is consumed, and the manual Save dialog remains.
+    setTimeout(checkStaged, 400);
+  }, true);
+
+  function onReady() {
+    // Let redirect chains settle so a transient page does not consume
+    // the one-time save offer.
+    setTimeout(checkStaged, 800);
+    checkFill();
+    if (window.MutationObserver && document.body) {
+      fillObs = new MutationObserver(function () { checkFill(); });
+      fillObs.observe(document.body, { childList: true, subtree: true });
+    }
+    // Back/forward-cache restores do not re-run init scripts or
+    // DOMContentLoaded, so the fill/save prompts would never appear
+    // when the user navigates back to a login page. pageshow fires on
+    // restore (and once on initial load, where the guards below make
+    // the re-check a harmless no-op), so re-run both prompts here.
+    window.addEventListener("pageshow", function () {
+      fillChecked = false;
+      checkFill();
+      checkStaged();
+    });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", onReady);
+  } else {
+    onReady();
+  }
+})();"##;
 
 /// v0.18.9: window.open guard. Popups the user didn't ask for come from
 /// timer/load-based window.open calls, not from clicks — the popup handler
@@ -6027,6 +6221,51 @@ mod tests {
         // the download gate for itself; only trusted input counts now.
         assert!(GESTURE_REPORT_JS.contains("isTrusted === false"));
         assert!(GESTURE_REPORT_JS.contains("note_user_gesture"));
+    }
+
+    #[test]
+    fn login_detector_wires_all_six_commands() {
+        // The detector must reach every page-side command it needs;
+        // a renamed command that the JS still calls would fail
+        // silently at runtime (invoke rejects), so pin the names.
+        for cmd in [
+            "stage_password",
+            "staged_password_state",
+            "confirm_staged_password",
+            "never_save_password",
+            "vault_prompt_state",
+            "fill_login_for_window",
+        ] {
+            assert!(
+                LOGIN_DETECTOR_JS.contains(&format!("\"{cmd}\"")),
+                "detector does not call {cmd}"
+            );
+        }
+        // Synthetic submits and synthetic banner clicks must not stage
+        // or confirm a credential.
+        assert!(LOGIN_DETECTOR_JS.contains("isTrusted"));
+        // The offer text and the quiet fill prompt.
+        assert!(LOGIN_DETECTOR_JS.contains("Save password for "));
+        assert!(LOGIN_DETECTOR_JS.contains("Fill login for "));
+        // The password is handed to Rust and the page copy dropped —
+        // it must never sit in a page variable after staging.
+        assert!(LOGIN_DETECTOR_JS.contains("pw = \"\""));
+    }
+
+    #[test]
+    fn account_ids_for_label_parses_standalone() {
+        // app ids are `app-<millis>-<n>`, account ids `acct-<millis>-<n>`.
+        let label = account_window_label("app-1794690000000-0", "acct-1794690000001-0");
+        assert_eq!(label, "acct-app-1794690000000-0-acct-1794690000001-0");
+        // Pure parse, no AppHandle needed for the acct- shape: mirror
+        // the resolver's split on the first `-acct-`.
+        let rest = label.strip_prefix("acct-").unwrap();
+        let idx = rest.find("-acct-").unwrap();
+        assert_eq!(&rest[..idx], "app-1794690000000-0");
+        assert_eq!(&rest[idx + 1..], "acct-1794690000001-0");
+        // Malformed labels must not resolve.
+        assert!("acct-".find("-acct-").is_none());
+        assert!("acct-app-1".find("-acct-").is_none());
     }
 
     #[test]
