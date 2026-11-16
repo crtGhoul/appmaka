@@ -17,9 +17,11 @@
 //!   receives a fill.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
 /// Keyring service name — namespaces our entries in the OS vault.
@@ -83,7 +85,7 @@ pub(crate) fn normalise_domain(raw: &str) -> Result<String, String> {
 }
 
 /// Extract the registrable host from a URL string for fill-time matching.
-fn host_of(url_str: &str) -> Result<String, String> {
+pub(crate) fn host_of(url_str: &str) -> Result<String, String> {
     let url = url::Url::parse(url_str).map_err(|_| "could not parse page URL".to_string())?;
     url.host_str()
         .map(normalise_domain)
@@ -91,8 +93,125 @@ fn host_of(url_str: &str) -> Result<String, String> {
 }
 
 /// The domain an app's credentials are bound to, from its configured URL.
-fn app_domain(app_url: &str) -> Result<String, String> {
+pub(crate) fn app_domain(app_url: &str) -> Result<String, String> {
     host_of(app_url)
+}
+
+/// A login captured by the in-page detector, held in memory only until
+/// the user picks Save or Never (or it expires). Never persisted, never
+/// logged — the only way it reaches disk is via `save_credential`,
+/// which writes the password to the OS vault and nothing else.
+pub(crate) struct StagedCredential {
+    pub username: String,
+    pub password: String,
+    pub domain: String,
+    staged_at: Instant,
+    /// Whether the offer banner has already been shown for this
+    /// staging, so a login that redirects through several pages does
+    /// not re-offer the banner on every hop.
+    offered: bool,
+}
+
+/// In-memory staging area for detector-captured logins, keyed by the
+/// calling webview's label. Managed as Tauri state; a stale entry is
+/// harmless (it expires) and a closed window's entry is never read.
+#[derive(Default)]
+pub(crate) struct StagedPasswords {
+    inner: Mutex<HashMap<String, StagedCredential>>,
+}
+
+impl StagedPasswords {
+    /// How long a staged login stays offerable after the submit.
+    const TTL: Duration = Duration::from_secs(300);
+
+    pub fn stage(&self, label: &str, username: String, password: String, domain: String) {
+        if let Ok(mut m) = self.inner.lock() {
+            m.insert(
+                label.to_string(),
+                StagedCredential {
+                    username,
+                    password,
+                    domain,
+                    staged_at: Instant::now(),
+                    offered: false,
+                },
+            );
+        }
+    }
+
+    /// The domain to offer the save banner for, if a live staging
+    /// exists for this window and has not been offered yet. Marks it
+    /// offered, so the banner shows once per login even across
+    /// redirects. Does not remove the credential — Save/Never still
+    /// act on it until it expires.
+    pub fn offer_domain(&self, label: &str) -> Option<String> {
+        let mut m = self.inner.lock().ok()?;
+        let cred = m.get_mut(label)?;
+        if cred.staged_at.elapsed() > Self::TTL || cred.offered {
+            return None;
+        }
+        cred.offered = true;
+        Some(cred.domain.clone())
+    }
+
+    /// Take the staged login for a window, if it exists and has not
+    /// expired. Removes it either way, so a confirm can never run twice.
+    pub fn take(&self, label: &str) -> Option<StagedCredential> {
+        let mut m = self.inner.lock().ok()?;
+        let cred = m.remove(label)?;
+        if cred.staged_at.elapsed() <= Self::TTL {
+            Some(cred)
+        } else {
+            None
+        }
+    }
+
+    pub fn clear(&self, label: &str) {
+        if let Ok(mut m) = self.inner.lock() {
+            m.remove(label);
+        }
+    }
+}
+
+/// Path of the non-secret "never offer to save" set. Kept separate from
+/// vault-index.json so a never-answer can never disturb the credential
+/// index; it holds only random vault keys, no domains or usernames.
+fn never_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("vault-never.json"))
+        .map_err(|e| format!("could not resolve app data dir: {e}"))
+}
+
+fn load_never(app: &AppHandle) -> HashSet<String> {
+    let Ok(path) = never_path(app) else {
+        return HashSet::new();
+    };
+    let Ok(data) = fs::read(&path) else {
+        return HashSet::new();
+    };
+    serde_json::from_slice(&data).unwrap_or_default()
+}
+
+fn save_never(app: &AppHandle, set: &HashSet<String>) -> Result<(), String> {
+    let path = never_path(app)?;
+    let data =
+        serde_json::to_vec_pretty(set).map_err(|e| format!("could not encode never set: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, data).map_err(|e| format!("could not write never set: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("could not write never set: {e}"))
+}
+
+/// Whether the user picked "Never" for this account's login offer.
+pub(crate) fn is_never(app: &AppHandle, app_id: &str, account_id: &str) -> bool {
+    load_never(app).contains(&vault_key(app_id, account_id))
+}
+
+/// Record "Never" for this account. Idempotent.
+pub(crate) fn set_never(app: &AppHandle, app_id: &str, account_id: &str) -> Result<(), String> {
+    let mut set = load_never(app);
+    set.insert(vault_key(app_id, account_id));
+    save_never(app, &set)
 }
 
 fn entry_for(app_id: &str, account_id: &str) -> Result<keyring::Entry, String> {
@@ -306,5 +425,58 @@ mod tests {
     fn vault_key_is_namespaced() {
         assert_eq!(vault_key("app1", "acc1"), "app1/acc1");
         assert_ne!(vault_key("app1", "acc1"), vault_key("app1", "acc2"));
+    }
+
+    #[test]
+    fn staged_take_returns_and_removes() {
+        let staged = StagedPasswords::default();
+        staged.stage("w1", "user".into(), "pass".into(), "example.com".into());
+        let cred = staged.take("w1").expect("staged credential present");
+        assert_eq!(cred.username, "user");
+        assert_eq!(cred.password, "pass");
+        assert_eq!(cred.domain, "example.com");
+        // A confirm can never run twice on the same staging.
+        assert!(staged.take("w1").is_none());
+    }
+
+    #[test]
+    fn staged_clear_drops_without_saving() {
+        let staged = StagedPasswords::default();
+        staged.stage("w1", "user".into(), "pass".into(), "example.com".into());
+        staged.clear("w1");
+        assert!(staged.take("w1").is_none());
+    }
+
+    #[test]
+    fn staged_expires_after_ttl() {
+        let staged = StagedPasswords::default();
+        staged.stage("w1", "user".into(), "pass".into(), "example.com".into());
+        // Backdate the staging past the TTL and confirm it is refused.
+        {
+            let mut m = staged.inner.lock().unwrap();
+            let cred = m.get_mut("w1").unwrap();
+            cred.staged_at = Instant::now() - StagedPasswords::TTL - Duration::from_secs(1);
+        }
+        assert!(staged.take("w1").is_none());
+    }
+
+    #[test]
+    fn staged_is_per_window_label() {
+        let staged = StagedPasswords::default();
+        staged.stage("w1", "alice".into(), "pw1".into(), "a.com".into());
+        staged.stage("w2", "bob".into(), "pw2".into(), "b.com".into());
+        assert_eq!(staged.take("w1").unwrap().username, "alice");
+        assert_eq!(staged.take("w2").unwrap().username, "bob");
+    }
+
+    #[test]
+    fn staged_offer_domain_shows_once() {
+        let staged = StagedPasswords::default();
+        staged.stage("w1", "user".into(), "pass".into(), "example.com".into());
+        assert_eq!(staged.offer_domain("w1").as_deref(), Some("example.com"));
+        // A redirect chain must not re-offer the banner on every hop.
+        assert!(staged.offer_domain("w1").is_none());
+        // …but the credential is still there for Save until it expires.
+        assert!(staged.take("w1").is_some());
     }
 }
