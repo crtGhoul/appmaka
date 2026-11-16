@@ -362,6 +362,166 @@ async fn credential_info(
     }))
 }
 
+/// Resolve the (app_id, account_id) for the webview that invoked a
+/// page-side command, from its label. Page-supplied ids are never
+/// trusted — the label is assigned by Rust at window build time.
+fn resolve_caller_ids(
+    app: &AppHandle,
+    webview: &tauri::Webview,
+) -> Result<(String, String), String> {
+    crate::windows::account_ids_for_label(app, webview.label())
+        .ok_or_else(|| "could not identify the calling window".to_string())
+}
+
+/// The in-page login detector calls this when a login form is
+/// submitted. The credential is staged in memory only (never on disk)
+/// and the offer banner is shown on the next page load (or shortly
+/// after, for logins that do not navigate); nothing is saved until
+/// the user clicks Save. Refuses when the page is not the app's own
+/// site, or the user picked Never for this account. The password never
+/// appears in any error string.
+#[tauri::command]
+async fn stage_password(
+    app: AppHandle,
+    webview: tauri::Webview,
+    store: State<'_, AppStore>,
+    staged: State<'_, vault::StagedPasswords>,
+    username: String,
+    password: String,
+) -> Result<(), String> {
+    let (app_id, account_id) = resolve_caller_ids(&app, &webview)?;
+    let web_app = store.get(&app_id)?;
+    web_app
+        .accounts
+        .iter()
+        .find(|a| a.id == account_id)
+        .ok_or_else(|| "account not found".to_string())?;
+    let domain = vault::app_domain(&web_app.url)?;
+    let current_url = webview
+        .url()
+        .map_err(|e| format!("could not read page URL: {e}"))?
+        .to_string();
+    if vault::host_of(&current_url)? != domain {
+        return Err("this page is not the app's site".to_string());
+    }
+    if vault::is_never(&app, &app_id, &account_id) {
+        return Err("never save for this account".to_string());
+    }
+    let username = username.trim();
+    if username.is_empty() {
+        return Err("username is empty".to_string());
+    }
+    if password.is_empty() {
+        return Err("password is empty".to_string());
+    }
+    if username.len() > 512 || password.len() > 4096 {
+        return Err("credential too long".to_string());
+    }
+    staged.stage(
+        webview.label(),
+        username.to_string(),
+        password.to_string(),
+        domain,
+    );
+    Ok(())
+}
+
+/// The detector asks this on page load (and shortly after a submit
+/// that did not navigate): is there a login staged for this window
+/// that has not been offered yet? Returns its domain for the banner,
+/// or None. Marks the staging offered, so the banner shows once per
+/// login even across redirects. The credential itself stays staged
+/// until Save, Never, or expiry.
+#[tauri::command]
+async fn staged_password_state(
+    webview: tauri::Webview,
+    staged: State<'_, vault::StagedPasswords>,
+) -> Result<Option<String>, String> {
+    Ok(staged.offer_domain(webview.label()))
+}
+
+/// The banner's Save button. Moves the staged login into the OS vault
+/// via the same path as the manual Save dialog. Requires a recent
+/// trusted user gesture in this window, so a page script cannot
+/// confirm a staging the user never approved.
+#[tauri::command]
+async fn confirm_staged_password(
+    app: AppHandle,
+    webview: tauri::Webview,
+    store: State<'_, AppStore>,
+    staged: State<'_, vault::StagedPasswords>,
+    gestures: State<'_, crate::downloads::GestureState>,
+) -> Result<(), String> {
+    if !gestures.recent(webview.label(), crate::downloads::GESTURE_WINDOW) {
+        return Err("no recent user gesture in this window".to_string());
+    }
+    let (app_id, account_id) = resolve_caller_ids(&app, &webview)?;
+    let cred = staged
+        .take(webview.label())
+        .ok_or_else(|| "no login waiting to save (it may have expired)".to_string())?;
+    let web_app = store.get(&app_id)?;
+    vault::save_credential(
+        &app,
+        &app_id,
+        &account_id,
+        &web_app.url,
+        &cred.username,
+        &cred.password,
+    )
+}
+
+/// The banner's Never button. Records the opt-out (non-secret) and
+/// drops the staged login. No gesture required — dismissing is safe.
+#[tauri::command]
+async fn never_save_password(
+    app: AppHandle,
+    webview: tauri::Webview,
+    staged: State<'_, vault::StagedPasswords>,
+) -> Result<(), String> {
+    let (app_id, account_id) = resolve_caller_ids(&app, &webview)?;
+    staged.clear(webview.label());
+    vault::set_never(&app, &app_id, &account_id)
+}
+
+/// The detector's "Fill login" prompt. Same label-derived identity as
+/// the other page-side commands; requires a recent trusted gesture,
+/// then runs the existing domain-locked fill.
+#[tauri::command]
+async fn fill_login_for_window(
+    app: AppHandle,
+    webview: tauri::Webview,
+    gestures: State<'_, crate::downloads::GestureState>,
+) -> Result<String, String> {
+    if !gestures.recent(webview.label(), crate::downloads::GESTURE_WINDOW) {
+        return Err("no recent user gesture in this window".to_string());
+    }
+    let (app_id, account_id) = resolve_caller_ids(&app, &webview)?;
+    vault::fill_login(&app, &app_id, &account_id)
+}
+
+/// The detector asks this when a password field appears: is there a
+/// saved login for this account, and is this page its domain? Returns
+/// the non-secret metadata (domain + username) for the prompt, or
+/// None when there is nothing to fill here. Never returns a password.
+#[tauri::command]
+async fn vault_prompt_state(
+    app: AppHandle,
+    webview: tauri::Webview,
+) -> Result<Option<CredentialInfo>, String> {
+    let (app_id, account_id) = resolve_caller_ids(&app, &webview)?;
+    let Some((domain, username)) = vault::credential_meta(&app, &app_id, &account_id) else {
+        return Ok(None);
+    };
+    let current_url = webview
+        .url()
+        .map_err(|e| format!("could not read page URL: {e}"))?
+        .to_string();
+    if vault::host_of(&current_url)? != domain {
+        return Ok(None);
+    }
+    Ok(Some(CredentialInfo { domain, username }))
+}
+
 #[derive(serde::Serialize)]
 struct CredentialInfo {
     domain: String,
@@ -1359,6 +1519,9 @@ fn main() {
             // v0.18.9: last user gesture per webview, for the drive-by
             // download gate.
             app.manage(crate::downloads::GestureState::default());
+            // v0.18.26: staged logins captured by the in-page detector
+            // (memory only until the user picks Save or Never).
+            app.manage(crate::vault::StagedPasswords::default());
             app.manage(pin::ConfirmedCloses::default());
             app.manage(pin::PendingConfirms::default());
             pin::seed_from_session(app.handle());
@@ -1493,6 +1656,9 @@ fn main() {
             // Websearch "add this site" E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_websearch_add_flow(app.handle());
+            // v0.18.26 password-detector probe (Xvfb smoke).
+            #[cfg(debug_assertions)]
+            crate::debug_e2e::maybe_run_pw_probe(app.handle());
             // Popup permissions panel E2E driver (Xvfb smoke).
             #[cfg(debug_assertions)]
             crate::debug_e2e::maybe_run_popup_permissions_flow(app.handle());
@@ -1685,6 +1851,12 @@ fn main() {
             fill_login,
             delete_credential,
             credential_info,
+            stage_password,
+            staged_password_state,
+            confirm_staged_password,
+            never_save_password,
+            fill_login_for_window,
+            vault_prompt_state,
             suspend_account,
             platform_info,
             list_programs,
