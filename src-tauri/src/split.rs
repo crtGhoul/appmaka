@@ -135,6 +135,25 @@ pub fn pane_webview_label(group_id: &str, app_id: &str, account_id: &str) -> Str
     format!("{SPLIT_PANE_LABEL_PREFIX}{group_id}-{app_id}-{account_id}")
 }
 
+/// Reverse of the above, for page-side commands: the (app_id,
+/// account_id) of the pane whose child-webview label this is, if the
+/// group is still live in SplitState.
+pub(crate) fn pane_ids_for_label(
+    state: &SplitState,
+    label: &str,
+) -> Option<(String, String)> {
+    let groups = state.inner.lock().ok()?;
+    groups.values().find_map(|g| {
+        g.panes.iter().find_map(|p| {
+            if pane_webview_label(&g.id, &p.app_id, &p.account_id) == label {
+                Some((p.app_id.clone(), p.account_id.clone()))
+            } else {
+                None
+            }
+        })
+    })
+}
+
 /// Logical-pixel rectangle. The group's frame includes the bar at its
 /// top; panes fill the area below it.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
