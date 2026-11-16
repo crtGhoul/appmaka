@@ -126,6 +126,26 @@ pub(crate) fn active_tab_window_label(
     })
 }
 
+/// Reverse of the above, for page-side commands: the (app_id,
+/// account_id) of the ACTIVE tab of the tabbed group whose live window
+/// label this is. The live webview always shows the active tab, so the
+/// detector in that webview belongs to this account.
+pub(crate) fn active_tab_ids_for_label(
+    state: &TabState,
+    label: &str,
+) -> Option<(String, String)> {
+    let groups = state.inner.lock().ok()?;
+    groups.values().find_map(|g| {
+        if g.label != label {
+            return None;
+        }
+        g.tabs
+            .get(g.active)
+            .filter(|e| e.valid())
+            .map(|e| (e.app_id.clone(), e.account_id.clone()))
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Pure logic: unit-tested on every platform
 // ---------------------------------------------------------------------------
@@ -615,6 +635,9 @@ fn build_tabbed_window(
                     .initialization_script_for_all_frames(crate::windows::TARGET_BLANK_SHIM_JS)
                     .initialization_script_for_all_frames(guard_js)
                     .initialization_script_for_all_frames(crate::windows::GESTURE_REPORT_JS)
+                    // Login detector: main frame only (see the account
+                    // builder for why).
+                    .initialization_script(crate::windows::LOGIN_DETECTOR_JS)
                     .initialization_script(crate::windows::NAV_KEYS_JS)
                     .initialization_script(crate::windows::shortcuts_overlay_js(&window_app));
                 if !adblock_css.is_empty() {
