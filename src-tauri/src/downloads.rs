@@ -514,7 +514,7 @@ fn plan_destination(
 /// had just clicked. A drive-by download still has NO click at all, so
 /// a longer window does not weaken that protection; the blob:/data:
 /// executable block below still catches the worst case.
-const GESTURE_WINDOW: Duration = Duration::from_secs(30);
+pub(crate) const GESTURE_WINDOW: Duration = Duration::from_secs(30);
 
 /// File extensions whose download from a `blob:`/`data:` URL is never
 /// legitimate without an explicit save: those URLs carry no origin to
