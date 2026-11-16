@@ -28,6 +28,84 @@ pub fn maybe_run_popup_flow(app: &AppHandle) {
         .spawn(move || run_flow(&app, &url, &mode));
 }
 
+/// v0.18.26 password-detector probe (Xvfb smoke). Driven by
+/// `APPMAKA_DEBUG_PW_PROBE=1`. Opens the first seeded app's first
+/// account, waits for the page, then evals whether the Tauri IPC is
+/// reachable from the page (`__TAURI_INTERNALS__`) and whether the
+/// login detector's banner/pill is present. Logs the result as JSON;
+/// the shell script asserts on it. Debug builds only, inert without
+/// the env var, detached thread, never blocks startup.
+pub fn maybe_run_pw_probe(app: &AppHandle) {
+    if std::env::var("APPMAKA_DEBUG_PW_PROBE").unwrap_or_default() != "1" {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("appmaka-debug-pw-probe".to_string())
+        .spawn(move || run_pw_probe(&app));
+}
+
+fn run_pw_probe(app: &AppHandle) {
+    use std::time::Duration;
+    std::thread::sleep(Duration::from_secs(6));
+    let store = match app.try_state::<crate::store::AppStore>() {
+        Some(s) => s,
+        None => {
+            eprintln!("[pw-probe] no AppStore state");
+            return;
+        }
+    };
+    let apps = match store.list() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[pw-probe] store.list failed: {e}");
+            return;
+        }
+    };
+    let Some(first) = apps.first() else {
+        eprintln!("[pw-probe] no seeded apps");
+        return;
+    };
+    let Some(acct) = first.accounts.first() else {
+        eprintln!("[pw-probe] first app has no accounts");
+        return;
+    };
+    let (app_id, account_id) = (first.id.clone(), acct.id.clone());
+    let label = crate::windows::account_window_label(&app_id, &account_id);
+    if app.get_webview_window(&label).is_none() {
+        let adblock = match app.try_state::<crate::adblock::AdblockState>() {
+            Some(s) => s,
+            None => {
+                eprintln!("[pw-probe] no AdblockState");
+                return;
+            }
+        };
+        let winstate = match app.try_state::<crate::windows::WindowState>() {
+            Some(s) => s,
+            None => {
+                eprintln!("[pw-probe] no WindowState");
+                return;
+            }
+        };
+        if let Err(e) = crate::windows::open_account_placed(
+            app, &store, &adblock, &winstate, &app_id, &account_id, None, false, false,
+        ) {
+            eprintln!("[pw-probe] open_account_placed failed: {e}");
+            return;
+        }
+    }
+    std::thread::sleep(Duration::from_secs(5));
+    let Some(win) = app.get_webview(&label) else {
+        eprintln!("[pw-probe] account webview never appeared");
+        return;
+    };
+    let probe = r#"JSON.stringify({internals: typeof window.__TAURI_INTERNALS__, invoke: typeof (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke), url: location.href, banner: !!document.querySelector('[data-appmaka-pw-banner]'), bodyText: (document.body ? document.body.innerText || '' : '').slice(0, 200)})"#;
+    match eval_in(&win, probe) {
+        Some(v) => eprintln!("[pw-probe] result: {v}"),
+        None => eprintln!("[pw-probe] eval timed out (no callback)"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // v0.10.0 tabbed-window E2E driver (Xvfb smoke).
 //
