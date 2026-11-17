@@ -1158,6 +1158,17 @@ pub fn open_account_placed(
         // v0.18.6: always unminimize BEFORE show/set_focus and clamp
         // off-screen or minimized (-32000, -32000) windows onto a visible monitor.
         ensure_on_visible_monitor(app, &window);
+        let _ = window.show();
+        let _ = window.set_focus();
+        #[cfg(windows)]
+        {
+            if let Ok(hwnd) = window.hwnd() {
+                use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+                unsafe {
+                    let _ = SetForegroundWindow(hwnd);
+                }
+            }
+        }
         #[cfg(windows)]
         crate::caption::page_window_moved(&label);
         // An open that returns Ok while nothing appears is worse than a
@@ -2959,6 +2970,15 @@ pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
     document.body.appendChild(pill);
     fillPill = pill;
   }
+  var fillTimer = null;
+  function scheduleCheckFill() {
+    if (fillChecked || fillTimer) return;
+    fillTimer = setTimeout(function () {
+      fillTimer = null;
+      checkFill();
+    }, 400);
+  }
+
   function checkFill() {
     if (fillChecked) return;
     if (!document.querySelector('input[type="password"]')) return;
@@ -3002,8 +3022,11 @@ pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
     setTimeout(checkStaged, 800);
     checkFill();
     if (window.MutationObserver && document.body) {
-      fillObs = new MutationObserver(function () { checkFill(); });
+      fillObs = new MutationObserver(scheduleCheckFill);
       fillObs.observe(document.body, { childList: true, subtree: true });
+      setTimeout(function () {
+        if (fillObs) { fillObs.disconnect(); fillObs = null; }
+      }, 15000);
     }
     // Back/forward-cache restores do not re-run init scripts or
     // DOMContentLoaded, so the fill/save prompts would never appear
@@ -5966,6 +5989,8 @@ mod tests {
         assert!(WEBVIEW2_BROWSER_ARGS.contains("disable-backgrounding-occluded-windows"));
         assert!(WEBVIEW2_BROWSER_ARGS.contains("disable-renderer-backgrounding"));
         assert!(WEBVIEW2_BROWSER_ARGS.contains("autoplay-policy=no-user-gesture-required"));
+        assert!(!WEBVIEW2_BROWSER_ARGS.contains("disable-gpu-compositing"));
+        assert!(!WEBVIEW2_BROWSER_ARGS.contains("disable-direct-composition-video-overlays"));
         // The 256 MB heap cap was dropped in v0.16.6 (see the const).
         assert!(!WEBVIEW2_BROWSER_ARGS.contains("max-old-space-size"));
     }

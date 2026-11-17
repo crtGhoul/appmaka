@@ -92,17 +92,23 @@ fn parse_header(filename: &str, source: &str) -> (String, Vec<String>, String) {
             continue;
         }
         let body = trimmed.trim_start_matches("//").trim();
-        if let Some(rest) = body.strip_prefix("@name") {
+        if let Some(rest) = body.strip_prefix("@name ")
+            .or_else(|| body.strip_prefix("@name\t"))
+        {
             let v = rest.trim();
             if !v.is_empty() {
                 name = v.to_string();
             }
-        } else if let Some(rest) = body.strip_prefix("@match") {
+        } else if let Some(rest) = body.strip_prefix("@match ")
+            .or_else(|| body.strip_prefix("@match\t"))
+        {
             let v = rest.trim();
             if !v.is_empty() {
                 matches.push(v.to_string());
             }
-        } else if let Some(rest) = body.strip_prefix("@run-at") {
+        } else if let Some(rest) = body.strip_prefix("@run-at ")
+            .or_else(|| body.strip_prefix("@run-at\t"))
+        {
             let v = rest.trim();
             if !v.is_empty() {
                 run_at = v.to_string();
@@ -223,6 +229,28 @@ pub fn set_user_script_enabled(
     }
     save_disabled(&app, &disabled)?;
     list_user_scripts(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_header_does_not_confuse_namespace_with_name() {
+        let source = r#"
+// ==UserScript==
+// @name         Keep Muse Agents Alive
+// @namespace    https://appmaka.app/
+// @version      1.3.4
+// @match        *://muse.ai/*
+// @run-at       document-start
+// ==/UserScript==
+"#;
+        let (name, matches, run_at) = parse_header("test.user.js", source);
+        assert_eq!(name, "Keep Muse Agents Alive");
+        assert_eq!(matches, vec!["*://muse.ai/*"]);
+        assert_eq!(run_at, "document-start");
+    }
 }
 
 #[tauri::command]
