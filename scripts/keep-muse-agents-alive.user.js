@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.3.6
-// @description  Lag-free auto-allow for muse.ai agents: prefers "Always allow" / "Always send" dropdown options, auto-clicks "A task needs review" banner, "Allow" / "Approve" modals, "Send" prompts, keep-alive heartbeat, and HUD indicator.
+// @version      1.3.7
+// @description  Lag-free auto-allow for muse.ai agents: auto-selects "Always allow for this scheduled task" / "Always allow for this recipient", opens split Send chevrons, expands pending review items, auto-clicks "A task needs review" banner, keep-alive heartbeat, and HUD indicator.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
 // @match        *muse.ai*
@@ -21,7 +21,7 @@
   }
   window.__museKeeperInitialized = true;
 
-  const KEEPER_VERSION = '1.3.6';
+  const KEEPER_VERSION = '1.3.7';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
@@ -84,13 +84,12 @@
   }, 30000);
 
   // =========================================================================
-  // 2. AUTO-ALLOW, ALWAYS-ALLOW, REVIEW & SEND ENGINE (v1.3.6)
+  // 2. AUTO-ALLOW, ALWAYS-ALLOW, REVIEW & SEND ENGINE (v1.3.7)
   // =========================================================================
 
   const STRICT_ALLOW_REGEX = /^(allow|allow once|always allow|allow all|allow access|grant permission|grant access|approve|approve all|confirm action|proceed|accept)$/i;
   const STRICT_REVIEW_REGEX = /^(review|review task|review changes)$/i;
   const STRICT_SEND_REGEX = /^(send|send email|send now)$/i;
-  const ALWAYS_ALLOW_REGEX = /^(always allow|always send|always allow send|always permit|allow always|always allow for .*|always allow .*)$/i;
 
   // Strictly forbid negative actions, including "Don't send", "Don't allow", etc.
   const FORBIDDEN_REGEX = /\b(deny|block|cancel|reject|dismiss|delete|remove|never|refuse|quit|exit|close|don'?t|do not)\b/i;
@@ -114,8 +113,14 @@
     const card = el.closest('div, li, section');
     if (!card) return false;
     const text = (card.innerText || card.textContent || '').toLowerCase();
-    // Historical permission log cards (e.g., "Timed out • Oct 23", "Allowed • Oct 18")
-    return text.includes('timed out') || text.includes('allowed •') || text.includes('denied •');
+    // Historical permission log cards (e.g., "Timed out • Oct 23", "Allowed • Oct 18", "Approvals history")
+    if (el.closest('[class*="history" i]') || text.includes('timed out') || text.includes('allowed •') || text.includes('denied •')) {
+      return true;
+    }
+    const section = el.closest('section, div');
+    const header = section ? (section.querySelector('h1, h2, h3, h4, [class*="header" i]')?.innerText || '').toLowerCase() : '';
+    if (header.includes('history')) return true;
+    return false;
   }
 
   function triggerTrustedClick(el) {
@@ -150,7 +155,7 @@
   }
 
   function triggerReviewBurst() {
-    const delays = [60, 150, 300, 500, 900, 1500];
+    const delays = [50, 120, 250, 450, 800, 1400];
     delays.forEach((ms) => {
       setTimeout(() => {
         if (!isPaused) scanAndHandle(document);
@@ -173,28 +178,55 @@
     }
   }
 
-  // Find any active "Always allow" / "Always send" menu item or button
+  // Find any active "Always allow" dropdown menu option or button
   function findAlwaysOption(root) {
     const candidates = (root || document).querySelectorAll(
-      '[role="menuitem"], [role="option"], button, [role="button"], li, a, div[tabindex]'
+      '[role="menuitem"], [role="option"], button, [role="button"], li, a, div, span, p'
     );
-    for (let i = 0; i < candidates.length; i++) {
-      const it = candidates[i];
-      if (!isVisibleFast(it) || isExcluded(it) || isHistoricalEntry(it) || clickedElements.has(it)) continue;
-      if (it.dataset.museKeeperHandled === 'true') continue;
 
-      const rawText = (it.innerText || it.textContent || '').trim();
-      const ariaLabel = (it.getAttribute('aria-label') || '').trim();
-      const label = rawText || ariaLabel;
-      if (!label || label.length > 45) continue;
+    let bestCandidate = null;
+    let bestPriority = 999;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const el = candidates[i];
+      if (!isVisibleFast(el) || isExcluded(el) || isHistoricalEntry(el) || clickedElements.has(el)) continue;
+      if (el.dataset.museKeeperHandled === 'true') continue;
+
+      // Leaf-level or near-leaf elements only
+      if (el.children.length > 2) continue;
+
+      const rawText = (el.innerText || el.textContent || '').trim();
+      const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+      const label = (rawText || ariaLabel).toLowerCase().replace(/[\u25bc\u25be\u2304\u2193\u25bd\s]+/g, ' ').trim();
+
+      if (!label || label.length > 60) continue;
       if (FORBIDDEN_REGEX.test(rawText) || FORBIDDEN_REGEX.test(ariaLabel)) continue;
 
-      const clean = label.replace(/[\u25bc\u25be\u2304\u2193\u25bd\s]+/g, ' ').trim().toLowerCase();
-      if (ALWAYS_ALLOW_REGEX.test(clean) || clean === 'always allow' || clean === 'always send' || clean === 'always allow send' || clean.startsWith('always allow')) {
-        return it;
+      // Priority 1 (Supreme): "Always allow for this scheduled task"
+      if (label.includes('always allow for this scheduled task') || label === 'always allow for this scheduled task') {
+        return el;
+      }
+
+      // Priority 2: "Always allow for this recipient"
+      if (label.includes('always allow for this recipient') && bestPriority > 2) {
+        bestCandidate = el;
+        bestPriority = 2;
+      }
+
+      // Priority 3: "Always send" or "Always allow send"
+      if ((label === 'always send' || label === 'always allow send') && bestPriority > 3) {
+        bestCandidate = el;
+        bestPriority = 3;
+      }
+
+      // Priority 4: Generic "Always allow" or "Always allow for ..."
+      if ((label === 'always allow' || label.startsWith('always allow')) && bestPriority > 4) {
+        bestCandidate = el;
+        bestPriority = 4;
       }
     }
-    return null;
+
+    return bestCandidate;
   }
 
   function handleAlwaysOption(item) {
@@ -206,7 +238,7 @@
     const label = (item.innerText || item.textContent || 'Always Allow').trim();
     log(`⚡ Auto-selected [Always Allow]: "${label}"`, item);
     triggerTrustedClick(item);
-    showNotification(`Auto-Selected: ${label.slice(0, 24)}`);
+    showNotification(`Auto-Selected: ${label.slice(0, 30)}`);
     updateHud();
     triggerReviewBurst();
     return true;
@@ -259,7 +291,6 @@
     if (!STRICT_SEND_REGEX.test(cleanLabel)) return false;
 
     // Safety guard: only click Send if inside an action authorization prompt
-    // (e.g. "Allow Pronox to send this email in Gmail", or has a sibling "Don't send" button)
     const container = btn.closest('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="card" i], [class*="popup" i], [class*="prompt" i], div');
     const containerText = container ? (container.innerText || container.textContent || '').toLowerCase() : '';
 
@@ -268,35 +299,37 @@
       /don'?t send/i.test(containerText);
 
     if (!hasSendPromptContext) {
-      // Avoid accidental clicks on standard chat compose send buttons
       return false;
     }
 
     tryCheckRememberOption(container);
 
     // ── Check for split dropdown chevron next to Send ──
-    const splitGroup = btn.parentElement;
-    let dropdownToggle = null;
-    if (splitGroup) {
-      const candidates = splitGroup.querySelectorAll('button, [role="button"]');
+    const parent = btn.parentElement;
+    let chevronBtn = null;
+    if (parent) {
+      const candidates = parent.querySelectorAll('button, [role="button"], svg, span');
       for (let i = 0; i < candidates.length; i++) {
         const c = candidates[i];
-        if (c === btn || c.disabled || !isVisibleFast(c)) continue;
-        const cText = (c.innerText || c.textContent || '').trim().toLowerCase();
+        if (c === btn || !isVisibleFast(c)) continue;
+        const clickable = c.closest('button, [role="button"]') || (c.tagName.toLowerCase() === 'svg' ? c.parentElement : null);
+        if (!clickable || clickable === btn) continue;
+
+        const cText = (clickable.innerText || clickable.textContent || '').trim().toLowerCase();
         if (FORBIDDEN_REGEX.test(cText)) continue;
-        // The split toggle is typically empty with an SVG chevron, or has "▼", "▾", "v"
-        if (cText === '' || cText === '▾' || cText === '▼' || cText === 'v' || c.querySelector('svg')) {
-          dropdownToggle = c;
+
+        if (cText === '' || cText === 'v' || cText === '▾' || cText === '▼' || clickable.querySelector('svg')) {
+          chevronBtn = clickable;
           break;
         }
       }
     }
 
-    // If split dropdown exists and hasn't been opened yet, open it to select "Always allow send"
-    if (dropdownToggle && !btn.dataset.museKeeperDropdownOpened) {
-      btn.dataset.museKeeperDropdownOpened = 'true';
-      log('⚡ Opening split dropdown to select "Always allow send"...', dropdownToggle);
-      triggerTrustedClick(dropdownToggle);
+    // If split chevron exists and hasn't been clicked yet, click it to open the Always Allow menu
+    if (chevronBtn && !btn.dataset.museKeeperChevronClicked) {
+      btn.dataset.museKeeperChevronClicked = 'true';
+      log('⚡ Clicking split button chevron to open Always Allow menu...', chevronBtn);
+      triggerTrustedClick(chevronBtn);
 
       setTimeout(() => {
         if (isPaused) return;
@@ -304,7 +337,7 @@
         if (alwaysItem) {
           handleAlwaysOption(alwaysItem);
         } else {
-          // Fallback: If no "Always" option appeared, click the main Send button
+          // Fallback: If no Always option after 300ms, click Send directly
           if (!clickedElements.has(btn) && btn.dataset.museKeeperHandled !== 'true') {
             clickedElements.add(btn);
             btn.dataset.museKeeperHandled = 'true';
@@ -339,15 +372,13 @@
     const ariaLabel = (el.getAttribute('aria-label') || '').trim();
     const label = rawText || ariaLabel;
 
-    // Critical fix: button label must be short (<= 25 chars) and strictly match "Review"
-    // Never match sentences like "Review before sharing"
+    // Strict review button check (<= 25 chars, strictly "Review")
     if (!label || label.length > 25) return false;
     if (FORBIDDEN_REGEX.test(rawText) || FORBIDDEN_REGEX.test(ariaLabel)) return false;
 
     const cleanLabel = label.toLowerCase().trim();
     if (!STRICT_REVIEW_REGEX.test(cleanLabel)) return false;
 
-    // Cooldown check (don't click multiple review buttons within 500ms)
     const now = Date.now();
     if (now - lastActionTime < 500) return false;
 
@@ -366,7 +397,7 @@
   function scanAndHandle(root) {
     if (isPaused || !root) return;
 
-    // ── PRIORITY 0: Check if an "Always allow" / "Always send" option is open ──
+    // ── PRIORITY 0: Check if an "Always allow" option is currently open ──
     const alwaysOption = findAlwaysOption(root);
     if (alwaysOption) {
       handleAlwaysOption(alwaysOption);
@@ -406,12 +437,40 @@
 
     // ── PRIORITY 2: Scan for "Send" and "Allow" action buttons ──
     const actionButtons = root.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]');
+    let actionTriggered = false;
     for (let i = 0; i < actionButtons.length; i++) {
-      // Check Send first (which can pop open the split dropdown to select "Always send")
       if (handleSendButton(actionButtons[i])) {
-        continue;
+        actionTriggered = true;
+        break;
       }
-      handleAllowButton(actionButtons[i]);
+      if (handleAllowButton(actionButtons[i])) {
+        actionTriggered = true;
+        break;
+      }
+    }
+
+    // ── PRIORITY 3: If no active action button is open, expand collapsed review items ──
+    if (!actionTriggered) {
+      const reviewCards = root.querySelectorAll('div, [role="button"], article, section');
+      for (let i = 0; i < reviewCards.length; i++) {
+        const card = reviewCards[i];
+        if (!isVisibleFast(card) || isExcluded(card) || isHistoricalEntry(card)) continue;
+        if (card.dataset.museKeeperExpanded === 'true') continue;
+
+        const cardText = (card.innerText || '').toLowerCase();
+        // Check if this is a pending task card waiting for review
+        if (cardText.includes('allow ') && cardText.includes('to send this email')) {
+          const hasSendBtn = card.querySelector('button, [role="button"]');
+          const sendVisible = hasSendBtn && isVisibleFast(hasSendBtn) && /send/i.test(hasSendBtn.innerText || '');
+          if (!sendVisible) {
+            card.dataset.museKeeperExpanded = 'true';
+            log('⚡ Auto-expanding collapsed review item:', card);
+            triggerTrustedClick(card);
+            triggerReviewBurst();
+            break;
+          }
+        }
+      }
     }
   }
 
