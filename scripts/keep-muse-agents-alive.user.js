@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.3.8
-// @description  Lag-free auto-allow for muse.ai agents: deep prompt container inspection, auto-selects "Always allow for this scheduled task", opens split Send chevrons, expands pending review items, and HUD indicator.
+// @version      1.3.9
+// @description  Lag-free auto-allow for muse.ai agents: PointerEvent-powered split chevron opening, auto-selects "Always allow for this scheduled task", deep container checks, and HUD indicator.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
 // @match        *muse.ai*
@@ -21,7 +21,7 @@
   const oldHud = document.getElementById('muse-keeper-hud');
   if (oldHud) oldHud.remove();
 
-  const KEEPER_VERSION = '1.3.8';
+  const KEEPER_VERSION = '1.3.9';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
@@ -128,17 +128,38 @@
     const target = el.closest('button, [role="button"], [role="menuitem"], [role="option"], a') || el;
     try { target.focus(); } catch (_) {}
 
-    const mouseEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-    mouseEvents.forEach((type) => {
+    const eventNames = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+    eventNames.forEach((type) => {
       try {
-        const evt = new MouseEvent(type, {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view: window,
-          detail: 1,
-          buttons: 1,
-        });
+        const isPointer = type.startsWith('pointer');
+        let evt;
+        if (isPointer && typeof PointerEvent !== 'undefined') {
+          evt = new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: window,
+            detail: 1,
+            button: 0,
+            buttons: 1,
+            pointerId: 1,
+            pointerType: 'mouse',
+            isPrimary: true,
+            width: 1,
+            height: 1,
+            pressure: 0.5,
+          });
+        } else {
+          evt = new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            view: window,
+            detail: 1,
+            button: 0,
+            buttons: 1,
+          });
+        }
         target.dispatchEvent(evt);
         if (target !== el) {
           el.dispatchEvent(evt);
@@ -278,6 +299,59 @@
     return false;
   }
 
+  function findChevronTrigger(btn, promptContainer) {
+    if (!btn) return null;
+
+    // 1. Next sibling element (common in button groups: [Send] [v])
+    if (btn.nextElementSibling) {
+      const sib = btn.nextElementSibling;
+      const sibText = (sib.innerText || sib.textContent || '').toLowerCase();
+      if (!sibText.includes("don't send") && (sib.matches('button, [role="button"]') || sib.querySelector('svg') || sib.tagName.toLowerCase() === 'svg')) {
+        return sib;
+      }
+    }
+
+    // 2. Look in parent element (the split button wrapper)
+    const parent = btn.parentElement;
+    if (parent) {
+      const candidates = parent.querySelectorAll('button, [role="button"], svg, [aria-haspopup], [aria-expanded]');
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        if (c === btn || !isVisibleFast(c)) continue;
+        const clickable = c.closest('button, [role="button"], span') || c;
+        if (clickable === btn) continue;
+
+        const cText = (clickable.innerText || clickable.textContent || '').trim().toLowerCase();
+        if (FORBIDDEN_REGEX.test(cText)) continue;
+
+        if (cText === '' || cText === 'v' || cText === '▾' || cText === '▼' || clickable.querySelector('svg') || clickable.tagName.toLowerCase() === 'svg' || clickable.getAttribute('aria-haspopup')) {
+          return clickable;
+        }
+      }
+    }
+
+    // 3. Check if btn itself contains a child SVG or chevron element
+    const internal = btn.querySelector('svg, [class*="chevron" i], [class*="arrow" i]');
+    if (internal) {
+      const sub = internal.closest('button, [role="button"], span');
+      if (sub && sub !== btn) return sub;
+      return internal;
+    }
+
+    // 4. Look in promptContainer for any button near btn with aria-haspopup or chevron
+    if (promptContainer) {
+      const menuTriggers = promptContainer.querySelectorAll('[aria-haspopup="menu"], [aria-haspopup="true"], [aria-expanded]');
+      for (let i = 0; i < menuTriggers.length; i++) {
+        const mt = menuTriggers[i];
+        if (mt !== btn && isVisibleFast(mt) && !mt.innerText?.toLowerCase().includes("don't send")) {
+          return mt;
+        }
+      }
+    }
+
+    return null;
+  }
+
   function handleSendButton(btn) {
     if (isPaused || !btn || clickedElements.has(btn) || btn.disabled) return false;
     if (!isVisibleFast(btn) || isExcluded(btn) || isHistoricalEntry(btn)) return false;
@@ -320,25 +394,7 @@
     tryCheckRememberOption(promptContainer);
 
     // ── Check for split dropdown chevron next to Send ──
-    const parent = btn.parentElement;
-    let chevronBtn = null;
-    if (parent) {
-      const candidates = parent.querySelectorAll('button, [role="button"], svg, span');
-      for (let i = 0; i < candidates.length; i++) {
-        const c = candidates[i];
-        if (c === btn || !isVisibleFast(c)) continue;
-        const clickable = c.closest('button, [role="button"]') || (c.tagName.toLowerCase() === 'svg' ? c.parentElement : null);
-        if (!clickable || clickable === btn) continue;
-
-        const cText = (clickable.innerText || clickable.textContent || '').trim().toLowerCase();
-        if (FORBIDDEN_REGEX.test(cText)) continue;
-
-        if (cText === '' || cText === 'v' || cText === '▾' || cText === '▼' || clickable.querySelector('svg')) {
-          chevronBtn = clickable;
-          break;
-        }
-      }
-    }
+    const chevronBtn = findChevronTrigger(btn, promptContainer);
 
     // If split chevron exists and hasn't been clicked yet, click it to open the Always Allow menu
     if (chevronBtn && !btn.dataset.museKeeperChevronClicked) {
@@ -346,13 +402,16 @@
       log('⚡ Clicking split button chevron to open Always Allow menu...', chevronBtn);
       triggerTrustedClick(chevronBtn);
 
+      const svg = chevronBtn.querySelector ? chevronBtn.querySelector('svg') : null;
+      if (svg) triggerTrustedClick(svg);
+
       setTimeout(() => {
         if (isPaused) return;
         const alwaysItem = findAlwaysOption(document);
         if (alwaysItem) {
           handleAlwaysOption(alwaysItem);
         } else {
-          // Fallback: If no Always option after 300ms, click Send directly
+          // Fallback: If no Always option after 350ms, click Send directly
           if (!clickedElements.has(btn) && btn.dataset.museKeeperHandled !== 'true') {
             clickedElements.add(btn);
             btn.dataset.museKeeperHandled = 'true';
@@ -363,7 +422,7 @@
             updateHud();
           }
         }
-      }, 250);
+      }, 350);
       return true;
     }
 
