@@ -45,6 +45,62 @@ fn search_engine(app: &AppHandle) -> String {
         .unwrap_or_else(|| "duckduckgo".to_string())
 }
 
+/// True when the trimmed query looks like a site address rather than
+/// search words: an explicit http(s) URL, a dotted host with an
+/// optional port/path, or bare localhost with an optional port/path.
+/// Same shape as the launcher's URL_LIKE, so the bar and the backend
+/// agree on what "open it directly" means. Pure so it stays
+/// unit-testable.
+fn looks_like_site(query: &str) -> bool {
+    let q = query.trim();
+    if q.is_empty() || q.chars().any(char::is_whitespace) {
+        return false;
+    }
+    // Explicit scheme: trust it when it parses with a host.
+    // (Byte-slicing the prefix would panic on multibyte input, so
+    // compare on the lowercased copy instead.)
+    let lower = q.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        return url::Url::parse(q)
+            .map(|u| u.host_str().is_some())
+            .unwrap_or(false);
+    }
+    // Bare localhost (dev servers have no dot).
+    if q == "localhost" || q.starts_with("localhost:") || q.starts_with("localhost/") {
+        return url::Url::parse(&format!("https://{q}")).is_ok();
+    }
+    // Dotted host: a dot must exist (single-label names stay
+    // searches) and the last label must be 2+ letters, so "hello"
+    // and "a.b" stay searches instead of hopeless direct opens.
+    let Ok(u) = url::Url::parse(&format!("https://{q}")) else {
+        return false;
+    };
+    let Some(host) = u.host_str() else {
+        return false;
+    };
+    host.contains('.')
+        && host.rsplit('.').next().is_some_and(|tld| {
+            tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+        })
+}
+
+/// Resolve a launcher/search-bar query to the URL the window loads.
+/// Site-like input opens the site itself (like a browser address bar);
+/// anything else goes to the engine's results page. Pure.
+fn resolve_query_to_url(engine: &str, query: &str) -> Result<url::Url, String> {
+    let q = query.trim();
+    if looks_like_site(q) {
+        let lower = q.to_ascii_lowercase();
+        let raw = if lower.starts_with("https://") || lower.starts_with("http://") {
+            q.to_string()
+        } else {
+            format!("https://{q}")
+        };
+        return url::Url::parse(&raw).map_err(|e| format!("Couldn't open that address: {e}"));
+    }
+    build_search_url(engine, q)
+}
+
 /// True when `url` is a search-engine results page (Google `/search?q=…`
 /// or DuckDuckGo `/?q=…`). Adding one as an app would create a broken
 /// "Google Search" tile, so the add flow refuses these — the user must
@@ -184,7 +240,16 @@ pub fn open_search_window_placed(
     if query.is_empty() {
         return Err("Type something to search for.".to_string());
     }
-    let page_url = build_search_url(&search_engine(app), query)?;
+    // v0.18.28: site-like input opens the site itself, like a browser
+    // address bar; anything else goes to the engine's results page.
+    let page_url = resolve_query_to_url(&search_engine(app), query)?;
+    // Direct opens are titled with the host, not the raw input
+    // (no "https://" in the strip); searches keep the query text.
+    let title = if looks_like_site(query) {
+        page_url.host_str().unwrap_or(query).to_string()
+    } else {
+        query.to_string()
+    };
 
     if let Some(window) = app.get_webview_window(SEARCH_WINDOW_LABEL) {
         if let Some(p) = placement {
@@ -200,7 +265,7 @@ pub fn open_search_window_placed(
         window
             .eval(&js)
             .map_err(|e| format!("Couldn't open the search: {e}"))?;
-        let _ = window.set_title(query);
+        let _ = window.set_title(&title);
         // The reused window keeps the init scripts from when it was
         // built; if the cursor setting changed since, converge it
         // (v0.13.10). The navigate above lands async, so this uses
@@ -218,7 +283,6 @@ pub fn open_search_window_placed(
 
     let window_app = app.clone();
     let adblock = adblock.clone();
-    let title = query.to_string();
     let data_dir = search_data_dir(app)?;
     let _ = std::thread::Builder::new()
         .name("appmaka-websearch".to_string())
@@ -310,15 +374,26 @@ fn search_chrome_js(engine: &str) -> String {
     var input = document.createElement("input");
     input.id = "appmaka-q";
     input.type = "search";
-    input.placeholder = "Search the web… e.g. weather tomorrow";
-    input.setAttribute("aria-label", "Search the web");
+    input.placeholder = "Search the web or open a site… e.g. cinehd.vc";
+    input.setAttribute("aria-label", "Search the web or open a site");
     input.autocomplete = "off";
     input.spellcheck = false;
     try {{ input.value = currentQuery(); }} catch (e) {{}}
     input.addEventListener("keydown", function (e) {{
       if (e.key === "Enter") {{
         var v = input.value.trim();
-        if (v) window.location.href = SEARCH_BASE + encodeURIComponent(v);
+        if (!v) return;
+        // v0.18.28: a site address opens the site itself, like a
+        // browser address bar — same shape as the launcher's
+        // URL_LIKE, plus bare localhost. Anything else searches.
+        var u = v;
+        if (/^(https?:\/\/)?[\w-]+(\.[\w-]+)+(:\d+)?(\/\S*)?$/.test(v) ||
+            /^localhost(:\d+)?(\/\S*)?$/.test(v)) {{
+          if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+          window.location.href = u;
+        }} else {{
+          window.location.href = SEARCH_BASE + encodeURIComponent(v);
+        }}
       }}
     }});
 
@@ -605,6 +680,33 @@ mod tests {
     }
 
     #[test]
+    fn site_like_input_opens_directly() {
+        // v0.18.28: the bar works like a browser address bar.
+        let u = resolve_query_to_url("google", "cinehd.vc").unwrap();
+        assert_eq!(u.as_str(), "https://cinehd.vc/");
+        let u = resolve_query_to_url("google", "www.cinehd.vc").unwrap();
+        assert_eq!(u.as_str(), "https://www.cinehd.vc/");
+        let u = resolve_query_to_url("duckduckgo", "https://mail.google.com").unwrap();
+        assert_eq!(u.as_str(), "https://mail.google.com/");
+        let u = resolve_query_to_url("google", "http://localhost:8000/login.html").unwrap();
+        assert_eq!(u.as_str(), "http://localhost:8000/login.html");
+        let u = resolve_query_to_url("google", "localhost:3000").unwrap();
+        assert_eq!(u.as_str(), "https://localhost:3000/");
+        let u = resolve_query_to_url("google", "cinehd.vc/watch?v=x").unwrap();
+        assert_eq!(u.as_str(), "https://cinehd.vc/watch?v=x");
+        // Words and names with spaces still search.
+        let u = resolve_query_to_url("google", "cinehd vc").unwrap();
+        assert_eq!(u.host_str(), Some("www.google.com"));
+        let u = resolve_query_to_url("google", "what is cinehd").unwrap();
+        assert_eq!(u.host_str(), Some("www.google.com"));
+        // Bare names without a real TLD stay searches.
+        assert!(!looks_like_site("cinehd"));
+        assert!(!looks_like_site("a.b"));
+        assert!(!looks_like_site(""));
+        assert!(!looks_like_site("not a url"));
+    }
+
+    #[test]
     fn search_window_label_is_fixed_for_reuse() {
         // The whole one-window discipline hangs on this label never varying.
         assert_eq!(SEARCH_WINDOW_LABEL, "websearch");
@@ -652,6 +754,15 @@ mod tests {
         assert!(js.contains("e.g."));
         // Scoped to engine hosts; inert elsewhere.
         assert!(js.contains("onResultsHost"));
+    }
+
+    #[test]
+    fn search_chrome_bar_opens_sites_directly() {
+        // v0.18.28: typing a site address in the search window's own
+        // bar opens the site, not a results page for it.
+        let js = search_chrome_js("google");
+        assert!(js.contains("https://\" + u"));
+        assert!(js.contains("localhost"));
     }
 
     #[test]
