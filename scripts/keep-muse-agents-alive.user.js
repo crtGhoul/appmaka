@@ -12,14 +12,14 @@
 (function () {
   'use strict';
 
-  // Remove any legacy HUDs if present
+  // Clean up any previous running instance of Muse Keeper
+  if (window.__museKeeperInstance && typeof window.__museKeeperInstance.destroy === 'function') {
+    try {
+      window.__museKeeperInstance.destroy();
+    } catch (_) {}
+  }
   const oldHud = document.getElementById('muse-keeper-hud');
   if (oldHud) oldHud.remove();
-
-  if (window.__museKeeperInitialized) {
-    return;
-  }
-  window.__museKeeperInitialized = true;
 
   const KEEPER_VERSION = '1.3.7';
   let isPaused = false;
@@ -75,7 +75,7 @@
   requestWakeLock();
   document.addEventListener('visibilitychange', requestWakeLock);
 
-  setInterval(() => {
+  const heartbeatInterval = setInterval(() => {
     lastHeartbeatTime = Date.now();
     try {
       window.dispatchEvent(new Event('focus'));
@@ -522,7 +522,7 @@
   startObserver();
 
   // 1-second gentle poll fallback
-  setInterval(() => {
+  const fallbackInterval = setInterval(() => {
     if (!isPaused) scanAndHandle(document);
   }, 1000);
 
@@ -665,6 +665,18 @@
       }, 2500);
     } catch (_) {}
   }
+
+  window.__museKeeperInstance = {
+    version: KEEPER_VERSION,
+    destroy: () => {
+      observer.disconnect();
+      clearInterval(heartbeatInterval);
+      clearInterval(fallbackInterval);
+      if (hudEl) hudEl.remove();
+      if (notifEl) notifEl.remove();
+      log(`Deactivated v${KEEPER_VERSION}`);
+    },
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', createHud, { once: true });
