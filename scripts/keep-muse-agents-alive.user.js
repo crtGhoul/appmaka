@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.3.7
-// @description  Lag-free auto-allow for muse.ai agents: auto-selects "Always allow for this scheduled task" / "Always allow for this recipient", opens split Send chevrons, expands pending review items, auto-clicks "A task needs review" banner, keep-alive heartbeat, and HUD indicator.
+// @version      1.3.8
+// @description  Lag-free auto-allow for muse.ai agents: deep prompt container inspection, auto-selects "Always allow for this scheduled task", opens split Send chevrons, expands pending review items, and HUD indicator.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
 // @match        *muse.ai*
@@ -21,7 +21,7 @@
   const oldHud = document.getElementById('muse-keeper-hud');
   if (oldHud) oldHud.remove();
 
-  const KEEPER_VERSION = '1.3.7';
+  const KEEPER_VERSION = '1.3.8';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
@@ -229,8 +229,13 @@
     return bestCandidate;
   }
 
+  let lastAlwaysTime = 0;
   function handleAlwaysOption(item) {
     if (isPaused || !item || clickedElements.has(item)) return false;
+    const now = Date.now();
+    if (now - lastAlwaysTime < 800) return false;
+    lastAlwaysTime = now;
+
     clickedElements.add(item);
     item.dataset.museKeeperHandled = 'true';
     alwaysCount++;
@@ -290,19 +295,29 @@
     const cleanLabel = label.replace(/[\u25bc\u25be\u2304\u2193\u25bd\s]+/g, ' ').trim().toLowerCase();
     if (!STRICT_SEND_REGEX.test(cleanLabel)) return false;
 
-    // Safety guard: only click Send if inside an action authorization prompt
-    const container = btn.closest('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="card" i], [class*="popup" i], [class*="prompt" i], div');
-    const containerText = container ? (container.innerText || container.textContent || '').toLowerCase() : '';
+    // Safety guard: walk up parents looking for confirmation context ("don't send" or "to send this email")
+    let promptContainer = null;
+    let curr = btn.parentElement;
+    for (let depth = 0; depth < 8 && curr && curr !== document.body; depth++) {
+      const text = (curr.innerText || curr.textContent || '').toLowerCase();
+      if (
+        text.includes("don't send") ||
+        text.includes("dont send") ||
+        text.includes("to send this email") ||
+        text.includes("allow pronox to send") ||
+        text.includes("scheduled task")
+      ) {
+        promptContainer = curr;
+        break;
+      }
+      curr = curr.parentElement;
+    }
 
-    const hasSendPromptContext =
-      /allow .* to send|send this email|scheduled task|permission/i.test(containerText) ||
-      /don'?t send/i.test(containerText);
-
-    if (!hasSendPromptContext) {
+    if (!promptContainer) {
       return false;
     }
 
-    tryCheckRememberOption(container);
+    tryCheckRememberOption(promptContainer);
 
     // ── Check for split dropdown chevron next to Send ──
     const parent = btn.parentElement;
