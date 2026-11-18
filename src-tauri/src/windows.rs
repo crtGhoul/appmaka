@@ -1158,17 +1158,6 @@ pub fn open_account_placed(
         // v0.18.6: always unminimize BEFORE show/set_focus and clamp
         // off-screen or minimized (-32000, -32000) windows onto a visible monitor.
         ensure_on_visible_monitor(app, &window);
-        let _ = window.show();
-        let _ = window.set_focus();
-        #[cfg(windows)]
-        {
-            if let Ok(hwnd) = window.hwnd() {
-                use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-                unsafe {
-                    let _ = SetForegroundWindow(hwnd);
-                }
-            }
-        }
         #[cfg(windows)]
         crate::caption::page_window_moved(&label);
         // An open that returns Ok while nothing appears is worse than a
@@ -1270,6 +1259,9 @@ pub fn open_account_placed(
     };
     let shortcuts_js = shortcuts_overlay_js(app);
     let cursor_js = saved_cursor_js(app);
+    // Login detector on/off is read once here (same rule as split
+    // panes): the build thread cannot borrow `app`.
+    let pw_detector = password_prompt_enabled(app);
     let user_scripts = crate::userscripts::user_scripts_init_scripts(app, target_url.as_str());
     let cosmetic_css = adblock.cosmetic_css_for(target_url.as_str());
     let scriptlets_js = adblock.scriptlet_js_for(target_url.as_str());
@@ -1381,10 +1373,15 @@ pub fn open_account_placed(
                 builder = builder
                     .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
                     .initialization_script_for_all_frames(b_guard_js)
-                    .initialization_script_for_all_frames(GESTURE_REPORT_JS)
-                    // Login detector: main frame only, so an iframe login
-                    // never offers to save for the top-level domain.
-                    .initialization_script(LOGIN_DETECTOR_JS)
+                    .initialization_script_for_all_frames(GESTURE_REPORT_JS);
+                // Login detector: main frame only, so an iframe login
+                // never offers to save for the top-level domain. Gated
+                // on the kill-switch (v0.18.27): off means no detector
+                // script at all in windows opened after the toggle.
+                if pw_detector {
+                    builder = builder.initialization_script(LOGIN_DETECTOR_JS);
+                }
+                builder = builder
                     .initialization_script(NAV_KEYS_JS)
                     .initialization_script(b_shortcuts_js);
                 if !b_cursor_js.is_empty() {
@@ -1717,6 +1714,9 @@ pub(crate) fn open_split_pane_webview(
     };
     let shortcuts_js = shortcuts_overlay_js(app);
     let cursor_js = saved_cursor_js(app);
+    // Login detector on/off is read once here (same rule as account
+    // windows): the build thread cannot borrow `app`.
+    let pw_detector = password_prompt_enabled(app);
     let guard_js = window_open_guard_js(&web_app.settings.popup_allowlist);
     let user_scripts = crate::userscripts::user_scripts_init_scripts(app, target_url.as_str());
     let cosmetic_css = adblock.cosmetic_css_for(target_url.as_str());
@@ -1784,10 +1784,13 @@ pub(crate) fn open_split_pane_webview(
                 builder = builder
                     .initialization_script_for_all_frames(TARGET_BLANK_SHIM_JS)
                     .initialization_script_for_all_frames(b_guard_js)
-                    .initialization_script_for_all_frames(GESTURE_REPORT_JS)
-                    // Login detector: main frame only (see the account
-                    // builder for why).
-                    .initialization_script(LOGIN_DETECTOR_JS)
+                    .initialization_script_for_all_frames(GESTURE_REPORT_JS);
+                // Login detector: main frame only (see the account
+                // builder for why). Gated on the kill-switch (v0.18.27).
+                if pw_detector {
+                    builder = builder.initialization_script(LOGIN_DETECTOR_JS);
+                }
+                builder = builder
                     .initialization_script(NAV_KEYS_JS)
                     .initialization_script(b_shortcuts_js);
                 if !b_cursor_js.is_empty() {
@@ -2892,6 +2895,10 @@ pub(crate) const GESTURE_REPORT_JS: &str = r#"(function () {
 /// the page after login via `staged_password_state`; logins that stay
 /// on the page (AJAX) show it shortly after submit.
 pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
+  // The whole detector runs inside one try: a hostile page or a
+  // WebView quirk must never break the page it runs in — any error
+  // here just disables the password prompts for this page load.
+  try {
   var BAR = "position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;gap:10px;padding:8px 14px;background:#1e2025;color:#eceef1;font:13px/1.4 system-ui,sans-serif;border-bottom:1px solid #3a3e45;box-shadow:0 2px 12px rgba(0,0,0,.4);";
   var SAVE = "background:#8b5cf6;color:#fff;border:none;border-radius:4px;padding:4px 12px;font:13px system-ui,sans-serif;cursor:pointer;flex:none;";
   var GHOST = "background:transparent;color:#b9bec7;border:1px solid #3a3e45;border-radius:4px;padding:4px 12px;font:13px system-ui,sans-serif;cursor:pointer;flex:none;";
@@ -2970,15 +2977,6 @@ pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
     document.body.appendChild(pill);
     fillPill = pill;
   }
-  var fillTimer = null;
-  function scheduleCheckFill() {
-    if (fillChecked || fillTimer) return;
-    fillTimer = setTimeout(function () {
-      fillTimer = null;
-      checkFill();
-    }, 400);
-  }
-
   function checkFill() {
     if (fillChecked) return;
     if (!document.querySelector('input[type="password"]')) return;
@@ -3022,11 +3020,8 @@ pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
     setTimeout(checkStaged, 800);
     checkFill();
     if (window.MutationObserver && document.body) {
-      fillObs = new MutationObserver(scheduleCheckFill);
+      fillObs = new MutationObserver(function () { checkFill(); });
       fillObs.observe(document.body, { childList: true, subtree: true });
-      setTimeout(function () {
-        if (fillObs) { fillObs.disconnect(); fillObs = null; }
-      }, 15000);
     }
     // Back/forward-cache restores do not re-run init scripts or
     // DOMContentLoaded, so the fill/save prompts would never appear
@@ -3044,6 +3039,7 @@ pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
   } else {
     onReady();
   }
+  } catch (e) {}
 })();"##;
 
 /// v0.18.9: window.open guard. Popups the user didn't ask for come from
@@ -3125,6 +3121,17 @@ pub(crate) const NAV_KEYS_JS: &str = r#"(function () {
   }, true);
 })();
 "#;
+
+/// Whether the in-page login detector runs (v0.18.27 kill-switch for
+/// the v0.18.26 password prompts). The settings live in managed state;
+/// the disk load is only a fallback for calls made before the state is
+/// registered. Read at window-build time, so toggling it off stops the
+/// detector attaching to windows opened after the toggle.
+pub(crate) fn password_prompt_enabled(app: &AppHandle) -> bool {
+    app.try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.password_prompt_enabled))
+        .unwrap_or_else(|| crate::launcher_settings::load(app).password_prompt_enabled)
+}
 
 /// F1 shortcut cheatsheet overlay (v0.13.5).
 ///
@@ -5989,8 +5996,6 @@ mod tests {
         assert!(WEBVIEW2_BROWSER_ARGS.contains("disable-backgrounding-occluded-windows"));
         assert!(WEBVIEW2_BROWSER_ARGS.contains("disable-renderer-backgrounding"));
         assert!(WEBVIEW2_BROWSER_ARGS.contains("autoplay-policy=no-user-gesture-required"));
-        assert!(!WEBVIEW2_BROWSER_ARGS.contains("disable-gpu-compositing"));
-        assert!(!WEBVIEW2_BROWSER_ARGS.contains("disable-direct-composition-video-overlays"));
         // The 256 MB heap cap was dropped in v0.16.6 (see the const).
         assert!(!WEBVIEW2_BROWSER_ARGS.contains("max-old-space-size"));
     }
@@ -6272,6 +6277,9 @@ mod tests {
         // The offer text and the quiet fill prompt.
         assert!(LOGIN_DETECTOR_JS.contains("Save password for "));
         assert!(LOGIN_DETECTOR_JS.contains("Fill login for "));
+        // The whole detector runs inside one try: a hostile page or a
+        // WebView quirk must never break the page it runs in.
+        assert!(LOGIN_DETECTOR_JS.contains("} catch (e) {}"));
         // The password is handed to Rust and the page copy dropped —
         // it must never sit in a page variable after staging.
         assert!(LOGIN_DETECTOR_JS.contains("pw = \"\""));

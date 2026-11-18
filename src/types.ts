@@ -190,6 +190,11 @@ export interface LauncherSettings {
    */
   alt_drag_move: boolean;
   /**
+   * Offer to save passwords in account webviews (v0.18.26 detector,
+   * kill-switch v0.18.27). Backend always sends it (serde default).
+   */
+  password_prompt_enabled: boolean;
+  /**
    * Custom launcher sections (v0.18.20), in creation order. Backend
    * always sends it (serde default).
    */

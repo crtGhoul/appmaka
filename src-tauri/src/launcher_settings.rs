@@ -152,6 +152,15 @@ pub struct LauncherSettings {
     /// Old files migrate to true.
     #[serde(default = "default_true")]
     pub alt_drag_move: bool,
+    /// Offer to save passwords in account webviews (v0.18.26 detector,
+    /// kill-switch added v0.18.27): when false, the login detector init
+    /// script is not attached to account, split-pane, or tabbed windows
+    /// opened after the toggle — so a bad page interaction can be
+    /// switched off from the launcher without reinstalling. Applies to
+    /// windows opened after the change, not already-open ones.
+    /// Old files migrate to true.
+    #[serde(default = "default_true")]
+    pub password_prompt_enabled: bool,
     /// Global popup override (v0.13.9): when true, popups open as plain
     /// contained windows in every app, regardless of the per-app popup
     /// policy/allowlist. Read live at popup time by the new-window
@@ -324,6 +333,7 @@ impl Default for LauncherSettings {
             custom_cursor: default_custom_cursor(),
             open_as_tabbed: false,
             alt_drag_move: true,
+            password_prompt_enabled: true,
             allow_popups_globally: false,
             auto_allow_permissions: false,
             auto_hide_top_bar: false,
@@ -861,6 +871,25 @@ pub fn set_alt_drag_move(
     Ok(settings.clone())
 }
 
+/// Set whether the in-page login detector runs (v0.18.27 kill-switch for
+/// the v0.18.26 password prompts). JS:
+/// `invoke("set_password_prompt_enabled", { enabled })`. Applies to
+/// windows opened after the toggle; already-open windows keep whatever
+/// they were built with until reopened.
+#[tauri::command]
+pub fn set_password_prompt_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<LauncherSettings, String> {
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.password_prompt_enabled = enabled;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
 /// Set the global popup override (v0.13.9). JS:
 /// `invoke("set_allow_popups_globally", { enabled })`. No window
 /// broadcast needed: the popup handler reads the setting live on
@@ -1084,6 +1113,17 @@ mod tests {
         let s: LauncherSettings =
             serde_json::from_str(r#"{"alt_drag_move":false}"#).unwrap();
         assert!(!s.alt_drag_move);
+    }
+
+    #[test]
+    fn password_prompt_defaults_on_and_round_trips() {
+        // Old files without the field migrate to on (the default).
+        let s: LauncherSettings = serde_json::from_str("{}").unwrap();
+        assert!(s.password_prompt_enabled);
+        assert!(LauncherSettings::default().password_prompt_enabled);
+        let s: LauncherSettings =
+            serde_json::from_str(r#"{"password_prompt_enabled":false}"#).unwrap();
+        assert!(!s.password_prompt_enabled);
     }
 
     #[test]

@@ -634,10 +634,14 @@ fn build_tabbed_window(
                     .on_download(crate::downloads::make_download_handler(window_app.clone()))
                     .initialization_script_for_all_frames(crate::windows::TARGET_BLANK_SHIM_JS)
                     .initialization_script_for_all_frames(guard_js)
-                    .initialization_script_for_all_frames(crate::windows::GESTURE_REPORT_JS)
-                    // Login detector: main frame only (see the account
-                    // builder for why).
-                    .initialization_script(crate::windows::LOGIN_DETECTOR_JS)
+                    .initialization_script_for_all_frames(crate::windows::GESTURE_REPORT_JS);
+                // Login detector: main frame only (see the account
+                // builder for why). Gated on the kill-switch (v0.18.27).
+                if crate::windows::password_prompt_enabled(&window_app) {
+                    builder =
+                        builder.initialization_script(crate::windows::LOGIN_DETECTOR_JS);
+                }
+                builder = builder
                     .initialization_script(crate::windows::NAV_KEYS_JS)
                     .initialization_script(crate::windows::shortcuts_overlay_js(&window_app));
                 if !adblock_css.is_empty() {

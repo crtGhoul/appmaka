@@ -1990,6 +1990,7 @@ fn main() {
             launcher_settings::set_dictation_compat,
             launcher_settings::set_open_as_tabbed,
             launcher_settings::set_alt_drag_move,
+            launcher_settings::set_password_prompt_enabled,
             launcher_settings::set_allow_popups_globally,
             launcher_settings::set_auto_allow_permissions,
             launcher_settings::set_auto_hide_top_bar,
