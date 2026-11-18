@@ -3955,10 +3955,10 @@ function AppShell() {
   }
 
   // v0.7.0: built-in launcher commands (=calc, >system, ?web-search,
-  // URL quick-add). Prefix commands take precedence over app/program
-  // matches; quick-add only appears when nothing else matched.
+  // URL open-url). Prefix commands take precedence over app/program
+  // matches; open-url only appears when nothing else matched.
   const command = useMemo(
-    () => matchLauncherCommand(query, query.trim() !== "" && items.length === 0),
+    () => matchLauncherCommand(query, items.length > 0),
     [query, items]
   );
   const cmdRef = useRef<LauncherCommandRowsHandle>(null);
