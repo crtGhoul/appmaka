@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.3.4
-// @description  Lag-free auto-allow for muse.ai agents: auto-clicks "A task needs review" banner, "Allow" / "Approve" modals, keep-alive heartbeat, and HUD indicator.
+// @version      1.3.5
+// @description  Lag-free auto-allow for muse.ai agents: auto-clicks "A task needs review" banner, "Allow" / "Approve" modals, "Send" email action prompts, keep-alive heartbeat, and HUD indicator.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
 // @match        *muse.ai*
@@ -21,10 +21,11 @@
   }
   window.__museKeeperInitialized = true;
 
-  const KEEPER_VERSION = '1.3.4';
+  const KEEPER_VERSION = '1.3.5';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
+  let sentCount = 0;
   let lastHeartbeatTime = Date.now();
 
   const clickedElements = new WeakSet();
@@ -82,11 +83,14 @@
   }, 30000);
 
   // =========================================================================
-  // 2. AUTO-ALLOW & REVIEW ENGINE (v1.3.4)
+  // 2. AUTO-ALLOW, REVIEW & SEND ENGINE (v1.3.5)
   // =========================================================================
 
   const STRICT_ALLOW_REGEX = /^(allow|allow once|always allow|allow all|allow access|grant permission|grant access|approve|approve all|confirm action|proceed|accept)$/i;
-  const FORBIDDEN_REGEX = /\b(deny|block|cancel|reject|dismiss|delete|remove|never|refuse|quit|exit|close)\b/i;
+  const STRICT_REVIEW_REGEX = /^(review|review task|review changes)$/i;
+  const STRICT_SEND_REGEX = /^(send|send email|send now)$/i;
+  // Strictly forbid negative actions, including "Don't send", "Don't allow", etc.
+  const FORBIDDEN_REGEX = /\b(deny|block|cancel|reject|dismiss|delete|remove|never|refuse|quit|exit|close|don'?t|do not)\b/i;
 
   function isVisibleFast(el) {
     if (!el || !el.isConnected) return false;
@@ -100,6 +104,15 @@
       return true;
     }
     return false;
+  }
+
+  function isHistoricalEntry(el) {
+    if (!el) return false;
+    const card = el.closest('div, li, section');
+    if (!card) return false;
+    const text = (card.innerText || card.textContent || '').toLowerCase();
+    // Historical permission log cards (e.g., "Timed out • Oct 23", "Allowed • Oct 18")
+    return text.includes('timed out') || text.includes('allowed •') || text.includes('denied •');
   }
 
   function triggerTrustedClick(el) {
@@ -144,7 +157,7 @@
 
   function handleAllowButton(btn) {
     if (isPaused || !btn || clickedElements.has(btn) || btn.disabled) return false;
-    if (!isVisibleFast(btn) || isExcluded(btn)) return false;
+    if (!isVisibleFast(btn) || isExcluded(btn) || isHistoricalEntry(btn)) return false;
     if (btn.dataset.museKeeperHandled === 'true') return false;
 
     const rawText = (btn.innerText || btn.textContent || '').trim();
@@ -155,7 +168,7 @@
     if (FORBIDDEN_REGEX.test(rawText) || FORBIDDEN_REGEX.test(ariaLabel)) return false;
 
     const cleanLabel = label.trim().toLowerCase();
-    if (STRICT_ALLOW_REGEX.test(cleanLabel) || cleanLabel === 'allow' || cleanLabel === 'always allow' || cleanLabel === 'approve') {
+    if (STRICT_ALLOW_REGEX.test(cleanLabel)) {
       clickedElements.add(btn);
       btn.dataset.museKeeperHandled = 'true';
       allowedCount++;
@@ -168,25 +181,75 @@
     return false;
   }
 
+  function handleSendButton(btn) {
+    if (isPaused || !btn || clickedElements.has(btn) || btn.disabled) return false;
+    if (!isVisibleFast(btn) || isExcluded(btn) || isHistoricalEntry(btn)) return false;
+    if (btn.dataset.museKeeperHandled === 'true') return false;
+
+    const rawText = (btn.innerText || btn.textContent || '').trim();
+    const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
+    const label = rawText || ariaLabel;
+    if (!label) return false;
+
+    // Reject "Don't send" strictly
+    if (FORBIDDEN_REGEX.test(rawText) || FORBIDDEN_REGEX.test(ariaLabel)) return false;
+
+    // Normalize text (strip chevrons, down arrows, whitespace)
+    const cleanLabel = label.replace(/[\u25bc\u25be\u2304\u2193\u25bd\s]+/g, ' ').trim().toLowerCase();
+    if (!STRICT_SEND_REGEX.test(cleanLabel)) return false;
+
+    // Safety guard: only click Send if inside an action authorization prompt
+    // (e.g. "Allow Pronox to send this email in Gmail", or has a sibling "Don't send" button)
+    const container = btn.closest('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="card" i], [class*="popup" i], [class*="prompt" i], div');
+    const containerText = container ? (container.innerText || container.textContent || '').toLowerCase() : '';
+
+    const hasSendPromptContext =
+      /allow .* to send|send this email|scheduled task|permission/i.test(containerText) ||
+      /don'?t send/i.test(containerText);
+
+    if (!hasSendPromptContext) {
+      // Avoid accidental clicks on standard chat compose send buttons
+      return false;
+    }
+
+    clickedElements.add(btn);
+    btn.dataset.museKeeperHandled = 'true';
+    sentCount++;
+    log(`⚡ Auto-pressed [Send]: "${label}"`, btn);
+    triggerTrustedClick(btn);
+    showNotification(`Auto-Sent: ${label.slice(0, 20)}`);
+    updateHud();
+    return true;
+  }
+
   function handleReviewElement(el) {
     if (isPaused || !el || clickedElements.has(el)) return false;
-    if (!isVisibleFast(el) || isExcluded(el)) return false;
+    if (!isVisibleFast(el) || isExcluded(el) || isHistoricalEntry(el)) return false;
     if (el.dataset.museKeeperHandled === 'true') return false;
+
+    const rawText = (el.innerText || el.textContent || '').trim();
+    const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+    const label = rawText || ariaLabel;
+
+    // Critical fix: button label must be short (<= 25 chars) and strictly match "Review"
+    // Never match sentences like "Review before sharing"
+    if (!label || label.length > 25) return false;
+    if (FORBIDDEN_REGEX.test(rawText) || FORBIDDEN_REGEX.test(ariaLabel)) return false;
+
+    const cleanLabel = label.toLowerCase().trim();
+    if (!STRICT_REVIEW_REGEX.test(cleanLabel)) return false;
 
     // Cooldown check (don't click multiple review buttons within 500ms)
     const now = Date.now();
     if (now - lastActionTime < 500) return false;
 
-    const rawText = (el.innerText || el.textContent || '').trim();
-    if (FORBIDDEN_REGEX.test(rawText)) return false;
-
     clickedElements.add(el);
     el.dataset.museKeeperHandled = 'true';
     lastActionTime = now;
     reviewedCount++;
-    log(`⚡ Auto-opened [Review] drawer: "${rawText.slice(0, 30)}"`, el);
+    log(`⚡ Auto-opened [Review] drawer: "${label}"`, el);
     triggerTrustedClick(el);
-    showNotification(`Auto-Review: ${rawText.slice(0, 20)}`);
+    showNotification(`Auto-Review: ${label}`);
     updateHud();
     triggerReviewBurst();
     return true;
@@ -196,53 +259,41 @@
     if (isPaused || !root) return;
 
     // --- STEP 1: Scan for "A task needs review" banner & Review button ---
-    const allCandidates = root.querySelectorAll('button, [role="button"], a, span, div, p');
-    let reviewHandled = false;
+    const allButtons = root.querySelectorAll('button, [role="button"], a');
+    for (let i = 0; i < allButtons.length; i++) {
+      const btn = allButtons[i];
+      if (!isVisibleFast(btn) || isExcluded(btn) || isHistoricalEntry(btn)) continue;
 
-    for (let i = 0; i < allCandidates.length; i++) {
-      const el = allCandidates[i];
-      if (!isVisibleFast(el) || isExcluded(el) || clickedElements.has(el)) continue;
-
-      const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-
-      // Case A: Element text is strictly "Review" or "Review changes" or "Needs review"
-      if (txt === 'review' || txt === 'review changes' || txt === 'needs review' || txt === 'review task') {
-        const clickable = el.closest('button, [role="button"], a') || el;
-        if (handleReviewElement(clickable)) {
-          reviewHandled = true;
-          break;
-        }
+      const txt = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+      if (STRICT_REVIEW_REGEX.test(txt)) {
+        handleReviewElement(btn);
       }
     }
 
-    if (!reviewHandled) {
-      // Case B: Search for container having "needs review" or "task needs review"
-      const banners = root.querySelectorAll('div, [role="alert"], [class*="banner" i], [class*="card" i], footer, section');
-      for (let i = 0; i < banners.length; i++) {
-        const b = banners[i];
-        if (!isVisibleFast(b) || isExcluded(b)) continue;
-        const bText = (b.innerText || b.textContent || '').toLowerCase();
-        if (bText.includes('task needs review') || bText.includes('needs review')) {
-          const clickables = b.querySelectorAll('button, [role="button"], a, span, div');
-          for (let j = 0; j < clickables.length; j++) {
-            const c = clickables[j];
-            const cText = (c.innerText || c.textContent || '').trim().toLowerCase();
-            if (cText === 'review' || cText.includes('review') || c.classList.contains('text-blue-500') || c.getAttribute('role') === 'button') {
-              if (handleReviewElement(c)) {
-                reviewHandled = true;
-                break;
-              }
-            }
+    // Step 1b: Search specifically inside review banner containers
+    const banners = root.querySelectorAll('[role="alert"], [class*="banner" i], footer, section');
+    for (let i = 0; i < banners.length; i++) {
+      const b = banners[i];
+      if (!isVisibleFast(b) || isExcluded(b) || isHistoricalEntry(b)) continue;
+      const bText = (b.innerText || b.textContent || '').toLowerCase();
+      if (bText.includes('task needs review') || bText.includes('needs review')) {
+        const clickables = b.querySelectorAll('button, [role="button"], a, span, div');
+        for (let j = 0; j < clickables.length; j++) {
+          const c = clickables[j];
+          const cText = (c.innerText || c.textContent || '').trim().toLowerCase();
+          if (STRICT_REVIEW_REGEX.test(cText)) {
+            handleReviewElement(c);
+            break;
           }
-          if (reviewHandled) break;
         }
       }
     }
 
     // --- STEP 2: Scan for "Allow" / "Approve" buttons (e.g. in opened modal/drawer) ---
-    const buttons = root.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]');
-    for (let i = 0; i < buttons.length; i++) {
-      handleAllowButton(buttons[i]);
+    const actionButtons = root.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]');
+    for (let i = 0; i < actionButtons.length; i++) {
+      handleAllowButton(actionButtons[i]);
+      handleSendButton(actionButtons[i]);
     }
   }
 
@@ -388,11 +439,13 @@
     hudDotEl.style.boxShadow = '0 0 5px #10b981';
     if (hudEl) hudEl.style.borderColor = 'rgba(168, 85, 247, 0.5)';
 
-    const total = allowedCount + reviewedCount;
+    const total = allowedCount + reviewedCount + sentCount;
     if (total > 0) {
-      hudTextEl.innerText = reviewedCount > 0
-        ? `MKALL: ${allowedCount} (rev: ${reviewedCount})`
-        : `MKALL: ${allowedCount}`;
+      const parts = [];
+      if (allowedCount > 0) parts.push(`all: ${allowedCount}`);
+      if (sentCount > 0) parts.push(`send: ${sentCount}`);
+      if (reviewedCount > 0) parts.push(`rev: ${reviewedCount}`);
+      hudTextEl.innerText = `MKALL: ${parts.join(', ')}`;
     } else {
       hudTextEl.innerText = 'MKALL: 0';
     }

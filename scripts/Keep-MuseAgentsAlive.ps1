@@ -22,13 +22,11 @@ public static class Power {
 # ES_CONTINUOUS (0x80000000) = keep the setting until we clear it.
 # ES_SYSTEM_REQUIRED (0x00000001) = system must not sleep.
 # ES_DISPLAY_REQUIRED (0x00000002) = display must not turn off.
-# ES_AWAYMODE_REQUIRED (0x00000040) = keep the machine "awake" for background work.
 $ES_CONTINUOUS       = 0x80000000
 $ES_SYSTEM_REQUIRED  = 0x00000001
 $ES_DISPLAY_REQUIRED = 0x00000002
-$ES_AWAYMODE_REQUIRED = 0x00000040
 
-$flags = $ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED -bor $ES_DISPLAY_REQUIRED -bor $ES_AWAYMODE_REQUIRED
+$flags = $ES_CONTINUOUS -bor $ES_SYSTEM_REQUIRED -bor $ES_DISPLAY_REQUIRED
 [Power]::SetThreadExecutionState($flags) | Out-Null
 
 Write-Host "Keep-MuseAgentsAlive is running."
