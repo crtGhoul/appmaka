@@ -3252,7 +3252,7 @@ export async function requestEditApp(appId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// v0.7.0 — launcher command bar: built-in commands + quick-add
+// v0.7.0 — launcher command bar: built-in commands + open-url
 //
 // Pure matching logic plus one small rows component. The overlay wiring
 // (App.tsx, owned by the coordinator) is roughly:
@@ -3263,7 +3263,7 @@ export async function requestEditApp(appId: string): Promise<void> {
 //        onError={setError} /> above/beside the grid when `command` is non-null,
 //   and route Enter to cmdRef.current?.activate() while a command is shown.
 // Prefix commands (=, >, ?) take precedence over app/program matches;
-// quick-add only appears when nothing else matched.
+// open-url only appears when nothing else matched.
 // ---------------------------------------------------------------------------
 
 /** Actions for `system_command`. Single words, so JS casing matches Rust. */
@@ -3288,13 +3288,13 @@ export type LauncherCommand =
   | { kind: "system-unknown"; text: string }
   /** `?query` — web search. */
   | { kind: "web-search"; query: string }
-  /** URL-like input with no other matches — "Add <domain> as app…". */
-  | { kind: "quick-add"; domain: string; url: string };
+  /** URL-like input with no other matches — "Open <domain>", with an Add button keeping the library flow. */
+  | { kind: "open-url"; domain: string; url: string };
 
 /**
  * Match the launcher input against the built-in commands. Pure — no
  * backend calls, ~0 RAM. `hasOtherResults` is whether the normal
- * app/program search already matched something (quick-add only shows
+ * app/program search already matched something (open-url only shows
  * when it didn't).
  */
 export function matchLauncherCommand(
@@ -3336,7 +3336,7 @@ export function matchLauncherCommand(
     } catch {
       /* keep the raw input as the label */
     }
-    return { kind: "quick-add", domain, url };
+    return { kind: "open-url", domain, url };
   }
 
   return null;
@@ -3380,7 +3380,7 @@ export interface LauncherCommandRowsHandle {
 
 /**
  * The command rows for the launcher overlay. One row per matched command
- * (calc result, system command, web search, quick-add) or a quiet hint
+ * (calc result, system command, web search, open-url) or a quiet hint
  * row for unknown/invalid input.
  *
  * Confirm gating (logic-reviewed): the FIRST activation of a shutdown or
@@ -3388,7 +3388,7 @@ export interface LauncherCommandRowsHandle {
  * [Shut down] [Cancel]") and moves focus to the confirm button.
  * `invoke("system_command", { action: "shutdown" | "restart" })` is called
  * solely from that confirm button's onClick — a single Enter can never
- * fire a destructive command. Lock/sleep/web-search/quick-add run on
+ * fire a destructive command. Lock/sleep/web-search/open-url run on
  * activation directly.
  */
 export const LauncherCommandRows = forwardRef<
@@ -3442,8 +3442,8 @@ export const LauncherCommandRows = forwardRef<
       case "web-search":
         void fire(() => openWebSearch(command.query));
         break;
-      case "quick-add":
-        void fire(() => quickAddFromLauncher(command.url));
+      case "open-url":
+        void fire(() => openWebSearch(command.url));
         break;
       default:
         break; // system-unknown: hint row — nothing to run
@@ -3527,12 +3527,26 @@ export const LauncherCommandRows = forwardRef<
             </span>
           </div>
         );
-      case "web-search":
+      case "web-search": {
+        // v0.18.28: a site address after `?` opens the site itself,
+        // like a browser address bar — the row says so.
+        const trimmed = command.query.trim();
+        const urlLike = URL_LIKE.test(trimmed);
+        let domain = trimmed;
+        if (urlLike) {
+          try {
+            domain = new URL(/^https?:\/\//i.test(domain) ? domain : `https://${domain}`).hostname;
+          } catch {
+            /* keep the raw input as the label */
+          }
+        }
         return (
           <div className="cmd-row-split">
             <button type="button" className="cmd-row" onClick={activate}>
-              <span className="cmd-title">Search the web for &lsquo;{command.query}&rsquo;</span>
-              <span className="cmd-sub">Opens as a web app</span>
+              <span className="cmd-title">
+                {urlLike ? `Open ${domain}` : `Search the web for ‘${command.query}’`}
+              </span>
+              <span className="cmd-sub">{urlLike ? "Opens the site directly" : "Opens as a web app"}</span>
             </button>
             {!searchPinned && onPinSearch && (
               <button
@@ -3546,12 +3560,23 @@ export const LauncherCommandRows = forwardRef<
             )}
           </div>
         );
-      case "quick-add":
+      }
+      case "open-url":
         return (
-          <button type="button" className="cmd-row" onClick={activate}>
-            <span className="cmd-title">Add {command.domain} as app…</span>
-            <span className="cmd-sub">Opens the sign-in flow to add it to your library</span>
-          </button>
+          <div className="cmd-row-split">
+            <button type="button" className="cmd-row" onClick={activate}>
+              <span className="cmd-title">Open {command.domain}</span>
+              <span className="cmd-sub">Opens the site directly</span>
+            </button>
+            <button
+              type="button"
+              className="cmd-pin-btn"
+              onClick={() => void fire(() => quickAddFromLauncher(command.url))}
+              title="Add this site to your library"
+            >
+              Add
+            </button>
+          </div>
         );
     }
   }
