@@ -1,15 +1,15 @@
 {
-  "version": "0.18.25",
-  "notes": "Downloads fixed on top of the working 0.18.22 launcher: the popup gesture reporter from 0.18.23 is back, so clicks in popup windows (including the Muse chat) arm the download gate again and files actually land in Downloads — open the popup fresh after updating. Also includes the 0.18.24 BOM handling (a UTF-8 BOM in apps.json no longer wipes the launcher) and the dark-mode dialog text fix. Verified here: 282 automated tests passing, zero clippy warnings on Linux and Windows targets, frontend build clean, and the Windows installer cross-built and signed on Linux (real-PC test still the gate — please test both launcher clicks AND a download in a freshly reopened Muse popup).",
-  "pub_date": "2026-11-14T22:42:31Z",
+  "version": "0.18.27",
+  "notes": "Save Password? banner is back, with a safety switch: Settings has an 'Offer to save passwords' checkbox \u2014 turn it off and reopen the window if a site ever shows a blank page. Passwords only ever live in the OS vault, never in files. The detector is also wrapped so a page error cannot break the page it runs in.",
+  "pub_date": "2026-11-18T00:28:58Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1V3TVRZTC9GKys1cGhJNHNWK2M1SVN1aEJXWFhGVkM5eE1NVkl2QWZ1QllyajUvWkZKK00vMUZBb29DZUxqZWNWUWRQMXdURFZqUExXeERYdFo2YmdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0Njk2MTQwCWZpbGU6QXBwTWFrYV8wLjE4LjI1X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjI1Cmo2Z1kvbkhOeGl5NC9mQkdXSUxTQjRDNW1uSlhsanhNS0pzR3VHbEx4RHdkSDJtZ0J2dS8ySndwVUo2ZjNGWlkxYXIrMU1TQXZZOUNJMmM5aEVwRURnPT0K",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.25/AppMaka_0.18.25_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1dGcmhGcDg3a2NXalAyMEhjNS80RWdUZnowc1VuZUhTWElhR0d5VnJ3T0FrTkJQVCtpYnlyOWtCbEwzMExQVUZBZlM0SDJZS3VTcnBrUU5Hd3grclFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTYxMzI1CWZpbGU6QXBwTWFrYV8wLjE4LjI3X3g2NC1zZXR1cC5leGUJdmVyc2lvbjowLjE4LjI3ClNDVHIvaEFOcndKMmlCNkptbDQzb045dWx1MGxvMHNoSEZvUGJzSVRNNmlUMnRFTDRJcCt2bklaN0J0VXZESWpscHU0SWZQVkNtUHBEa3FrTExoREN3PT0K",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.27/AppMaka_0.18.27_x64-setup.exe"
     },
     "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL2VaS0h5TGsxcEVkT0JsbTlubGtyeHhvb015a1VKNno2dlNpcWlZS2U0bGxkb2Rud3JCczRoemJsYVBsYVNqemNLQmFPaHBQN3U5Nm9nQ09qWWVMTWdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0Njk1ODcyCWZpbGU6QXBwTWFrYV8wLjE4LjI1X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yNQpYMVF0Tnd6SnFZT0FHUEJiZDB5ZWpYUlpiVFlkZUw5cHZRT0M5dXBKVkduMXhQNFc5QXZSSVNZbXpBZjROdkpYK2hOSzJMS1E0TDFmVk0zV0NkNGNEZz09Cg==",
-      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.25/AppMaka_0.18.25_amd64.AppImage"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSQm9Cenc1enJVL1dzakpMbEdwV3lveDA0STJrNmRrT0RPZmdsSGU5UFhBb3ZiaGZNMVZiYWdOSFRSS0U1SmIzdHZIL2pzOWZ5bHZ2VkZoeTd1SHVVZWVKQ0xNTnRTT3dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0OTYxNzA5CWZpbGU6QXBwTWFrYV8wLjE4LjI3X2FtZDY0LkFwcEltYWdlCXZlcnNpb246MC4xOC4yNwpDTjVSZ1pYZnJWRGFFaGFETUppa0RZSTVPamJjOE0weFZEVzVXdGRsVUo0TGQ0SFErMEJQZW5XUEVweUY2RTNoeTdKdVRUaG0rOHh3N1EyMWN5OVFEUT09Cg==",
+      "url": "https://codeberg.org/crtGhoul/appmaka/releases/download/v0.18.27/AppMaka_0.18.27_amd64.AppImage"
     }
   }
 }
