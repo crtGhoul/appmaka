@@ -1251,6 +1251,12 @@ export function LauncherSettingsPanel({
   const [altDragMove, setAltDragMove] = useState(
     settings.alt_drag_move ?? true
   );
+  // v0.18.27: kill-switch for the password save/fill prompts. Off means
+  // the login detector is not attached to windows opened after the
+  // toggle; already-open windows keep it until reopened.
+  const [passwordPromptEnabled, setPasswordPromptEnabled] = useState(
+    settings.password_prompt_enabled ?? true
+  );
   // v0.18.20: custom launcher sections.
   const [newSection, setNewSection] = useState("");
   const [sectionError, setSectionError] = useState<string | null>(null);
@@ -1630,6 +1636,25 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setAltDragMove(settings.alt_drag_move ?? true);
+    }
+  }
+
+  // v0.18.27: kill-switch for the password save/fill prompts. Applies
+  // to windows opened after the toggle.
+  async function handlePasswordPromptEnabled(enabled: boolean) {
+    setPasswordPromptEnabled(enabled);
+    setFormError(null);
+    try {
+      const updated = await invoke<LauncherSettings>(
+        "set_password_prompt_enabled",
+        { enabled }
+      );
+      onSaved(updated);
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setPasswordPromptEnabled(settings.password_prompt_enabled ?? true);
     }
   }
 
@@ -2057,6 +2082,23 @@ export function LauncherSettingsPanel({
           11 snap layouts work while dragging, including the snap flyout at
           the top of the screen. This also moves the launcher, which has no
           drag region of its own.
+        </span>
+      </label>
+
+      <label className="inline-form">
+        <span>Offer to save passwords</span>
+        <input
+          type="checkbox"
+          checked={passwordPromptEnabled}
+          onChange={(e) =>
+            void handlePasswordPromptEnabled(e.target.checked)
+          }
+          aria-label="Offer to save passwords"
+        />
+        <span className="help">
+          After you sign in on a site, offer to save the login and offer
+          to fill it next time. Turn this off if a site ever shows a
+          blank page, then reopen the window.
         </span>
       </label>
 
