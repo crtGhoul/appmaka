@@ -45,6 +45,7 @@ const DEFAULT_LAUNCHER_SETTINGS: LauncherSettings = {
   custom_cursor_color: "violet",
   open_as_tabbed: false,
   alt_drag_move: true,
+  password_prompt_enabled: true,
   custom_sections: [],
   allow_popups_globally: false,
   auto_allow_permissions: false,
@@ -650,6 +651,12 @@ if (typeof window !== "undefined") {
           launcherSettings = writeStorage("appmaka:launcher", {
             ...launcherSettings,
             alt_drag_move: Boolean(args.enabled),
+          });
+          return launcherSettings;
+        case "set_password_prompt_enabled":
+          launcherSettings = writeStorage("appmaka:launcher", {
+            ...launcherSettings,
+            password_prompt_enabled: Boolean(args.enabled),
           });
           return launcherSettings;
         case "set_allow_popups_globally":
