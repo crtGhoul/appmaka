@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.3.5
-// @description  Lag-free auto-allow for muse.ai agents: auto-clicks "A task needs review" banner, "Allow" / "Approve" modals, "Send" email action prompts, keep-alive heartbeat, and HUD indicator.
+// @version      1.3.6
+// @description  Lag-free auto-allow for muse.ai agents: prefers "Always allow" / "Always send" dropdown options, auto-clicks "A task needs review" banner, "Allow" / "Approve" modals, "Send" prompts, keep-alive heartbeat, and HUD indicator.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
 // @match        *muse.ai*
@@ -21,11 +21,12 @@
   }
   window.__museKeeperInitialized = true;
 
-  const KEEPER_VERSION = '1.3.5';
+  const KEEPER_VERSION = '1.3.6';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
   let sentCount = 0;
+  let alwaysCount = 0;
   let lastHeartbeatTime = Date.now();
 
   const clickedElements = new WeakSet();
@@ -83,12 +84,14 @@
   }, 30000);
 
   // =========================================================================
-  // 2. AUTO-ALLOW, REVIEW & SEND ENGINE (v1.3.5)
+  // 2. AUTO-ALLOW, ALWAYS-ALLOW, REVIEW & SEND ENGINE (v1.3.6)
   // =========================================================================
 
   const STRICT_ALLOW_REGEX = /^(allow|allow once|always allow|allow all|allow access|grant permission|grant access|approve|approve all|confirm action|proceed|accept)$/i;
   const STRICT_REVIEW_REGEX = /^(review|review task|review changes)$/i;
   const STRICT_SEND_REGEX = /^(send|send email|send now)$/i;
+  const ALWAYS_ALLOW_REGEX = /^(always allow|always send|always allow send|always permit|allow always|always allow for .*|always allow .*)$/i;
+
   // Strictly forbid negative actions, including "Don't send", "Don't allow", etc.
   const FORBIDDEN_REGEX = /\b(deny|block|cancel|reject|dismiss|delete|remove|never|refuse|quit|exit|close|don'?t|do not)\b/i;
 
@@ -117,7 +120,7 @@
 
   function triggerTrustedClick(el) {
     if (!el) return;
-    const target = el.closest('button, [role="button"], a') || el;
+    const target = el.closest('button, [role="button"], [role="menuitem"], [role="option"], a') || el;
     try { target.focus(); } catch (_) {}
 
     const mouseEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
@@ -147,12 +150,66 @@
   }
 
   function triggerReviewBurst() {
-    const delays = [80, 200, 450, 800, 1300, 1900];
+    const delays = [60, 150, 300, 500, 900, 1500];
     delays.forEach((ms) => {
       setTimeout(() => {
         if (!isPaused) scanAndHandle(document);
       }, ms);
     });
+  }
+
+  // Helper to check "Remember my choice" / "Always allow" checkboxes
+  function tryCheckRememberOption(container) {
+    if (!container) return;
+    const checkboxes = container.querySelectorAll('input[type="checkbox"], [role="checkbox"]');
+    for (let i = 0; i < checkboxes.length; i++) {
+      const cb = checkboxes[i];
+      if (cb.checked || cb.getAttribute('aria-checked') === 'true') continue;
+      const parentText = (cb.parentElement?.innerText || cb.closest('label')?.innerText || '').toLowerCase();
+      if (parentText.includes('always') || parentText.includes('remember') || parentText.includes("don't ask")) {
+        log('⚡ Auto-checked remember/always checkbox', cb);
+        try { cb.click(); } catch (_) {}
+      }
+    }
+  }
+
+  // Find any active "Always allow" / "Always send" menu item or button
+  function findAlwaysOption(root) {
+    const candidates = (root || document).querySelectorAll(
+      '[role="menuitem"], [role="option"], button, [role="button"], li, a, div[tabindex]'
+    );
+    for (let i = 0; i < candidates.length; i++) {
+      const it = candidates[i];
+      if (!isVisibleFast(it) || isExcluded(it) || isHistoricalEntry(it) || clickedElements.has(it)) continue;
+      if (it.dataset.museKeeperHandled === 'true') continue;
+
+      const rawText = (it.innerText || it.textContent || '').trim();
+      const ariaLabel = (it.getAttribute('aria-label') || '').trim();
+      const label = rawText || ariaLabel;
+      if (!label || label.length > 45) continue;
+      if (FORBIDDEN_REGEX.test(rawText) || FORBIDDEN_REGEX.test(ariaLabel)) continue;
+
+      const clean = label.replace(/[\u25bc\u25be\u2304\u2193\u25bd\s]+/g, ' ').trim().toLowerCase();
+      if (ALWAYS_ALLOW_REGEX.test(clean) || clean === 'always allow' || clean === 'always send' || clean === 'always allow send' || clean.startsWith('always allow')) {
+        return it;
+      }
+    }
+    return null;
+  }
+
+  function handleAlwaysOption(item) {
+    if (isPaused || !item || clickedElements.has(item)) return false;
+    clickedElements.add(item);
+    item.dataset.museKeeperHandled = 'true';
+    alwaysCount++;
+    allowedCount++;
+    const label = (item.innerText || item.textContent || 'Always Allow').trim();
+    log(`⚡ Auto-selected [Always Allow]: "${label}"`, item);
+    triggerTrustedClick(item);
+    showNotification(`Auto-Selected: ${label.slice(0, 24)}`);
+    updateHud();
+    triggerReviewBurst();
+    return true;
   }
 
   function handleAllowButton(btn) {
@@ -169,6 +226,9 @@
 
     const cleanLabel = label.trim().toLowerCase();
     if (STRICT_ALLOW_REGEX.test(cleanLabel)) {
+      const container = btn.closest('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="card" i], div');
+      tryCheckRememberOption(container);
+
       clickedElements.add(btn);
       btn.dataset.museKeeperHandled = 'true';
       allowedCount++;
@@ -212,6 +272,54 @@
       return false;
     }
 
+    tryCheckRememberOption(container);
+
+    // ── Check for split dropdown chevron next to Send ──
+    const splitGroup = btn.parentElement;
+    let dropdownToggle = null;
+    if (splitGroup) {
+      const candidates = splitGroup.querySelectorAll('button, [role="button"]');
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        if (c === btn || c.disabled || !isVisibleFast(c)) continue;
+        const cText = (c.innerText || c.textContent || '').trim().toLowerCase();
+        if (FORBIDDEN_REGEX.test(cText)) continue;
+        // The split toggle is typically empty with an SVG chevron, or has "▼", "▾", "v"
+        if (cText === '' || cText === '▾' || cText === '▼' || cText === 'v' || c.querySelector('svg')) {
+          dropdownToggle = c;
+          break;
+        }
+      }
+    }
+
+    // If split dropdown exists and hasn't been opened yet, open it to select "Always allow send"
+    if (dropdownToggle && !btn.dataset.museKeeperDropdownOpened) {
+      btn.dataset.museKeeperDropdownOpened = 'true';
+      log('⚡ Opening split dropdown to select "Always allow send"...', dropdownToggle);
+      triggerTrustedClick(dropdownToggle);
+
+      setTimeout(() => {
+        if (isPaused) return;
+        const alwaysItem = findAlwaysOption(document);
+        if (alwaysItem) {
+          handleAlwaysOption(alwaysItem);
+        } else {
+          // Fallback: If no "Always" option appeared, click the main Send button
+          if (!clickedElements.has(btn) && btn.dataset.museKeeperHandled !== 'true') {
+            clickedElements.add(btn);
+            btn.dataset.museKeeperHandled = 'true';
+            sentCount++;
+            log(`⚡ Auto-pressed [Send] (fallback): "${label}"`, btn);
+            triggerTrustedClick(btn);
+            showNotification(`Auto-Sent: ${label.slice(0, 20)}`);
+            updateHud();
+          }
+        }
+      }, 250);
+      return true;
+    }
+
+    // Direct Send click
     clickedElements.add(btn);
     btn.dataset.museKeeperHandled = 'true';
     sentCount++;
@@ -258,7 +366,14 @@
   function scanAndHandle(root) {
     if (isPaused || !root) return;
 
-    // --- STEP 1: Scan for "A task needs review" banner & Review button ---
+    // ── PRIORITY 0: Check if an "Always allow" / "Always send" option is open ──
+    const alwaysOption = findAlwaysOption(root);
+    if (alwaysOption) {
+      handleAlwaysOption(alwaysOption);
+      return;
+    }
+
+    // ── PRIORITY 1: Scan for "A task needs review" banner & Review button ──
     const allButtons = root.querySelectorAll('button, [role="button"], a');
     for (let i = 0; i < allButtons.length; i++) {
       const btn = allButtons[i];
@@ -289,11 +404,14 @@
       }
     }
 
-    // --- STEP 2: Scan for "Allow" / "Approve" buttons (e.g. in opened modal/drawer) ---
+    // ── PRIORITY 2: Scan for "Send" and "Allow" action buttons ──
     const actionButtons = root.querySelectorAll('button, [role="button"], a, input[type="button"], input[type="submit"]');
     for (let i = 0; i < actionButtons.length; i++) {
+      // Check Send first (which can pop open the split dropdown to select "Always send")
+      if (handleSendButton(actionButtons[i])) {
+        continue;
+      }
       handleAllowButton(actionButtons[i]);
-      handleSendButton(actionButtons[i]);
     }
   }
 
@@ -442,7 +560,8 @@
     const total = allowedCount + reviewedCount + sentCount;
     if (total > 0) {
       const parts = [];
-      if (allowedCount > 0) parts.push(`all: ${allowedCount}`);
+      if (alwaysCount > 0) parts.push(`always: ${alwaysCount}`);
+      if (allowedCount > alwaysCount) parts.push(`all: ${allowedCount}`);
       if (sentCount > 0) parts.push(`send: ${sentCount}`);
       if (reviewedCount > 0) parts.push(`rev: ${reviewedCount}`);
       hudTextEl.innerText = `MKALL: ${parts.join(', ')}`;
