@@ -882,8 +882,8 @@ pub async fn account_nav(
 
 struct TrackedWindow {
     app_id: String,
-    // Read by list_open_account_windows; the allow goes away once the
-    // coordinator registers that command in main.rs.
+    // Read by list_open_account_windows (registered in main.rs), which
+    // reports the open account windows to the launcher.
     #[allow(dead_code)]
     account_id: String,
     last_active: u64,
@@ -902,6 +902,11 @@ struct TrackedWindow {
     /// next title change, which re-arms it.
     page_title_seen: bool,
     suspended: bool,
+    /// The process working set was already trimmed for this idle
+    /// transition. Set on suspend, cleared on resume, so the trim runs
+    /// once per transition instead of once per watcher tick.
+    #[cfg(windows)]
+    trimmed: bool,
     /// Session-restore lazy load: the real URL, not yet navigated to. The
     /// window is built on about:blank and navigates here on first focus,
     /// so a 10-window restore doesn't spawn 10 renderers at once.
@@ -1519,6 +1524,8 @@ pub fn open_account_placed(
                 page_title: String::new(),
                 page_title_seen: true,
                 suspended: false,
+                #[cfg(windows)]
+                trimmed: false,
                 pending_url,
                 // The window opens (or will navigate, when deferred) to
                 // the target, so that is its last-known URL until a
@@ -2881,8 +2888,8 @@ pub(crate) const GESTURE_REPORT_JS: &str = r#"(function () {
       if (internals && internals.invoke) internals.invoke("note_user_gesture", {});
     } catch (e) {}
   }
-  document.addEventListener("pointerdown", note, true);
-  document.addEventListener("keydown", note, true);
+  document.addEventListener("pointerdown", note, { capture: true, passive: true });
+  document.addEventListener("keydown", note, { capture: true, passive: true });
 })();"#;
 
 /// In-page login detector + save/fill prompts (v0.18.26). Runs in the
@@ -2957,6 +2964,10 @@ pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
     saveBar = bar;
   }
   function checkStaged() {
+    // A hidden page never needs the save offer: the staged password
+    // waits in Rust, and the visibilitychange re-check below picks it
+    // up when the tab is visible again.
+    if (document.hidden) return;
     invoke("staged_password_state").then(function (domain) {
       if (domain) showSaveBar(domain);
     }, function () {});
@@ -2979,6 +2990,7 @@ pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
   }
   function checkFill() {
     if (fillChecked) return;
+    if (document.hidden) return;
     if (!document.querySelector('input[type="password"]')) return;
     fillChecked = true;
     if (fillObs) { fillObs.disconnect(); fillObs = null; }
@@ -3012,17 +3024,30 @@ pub(crate) const LOGIN_DETECTOR_JS: &str = r##"(function () {
     // A slow navigation can flash the banner briefly here — the
     // one-time offer is consumed, and the manual Save dialog remains.
     setTimeout(checkStaged, 400);
-  }, true);
+  }, { capture: true, passive: true });
+
+  function startFillObs() {
+    if (fillObs || !window.MutationObserver || !document.body) return;
+    fillObs = new MutationObserver(function () { checkFill(); });
+    fillObs.observe(document.body, { childList: true, subtree: true });
+  }
 
   function onReady() {
     // Let redirect chains settle so a transient page does not consume
     // the one-time save offer.
     setTimeout(checkStaged, 800);
     checkFill();
-    if (window.MutationObserver && document.body) {
-      fillObs = new MutationObserver(function () { checkFill(); });
-      fillObs.observe(document.body, { childList: true, subtree: true });
-    }
+    if (!document.hidden) startFillObs();
+    // A hidden page never needs the fill/save prompts: the observer
+    // and the staged check both no-op until the tab is visible again,
+    // so a background tab burns no cycles watching DOM churn.
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) {
+        startFillObs();
+        checkFill();
+        checkStaged();
+      }
+    });
     // Back/forward-cache restores do not re-run init scripts or
     // DOMContentLoaded, so the fill/save prompts would never appear
     // when the user navigates back to a login page. pageshow fires on
@@ -3084,8 +3109,8 @@ pub(crate) fn window_open_guard_js(allowlist: &[String]) -> String {
     if (e && e.isTrusted === false) return;
     lastTrustedGesture = Date.now();
   }}
-  document.addEventListener('pointerdown', markGesture, true);
-  document.addEventListener('keydown', markGesture, true);
+  document.addEventListener('pointerdown', markGesture, {{ capture: true, passive: true }});
+  document.addEventListener('keydown', markGesture, {{ capture: true, passive: true }});
   window.open = function (url) {{
     try {{
       if (url) {{
@@ -4209,6 +4234,14 @@ fn resume_window(app: &AppHandle, label: &str) {
     if let Some(title) = title_opt {
         let _ = window.set_title(&title);
     }
+    // The next idle transition may trim again.
+    if let Some(winstate) = app.try_state::<WindowState>() {
+        if let Ok(mut tracked) = winstate.inner.lock() {
+            if let Some(t) = tracked.get_mut(label) {
+                t.trimmed = false;
+            }
+        }
+    }
     let _ = window.with_webview(|platform| unsafe {
         // Resume before showing (v0.16.4): a still-suspended controller
         // made visible first presents its frozen — possibly blank —
@@ -4226,6 +4259,53 @@ fn resume_window(app: &AppHandle, label: &str) {
     });
 }
 
+
+/// Resolve the idle-sleep threshold for one window, in seconds. `None`
+/// means never sleep. The global setting wins when set: a concrete value
+/// overrides the per-app/per-account minutes, and 0 disables idle sleep
+/// entirely (close timers are unaffected — they resolve separately).
+/// Pure so the precedence is unit-testable.
+fn resolve_suspend_seconds(global_seconds: Option<u64>, per_app_minutes: u64) -> Option<u64> {
+    match global_seconds {
+        Some(0) => None,
+        Some(s) => Some(s),
+        None => {
+            if per_app_minutes == 0 {
+                None
+            } else {
+                Some(per_app_minutes * 60)
+            }
+        }
+    }
+}
+
+/// Best-effort trim of this process's working set (Windows only). The
+/// renderer already dropped its caches via the LOW memory target or
+/// TrySuspend; EmptyWorkingSet asks Windows to page the freed pages out
+/// now instead of leaving them resident. Runs at most once per idle
+/// transition — guarded by TrackedWindow.trimmed, cleared on resume —
+/// never in a tight loop.
+#[cfg(windows)]
+fn trim_working_set_once(app: &AppHandle, label: &str) {
+    let already = app
+        .try_state::<WindowState>()
+        .and_then(|s| s.inner.lock().ok().and_then(|m| m.get(label).map(|t| t.trimmed)));
+    if already.unwrap_or(true) {
+        return;
+    }
+    use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let _ = EmptyWorkingSet(GetCurrentProcess());
+    }
+    if let Some(winstate) = app.try_state::<WindowState>() {
+        if let Ok(mut tracked) = winstate.inner.lock() {
+            if let Some(t) = tracked.get_mut(label) {
+                t.trimmed = true;
+            }
+        }
+    }
+}
 
 fn suspend_idle_windows(app: &AppHandle) {
     let now = unix_secs();
@@ -4252,18 +4332,31 @@ fn suspend_idle_windows(app: &AppHandle) {
     let Some(store) = app.try_state::<AppStore>() else {
         return;
     };
+    // One read per tick: the global timeout, when set, overrides every
+    // per-app/per-account value for this pass. No new thread or timer.
+    let global_seconds = app
+        .try_state::<Mutex<crate::launcher_settings::LauncherSettings>>()
+        .and_then(|s| s.lock().ok().map(|s| s.global_idle_sleep_seconds))
+        .unwrap_or(None);
     for (label, app_id, account_id, last_active, suspended) in tracked {
         if suspended {
             continue;
         }
-        let minutes = match store.get(&app_id) {
-            Ok(a) => a.effective_auto_suspend_minutes(&account_id),
-            Err(_) => continue, // app deleted under us; its windows are being closed
-        };
-        if minutes == 0 {
+        let Some(threshold) = (match store.get(&app_id) {
+            Ok(a) => Some(resolve_suspend_seconds(
+                global_seconds,
+                a.effective_auto_suspend_minutes(&account_id),
+            )),
+            Err(_) => None, // app deleted under us; its windows are being closed
+        })
+        .flatten()
+        else {
             continue;
-        }
-        if now.saturating_sub(last_active) < minutes * 60 {
+        };
+        // Grace: the window only sleeps after being continuously idle for
+        // the whole threshold — last_active refreshes on every focus or
+        // touch, so a recently-used window never sleeps on a stale tick.
+        if now.saturating_sub(last_active) < threshold {
             continue;
         }
         let Some(window) = app.get_webview_window(&label) else {
@@ -4406,6 +4499,12 @@ fn suspend_one(app: &AppHandle, label: &str, window: &WebviewWindow) {
     // Record the page before the renderer freezes (v0.16.4): once
     // TrySuspend lands, the URL is not readable again until wake.
     capture_last_url(app, label);
+    // Re-check focus at the last moment: the watcher checked it before
+    // dispatching, but a tick can go stale while the user focuses the
+    // window — a focused window must never be suspended by a stale tick.
+    if window.is_focused().unwrap_or(true) {
+        return;
+    }
     // WebView2 requires the controller to be hidden (IsVisible == false)
     // before TrySuspend succeeds (otherwise returns ERROR_INVALID_STATE).
     // Minimized, hidden, or already-hidden webviews are eligible.
@@ -4414,9 +4513,15 @@ fn suspend_one(app: &AppHandle, label: &str, window: &WebviewWindow) {
         || webview_hidden(window);
     if !can_suspend {
         set_window_memory_target_low(window, true);
+        trim_working_set_once(app, label);
         return;
     }
+    // LOW hint first, then the freeze: the renderer drops its decode
+    // caches and V8 heap before it stops, so the trim below has
+    // something to page out.
+    set_window_memory_target_low(window, true);
     if try_suspend_webview(window) {
+        trim_working_set_once(app, label);
         let title_opt = if let Some(winstate) = app.try_state::<WindowState>() {
             if let Ok(mut tracked) = winstate.inner.lock() {
                 if let Some(t) = tracked.get_mut(label) {
@@ -6372,6 +6477,19 @@ mod tests {
         assert!(!should_move_focus(true, true, true, false));
         assert!(!should_move_focus(true, false, false, false));
         assert!(!should_move_focus(true, false, true, true));
+    }
+
+    #[test]
+    fn global_timeout_overrides_per_app_and_never_disables() {
+        // No global set: the per-app minutes rule, in seconds.
+        assert_eq!(resolve_suspend_seconds(None, 5), Some(300));
+        assert_eq!(resolve_suspend_seconds(None, 0), None);
+        // A concrete global value overrides per-app, up or down.
+        assert_eq!(resolve_suspend_seconds(Some(30), 5), Some(30));
+        assert_eq!(resolve_suspend_seconds(Some(300), 0), Some(300));
+        // Global Never disables idle sleep even when the app wants 5 min.
+        assert_eq!(resolve_suspend_seconds(Some(0), 5), None);
+        assert_eq!(resolve_suspend_seconds(Some(0), 0), None);
     }
 }
 

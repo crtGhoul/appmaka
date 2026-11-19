@@ -14,7 +14,7 @@ mod favicon_parse;
 mod launcher;
 mod launcher_ext;
 mod hotkeys;
-mod workspaces;
+mod workspace_migration;
 mod launcher_settings;
 mod links;
 mod msi_update;
@@ -1420,7 +1420,7 @@ fn main() {
                             crate::popup_add::fire_from_hotkey(app);
                             return;
                         }
-                        // Named hotkey bindings (routines / workspaces /
+                        // Named hotkey bindings (routines /
                         // per-command hotkeys) dispatch through the shared
                         // registry. Anything with no binding — the launcher
                         // summon hotkey — keeps the old behavior. The
@@ -1556,6 +1556,11 @@ fn main() {
                 .map_err(std::io::Error::other)?;
 
             // --- launcher ---
+            // One-time retirement of the removed workspaces feature:
+            // moves a legacy workspaces.json aside and drops its dangling
+            // pinned-tile / hotkey references. Runs before the settings
+            // load and the hotkey registry, so neither ever sees them.
+            crate::workspace_migration::retire_legacy_workspaces(app.handle());
             let launcher_state =
                 LauncherState::new(app.handle()).map_err(std::io::Error::other)?;
             app.manage(launcher_state);
@@ -1608,9 +1613,9 @@ fn main() {
             #[cfg(windows)]
             crate::caption::ensure_alt_drag_hook(app.handle());
             // Named hotkey registry (v0.8.0): one registry for routine /
-            // workspace / per-command hotkeys so the global-shortcut
+            // per-command hotkeys so the global-shortcut
             // handler can dispatch presses. register_all_saved reads
-            // routines.json, workspaces.json and cmdhotkeys.json and
+            // routines.json and cmdhotkeys.json and
             // registers each saved hotkey best-effort; a failure is
             // recorded in the binding status (UI warns) and logged —
             // startup never crashes on a hotkey.
@@ -1682,7 +1687,7 @@ fn main() {
             // Built-in dictation (v0.14.0): state + saved global hotkey.
             app.manage(crate::dictation::load(app.handle()));
             crate::dictation::register_saved_hotkey(app.handle());
-            // Workspace dock (v0.17.0): saved global toggle hotkey.
+            // Dock (v0.17.0): saved global toggle hotkey.
             crate::dock::register_saved_hotkey(app.handle());
             crate::clipboard::ensure_summon_registered(app.handle());
             crate::clipboard::start_watcher(app.handle().clone());
@@ -1740,7 +1745,7 @@ fn main() {
                     })
                     .map_err(std::io::Error::other)?;
             }
-            // Workspace dock (v0.17.0): best-effort, after the launcher
+            // Dock (v0.17.0): best-effort, after the launcher
             // settings state exists. Off by default — the window is
             // only built when the saved setting asks for it.
             dock::apply_visibility(app.handle());
@@ -1996,7 +2001,7 @@ fn main() {
             launcher_settings::set_auto_hide_top_bar,
             // v0.8.0: hidden-programs collapse state (polish)
             launcher_settings::set_hidden_section_collapsed,
-            // v0.17.0: workspace dock
+            // v0.17.0: edge dock
             dock::set_dock_enabled,
             dock::set_dock_edge,
             dock::set_dock_hotkey,
@@ -2058,12 +2063,7 @@ fn main() {
             msi_update::install_msi_update,
             msi_update::prepare_for_update_install,
             msi_update::cancel_update_exit,
-            // v0.8.0: workspaces
-            workspaces::list_workspaces,
-            workspaces::save_workspace,
-            workspaces::delete_workspace,
-            workspaces::set_active_workspace,
-            workspaces::create_workspace_from_open,
+            launcher_settings::set_global_idle_sleep_seconds,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

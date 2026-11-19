@@ -30,10 +30,7 @@ import {
 import { RoutinesSection } from "./RoutinesSection";
 import { ClipboardSection } from "./ClipboardSection";
 import { UserScriptsSection } from "./UserScriptsSection";
-import WorkspacesSection from "./WorkspacesSection";
 import SplitSection from "./SplitSection";
-import { filterAppsByWorkspace } from "./WorkspacesSection";
-import type { WorkspaceList } from "./WorkspacesSection";
 import { useHotkeyDispatch } from "./useHotkeyDispatch";
 import { CmdHotkeysSection } from "./CmdHotkeysSection";
 import "./App.css";
@@ -52,7 +49,6 @@ import {
   RescanButton,
   SearchBar,
   SearchTileIcon,
-  WorkspaceTileIcon,
   browseAll,
   buildResults,
   collectSearchEntries,
@@ -61,7 +57,6 @@ import {
   searchCacheAppDescriptors,
   recordLaunch,
   searchTag,
-  resolveWorkspaceTargets,
   useProgramsScannedRefresh,
   useTileMenu,
 } from "./Launcher";
@@ -76,6 +71,7 @@ import type {
   AddAppOutcome,
   AccountMemory,
   AppSettings,
+  ClipboardListEntry,
   LauncherSettings,
   NativeProgram,
   OpenAccountWindow,
@@ -2818,10 +2814,6 @@ function AppShell() {
   const panelOpen = (key: string) => !collapsedPanels.has(key);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
-  // v0.8.0 workspaces: owned here so the launcher filter and the library
-  // section share it. Refreshed on `appmaka:workspace-changed` (fired by
-  // set_active_workspace, including workspace hotkey presses).
-  const [workspaceList, setWorkspaceList] = useState<WorkspaceList | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   // v0.11.0: copyable error dialogs. The backend emits `appmaka:error`
@@ -3355,36 +3347,7 @@ function AppShell() {
     searchRef.current?.select();
   }, [summonCount]);
 
-  // v0.8.0 workspaces: load once; the backend emits
-  // `appmaka:workspace-changed` whenever the active workspace changes
-  // (including via a workspace hotkey while the library section is
-  // unmounted). Lives here — not in WorkspacesSection — so the launcher
-  // filter updates in every view.
-  useEffect(() => {
-    let alive = true;
-    const refresh = () => {
-      invoke<WorkspaceList>("list_workspaces")
-        .then((l) => {
-          if (alive) setWorkspaceList(l);
-        })
-        .catch((err) => {
-          if (alive) setError(`Could not load workspaces: ${errMsg(err)}`);
-        });
-    };
-    refresh();
-    let off: (() => void) | undefined;
-    listen("appmaka:workspace-changed", refresh)
-      .then((u) => {
-        off = u;
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-      off?.();
-    };
-  }, []);
-
-  // v0.8.0: dispatch global hotkey presses (routines / workspaces /
+  // v0.8.0: dispatch global hotkey presses (routines /
   // per-command hotkeys) to the existing invoke commands.
   useHotkeyDispatch(apps, setError, setNotice);
 
@@ -3425,6 +3388,30 @@ function AppShell() {
   // v0.15.0: Ctrl+K quick-switch — opens the palette while the launcher
   // is focused. In-window only; no global hotkey hook.
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Clipboard entries offered in the palette. Read once per open from
+  // the existing list_clipboard path — no background poller, no new IPC.
+  const [paletteClipboard, setPaletteClipboard] = useState<SearchResult[]>([]);
+  useEffect(() => {
+    if (!paletteOpen) return;
+    invoke<ClipboardListEntry[]>("list_clipboard")
+      .then((entries) => {
+        setPaletteClipboard(
+          entries.slice(0, 10).map((e) => ({
+            kind: "clipboard" as const,
+            id: `clipboard:${e.id}`,
+            title:
+              e.kind === "text"
+                ? e.preview || "(empty)"
+                : `Image ${e.width ?? "?"}×${e.height ?? "?"}`,
+            context: e.pinned ? "Clipboard · pinned" : "Clipboard",
+            score: 0,
+            entryId: e.id,
+            pinned: e.pinned,
+          }))
+        );
+      })
+      .catch(() => setPaletteClipboard([]));
+  }, [paletteOpen]);
   useEffect(() => {
     if (view !== "launcher") return;
     const onKey = (e: KeyboardEvent) => {
@@ -3687,6 +3674,27 @@ function AppShell() {
     }
   }
 
+  // Quick-switch sleep verb (Alt+Enter in the palette): freeze the
+  // selected window through the existing suspend path, not a new one.
+  // An app row sleeps its most recently opened account window; with
+  // nothing open there is nothing to sleep.
+  async function handleSleepResult(r: SearchResult) {
+    setPaletteOpen(false);
+    if (r.kind === "account") {
+      await handleSuspendAccount(r.app, r.account);
+      return;
+    }
+    if (r.kind !== "app") return;
+    const acct = [...r.app.accounts]
+      .filter((a) => openLabels.has(`acct-${r.app.id}-${a.id}`))
+      .sort((a, b) => b.last_opened - a.last_opened)[0];
+    if (!acct) {
+      setNotice(`${r.app.name} has no open window to sleep.`);
+      return;
+    }
+    await handleSuspendAccount(r.app, acct);
+  }
+
   /** v0.18.5: tile hover actions (reload / shield / keep-awake). */
   async function handleTileAction(r: SearchResult, action: string) {
     if (r.kind !== "account") return;
@@ -3853,30 +3861,11 @@ function AppShell() {
       pinned: launcherSettings?.pinned,
       usage: launcherSettings?.usage,
       hiddenProgramIds: launcherSettings?.hidden_programs,
-      // v0.9.6: pinned workspace tiles materialize from these.
-      workspaces: workspaceList?.workspaces.map((w) => ({
-        id: w.id,
-        name: w.name,
-      })),
     }),
-    [launcherSettings, workspaceList]
+    [launcherSettings]
   );
-  // v0.8.0 workspaces: filter apps/accounts to the active workspace.
-  // Programs and launcher commands stay visible (programs can't be
-  // workspace members; hiding them would strand access).
-  const activeWorkspace = useMemo(
-    () =>
-      workspaceList?.workspaces.find(
-        (w) => w.id === workspaceList.active_workspace_id
-      ) ?? null,
-    [workspaceList]
-  );
-  // v0.15.0: hoisted so the Ctrl+K palette sees the same
-  // workspace-scoped apps as the tile grid.
-  const scopedApps = useMemo(
-    () => filterAppsByWorkspace(apps, activeWorkspace),
-    [apps, activeWorkspace]
-  );
+  // The tile grid and the Ctrl+K palette show the same flat app list.
+  const scopedApps = apps;
   const pinnedIdsSet = useMemo(
     () => new Set(launcherSettings?.pinned ?? []),
     [launcherSettings?.pinned]
@@ -3964,8 +3953,6 @@ function AppShell() {
   const cmdRef = useRef<LauncherCommandRowsHandle>(null);
 
   // Right-click tile menu (Open / Pin / Hide / Edit / Remove).
-  // v0.9.6: handleTogglePin is shared with the Workspaces section's
-  // Pin/Unpin buttons.
   async function handleTogglePin(itemId: string) {
     try {
       const updated = await invoke<LauncherSettings>("toggle_pin", {
@@ -4092,21 +4079,13 @@ function AppShell() {
         // v0.9.3: pinned web search — re-run the query in the shared
         // in-app search window.
         await invoke("open_web_search", { query: r.query });
-      } else if (r.kind === "workspace") {
-        // v0.9.6: pinned workspace tile — open every member window at
-        // once through the normal open-account path (default placement;
-        // session restore handles exact geometry). One failure doesn't
-        // stop the rest.
-        const ws = workspaceList?.workspaces.find(
-          (w) => w.id === r.workspaceId
-        );
-        if (ws) {
-          for (const { app, account } of resolveWorkspaceTargets(
-            ws.members,
-            apps
-          ))
-            await handleOpenAccount(app, account);
-        }
+      } else if (r.kind === "clipboard") {
+        // Quick-switch clipboard entry: copy it back to the OS
+        // clipboard; the user pastes from there. No usage ranking —
+        // clipboard ids are not launcher tiles.
+        await invoke("copy_clipboard_entry", { entryId: r.entryId });
+        setNotice("Copied to clipboard.");
+        return;
       } else {
         // Web app row: open the most recently used account.
         const acct = mostRecentAccount(r.app) ?? r.app.accounts[0];
@@ -4171,7 +4150,12 @@ function AppShell() {
   function renderResultIcon(r: SearchResult): React.ReactNode {
     if (r.kind === "program") return <ProgramIcon program={r.program} />;
     if (r.kind === "search") return <SearchTileIcon />;
-    if (r.kind === "workspace") return <WorkspaceTileIcon />;
+    if (r.kind === "clipboard")
+      return (
+        <span className="app-icon-fallback" aria-hidden="true">
+          {r.title.charAt(0).toUpperCase() || "?"}
+        </span>
+      );
     if (r.kind === "routine")
       return (
         <span className="app-icon-fallback" aria-hidden="true">
@@ -4238,11 +4222,12 @@ function AppShell() {
         <ContextMenuGuard />
         {paletteOpen && (
           <QuickSwitchPalette
-            items={browseAll(scopedApps, programs, sortOpts)}
+            items={[...browseAll(scopedApps, programs, sortOpts), ...paletteClipboard]}
             onActivate={(r) => {
               setPaletteOpen(false);
               void activateResult(r);
             }}
+            onSleep={(r) => void handleSleepResult(r)}
             onClose={() => setPaletteOpen(false)}
             renderIcon={renderResultIcon}
             playingFor={(r) =>
@@ -4304,50 +4289,6 @@ function AppShell() {
                   Dismiss
                 </button>
               </span>
-            </div>
-          )}
-          {workspaceList && workspaceList.workspaces.length > 0 && (
-            <div
-              className="workspace-chips"
-              role="group"
-              aria-label="Workspace filter"
-            >
-              <button
-                className={`workspace-chip${
-                  workspaceList.active_workspace_id === null
-                    ? " is-active"
-                    : ""
-                }`}
-                onClick={() =>
-                  void invoke<WorkspaceList>("set_active_workspace", {
-                    workspaceId: null,
-                  })
-                    .then(setWorkspaceList)
-                    .catch((err) => setError(errMsg(err)))
-                }
-              >
-                All
-              </button>
-              {workspaceList.workspaces.map((ws) => (
-                <button
-                  key={ws.id}
-                  className={`workspace-chip${
-                    workspaceList.active_workspace_id === ws.id
-                      ? " is-active"
-                      : ""
-                  }`}
-                  title={ws.hotkey ? `Hotkey: ${ws.hotkey}` : undefined}
-                  onClick={() =>
-                    void invoke<WorkspaceList>("set_active_workspace", {
-                      workspaceId: ws.id,
-                    })
-                      .then(setWorkspaceList)
-                      .catch((err) => setError(errMsg(err)))
-                  }
-                >
-                  {ws.name}
-                </button>
-              ))}
             </div>
           )}
           {banners}
@@ -4783,29 +4724,6 @@ function AppShell() {
           </ul>
         )}
           </>
-        )}
-      </section>
-
-      <section className="panel">
-        <div className="panel-head">
-          <h2>Workspaces</h2>
-          <button
-            className="text-button"
-            onClick={() => togglePanel("workspaces")}
-            aria-expanded={panelOpen("workspaces")}
-          >
-            {panelOpen("workspaces") ? "Hide" : "Show"}
-          </button>
-        </div>
-        {panelOpen("workspaces") && (
-        <WorkspacesSection
-          apps={apps}
-          list={workspaceList}
-          onList={setWorkspaceList}
-          onError={setError}
-          pinned={launcherSettings?.pinned ?? []}
-          onTogglePin={(itemId) => void handleTogglePin(itemId)}
-        />
         )}
       </section>
 

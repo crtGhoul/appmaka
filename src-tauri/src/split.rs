@@ -26,7 +26,7 @@
 //! an ordinary window).
 //!
 //! Saved layouts and open groups persist in `<app-data>/splits.json`
-//! (the workspaces.rs pattern: load-or-default, tmp+rename, file lock).
+//! (load-or-default, tmp+rename, file lock).
 //! Open groups restore at startup after the session restore — panes
 //! are never tracked as windows, so the session never sees them.
 

@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
  * Typing key names ("Fn+z") was the #1 hotkey support issue — users can't
  * be expected to know the parser's key vocabulary. This component replaces
  * every hotkey text input in the app (launcher summon hotkey, routine
- * hotkeys, workspace hotkeys, per-command hotkey bindings).
+ * hotkeys, per-command hotkey bindings).
  *
  * Interaction:
  * - Click the field -> it shows "Press your hotkey…" and a keydown

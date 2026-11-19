@@ -1,7 +1,7 @@
 //! Centralized global-hotkey registry (v0.8.0).
 //!
-//! Named bindings for routines ("routine:<id>"), workspaces
-//! ("workspace:<id>") and per-command hotkeys ("cmd:<id>") all live here,
+//! Named bindings for routines ("routine:<id>") and per-command hotkeys
+//! ("cmd:<id>") all live here,
 //! so the global-shortcut handler in main.rs can dispatch a pressed shortcut
 //! to the right action instead of blindly toggling the launcher window.
 //!
@@ -26,7 +26,6 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 #[serde(tag = "kind", content = "target", rename_all = "lowercase")]
 pub enum HotkeyKind {
     Routine { routine_id: String },
-    Workspace { workspace_id: String },
     Command {
         app_id: String,
         account_id: Option<String>,
@@ -44,9 +43,6 @@ fn describe_binding(binding_id: &str, kind: &HotkeyKind) -> String {
     let _ = binding_id;
     match kind {
         HotkeyKind::Routine { routine_id } => format!("the \"{routine_id}\" routine"),
-        HotkeyKind::Workspace { workspace_id } => {
-            format!("the \"{workspace_id}\" workspace")
-        }
         HotkeyKind::Command { app_id, account_id } => match account_id {
             Some(a) => format!("the hotkey for account \"{a}\" in app \"{app_id}\""),
             None => format!("the hotkey for app \"{app_id}\""),
@@ -288,7 +284,7 @@ fn set_status(app: &AppHandle, binding_id: &str, status: BindingStatus) {
 
 /// Record a failed registration from outside this module (e.g. the
 /// clipboard module's startup registration), so the UI can warn about it
-/// the same way it warns about failed routine/workspace bindings.
+/// the same way it warns about failed routine bindings.
 pub fn record_binding_failure(
     app: &AppHandle,
     binding_id: &str,
@@ -341,8 +337,6 @@ struct HotkeyTarget {
     #[serde(skip_serializing_if = "Option::is_none")]
     routine_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    workspace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     app_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account_id: Option<String>,
@@ -351,23 +345,13 @@ struct HotkeyTarget {
 /// Emit "hotkey-fired" for a pressed shortcut. Called from the main.rs
 /// global-shortcut handler on `Pressed` when `lookup_binding` hits. The
 /// frontend dispatches via existing invoke commands (`run_routine`,
-/// `set_active_workspace`, `open_account` / program launch).
+/// `open_account` / program launch).
 pub fn emit_hotkey_fired(app: &AppHandle, binding_id: &str, kind: &HotkeyKind) {
     let (kind_str, target) = match kind {
         HotkeyKind::Routine { routine_id } => (
             "routine",
             HotkeyTarget {
                 routine_id: Some(routine_id.clone()),
-                workspace_id: None,
-                app_id: None,
-                account_id: None,
-            },
-        ),
-        HotkeyKind::Workspace { workspace_id } => (
-            "workspace",
-            HotkeyTarget {
-                routine_id: None,
-                workspace_id: Some(workspace_id.clone()),
                 app_id: None,
                 account_id: None,
             },
@@ -376,7 +360,6 @@ pub fn emit_hotkey_fired(app: &AppHandle, binding_id: &str, kind: &HotkeyKind) {
             "command",
             HotkeyTarget {
                 routine_id: None,
-                workspace_id: None,
                 app_id: Some(app_id.clone()),
                 account_id: account_id.clone(),
             },
@@ -385,7 +368,6 @@ pub fn emit_hotkey_fired(app: &AppHandle, binding_id: &str, kind: &HotkeyKind) {
             "clipboard",
             HotkeyTarget {
                 routine_id: None,
-                workspace_id: None,
                 app_id: None,
                 account_id: None,
             },
@@ -396,7 +378,6 @@ pub fn emit_hotkey_fired(app: &AppHandle, binding_id: &str, kind: &HotkeyKind) {
             "dictation",
             HotkeyTarget {
                 routine_id: None,
-                workspace_id: None,
                 app_id: None,
                 account_id: None,
             },
@@ -405,7 +386,6 @@ pub fn emit_hotkey_fired(app: &AppHandle, binding_id: &str, kind: &HotkeyKind) {
             "dock",
             HotkeyTarget {
                 routine_id: None,
-                workspace_id: None,
                 app_id: None,
                 account_id: None,
             },
@@ -425,7 +405,7 @@ pub fn emit_hotkey_fired(app: &AppHandle, binding_id: &str, kind: &HotkeyKind) {
 // Startup: register every saved binding, best-effort.
 // ---------------------------------------------------------------------------
 
-/// One hotkey entry in routines.json / workspaces.json. Unknown fields are
+/// One hotkey entry in routines.json. Unknown fields are
 /// ignored so sibling workers can evolve their records freely.
 #[derive(Debug, Deserialize)]
 struct SavedHotkeyEntry {
@@ -490,27 +470,10 @@ fn load_saved_entries(app: &AppHandle, file: &str) -> Vec<(String, String)> {
             }
         }
     }
-    // Workspaces envelope: {"workspaces": [{id, hotkey, ...}], ...}.
-    // (Unknown fields ignored; SavedHotkeyEntry already skips them.)
-    #[derive(Debug, Deserialize)]
-    struct WorkspaceEnvelope {
-        #[serde(default)]
-        workspaces: Vec<SavedHotkeyEntry>,
-    }
-    if let Ok(env) = serde_json::from_str::<WorkspaceEnvelope>(&raw) {
-        for e in env.workspaces {
-            if let Some(h) = e.hotkey {
-                let h = h.trim().to_string();
-                if !h.is_empty() {
-                    out.push((e.id, h));
-                }
-            }
-        }
-    }
     out
 }
 
-/// Startup: register every saved routine / workspace / command hotkey.
+/// Startup: register every saved routine / command hotkey.
 /// Best-effort per binding — a failure is recorded in the binding status
 /// (so the UI can warn) and logged, never fatal.
 pub fn register_all_saved(app: &AppHandle) {
@@ -521,24 +484,6 @@ pub fn register_all_saved(app: &AppHandle) {
         };
         if let Err(e) = set_binding(app, &binding_id, kind, &hotkey) {
             eprintln!("hotkey registry: routine \"{id}\": {e}");
-            set_status(
-                app,
-                &binding_id,
-                BindingStatus {
-                    hotkey,
-                    registered: false,
-                    error: Some(e),
-                },
-            );
-        }
-    }
-    for (id, hotkey) in load_saved_entries(app, "workspaces.json") {
-        let binding_id = format!("workspace:{id}");
-        let kind = HotkeyKind::Workspace {
-            workspace_id: id.clone(),
-        };
-        if let Err(e) = set_binding(app, &binding_id, kind, &hotkey) {
-            eprintln!("hotkey registry: workspace \"{id}\": {e}");
             set_status(
                 app,
                 &binding_id,
@@ -780,7 +725,6 @@ mod tests {
             kind: "command",
             target: HotkeyTarget {
                 routine_id: None,
-                workspace_id: None,
                 app_id: Some("gmail".to_string()),
                 account_id: Some("work".to_string()),
             },
@@ -796,7 +740,6 @@ mod tests {
             kind: "routine",
             target: HotkeyTarget {
                 routine_id: Some("r1".to_string()),
-                workspace_id: None,
                 app_id: None,
                 account_id: None,
             },

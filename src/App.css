@@ -1190,6 +1190,11 @@ input[type="color"] {
   padding: 12px 16px;
 }
 
+.palette-hint {
+  margin: 0;
+  padding: 4px 16px 8px;
+}
+
 .palette-row {
   display: flex;
   align-items: center;

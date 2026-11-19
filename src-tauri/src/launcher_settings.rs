@@ -219,6 +219,13 @@ pub struct LauncherSettings {
     pub show_tile_ram: bool,
     #[serde(default = "default_true")]
     pub show_sleep_labels: bool,
+    /// Global idle-sleep timeout in seconds. `None` (default) = each app
+    /// keeps its own auto-suspend minutes; `Some(0)` = never idle-sleep
+    /// any window; `Some(n)` = sleep idle windows after n seconds,
+    /// overriding the per-app/per-account values. Close timers are
+    /// unaffected. Old files migrate to `None`.
+    #[serde(default)]
+    pub global_idle_sleep_seconds: Option<u64>,
     /// Dictation compatibility (v0.13.18): when true, AppMaka's global
     /// keyboard hooks stay uninstalled — the caption Esc/F11/Ctrl+Tab
     /// hook and the Windows-key clipboard watcher — so low-level-hook
@@ -346,6 +353,7 @@ impl Default for LauncherSettings {
             show_badges: true,
             show_tile_ram: true,
             show_sleep_labels: true,
+            global_idle_sleep_seconds: None,
             dictation_compat: false,
             auto_update_download: false,
             pending_update_version: None,
@@ -362,8 +370,8 @@ impl Default for LauncherSettings {
 impl LauncherSettings {
     /// Pin or unpin a tagged tile id (`app:<id>`, `account:<id>`,
     /// `program:<id>` — v0.9.3's `search:<url-encoded query>` for pinned web
-    /// searches, v0.9.6's `workspace:<id>` for pinned workspaces). Any string
-    /// tag round-trips; the UI only offers tags it can render.
+    /// searches). Any string tag round-trips; the UI only offers tags it
+    /// can render.
     pub fn toggle_pin(&mut self, item_id: &str) {
         if let Some(pos) = self.pinned.iter().position(|p| p == item_id) {
             self.pinned.remove(pos);
@@ -836,6 +844,30 @@ pub fn set_show_sleep_labels(app: AppHandle, enabled: bool) -> Result<LauncherSe
     Ok(settings.clone())
 }
 
+/// Set the global idle-sleep timeout (see the field docs): `None` = each
+/// app keeps its own auto-suspend minutes, `Some(0)` = never idle-sleep,
+/// `Some(n)` = sleep after n idle seconds. Read by the suspend watcher
+/// once per tick; no new thread or timer.
+/// JS: `invoke("set_global_idle_sleep_seconds", { seconds })`.
+#[tauri::command]
+pub fn set_global_idle_sleep_seconds(
+    app: AppHandle,
+    seconds: Option<u64>,
+) -> Result<LauncherSettings, String> {
+    if let Some(s) = seconds {
+        if s > 86_400 {
+            return Err("Idle-sleep timeout is too long (max one day).".to_string());
+        }
+    }
+    let state = app.state::<Mutex<LauncherSettings>>();
+    let mut settings = state
+        .lock()
+        .map_err(|e| format!("settings state poisoned: {e}"))?;
+    settings.global_idle_sleep_seconds = seconds;
+    save(&app, &settings)?;
+    Ok(settings.clone())
+}
+
 /// Set whether opening an app/account creates a tabbed window instead of
 /// a plain page window (v0.13.0).
 /// JS: `invoke("set_open_as_tabbed", { enabled })`.
@@ -1028,28 +1060,6 @@ mod tests {
         assert_eq!(s.hotkey, "Ctrl+Alt+A");
         assert!(!s.autostart);
         assert!(s.seen_intro);
-    }
-
-    #[test]
-    fn toggle_pin_round_trips_workspace_tags() {
-        let mut s = LauncherSettings::default();
-        // v0.9.6: pinned workspaces ride the same tagged-id machinery.
-        s.toggle_pin("workspace:abc123");
-        assert_eq!(s.pinned, vec!["workspace:abc123".to_string()]);
-        s.toggle_pin("workspace:abc123");
-        assert!(s.pinned.is_empty());
-        // Pin order is preserved across kinds.
-        s.toggle_pin("app:abc");
-        s.toggle_pin("workspace:abc123");
-        s.toggle_pin("search:x");
-        assert_eq!(
-            s.pinned,
-            vec![
-                "app:abc".to_string(),
-                "workspace:abc123".to_string(),
-                "search:x".to_string()
-            ]
-        );
     }
 
     #[test]

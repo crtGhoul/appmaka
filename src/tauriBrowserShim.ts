@@ -58,6 +58,7 @@ const DEFAULT_LAUNCHER_SETTINGS: LauncherSettings = {
   show_badges: true,
   show_tile_ram: true,
   show_sleep_labels: true,
+  global_idle_sleep_seconds: null,
   dictation_compat: false,
   hidden_section_collapsed: null,
   startup_mode: "restore",
@@ -192,15 +193,6 @@ if (typeof window !== "undefined") {
     ...readStorage<Partial<LauncherSettings>>("appmaka:launcher", {}),
   };
   let routines = readStorage<Routine[]>("appmaka:routines", []);
-  let workspaces = readStorage<{
-    active_workspace_id: string | null;
-    workspaces: Array<{
-      id: string;
-      name: string;
-      hotkey: string | null;
-      members: Array<{ app_id: string; account_id: string | null }>;
-    }>;
-  }>("appmaka:workspaces", { active_workspace_id: null, workspaces: [] });
   let cmdHotkeys = readStorage<
     Array<{
       id: string;
@@ -635,6 +627,13 @@ if (typeof window !== "undefined") {
             show_sleep_labels: Boolean(args.enabled),
           });
           return launcherSettings;
+        case "set_global_idle_sleep_seconds":
+          launcherSettings = writeStorage("appmaka:launcher", {
+            ...launcherSettings,
+            global_idle_sleep_seconds:
+              args.seconds == null ? null : Number(args.seconds),
+          });
+          return launcherSettings;
         case "set_dictation_compat":
           launcherSettings = writeStorage("appmaka:launcher", {
             ...launcherSettings,
@@ -788,47 +787,6 @@ if (typeof window !== "undefined") {
         }
         case "run_routine":
           return "Opened routine";
-        case "list_workspaces":
-          return workspaces;
-        case "save_workspace": {
-          const ws = args.workspace as {
-            id: string;
-            name: string;
-            hotkey: string | null;
-            members: Array<{ app_id: string; account_id: string | null }>;
-          };
-          const id = ws.id || `ws-${Date.now()}`;
-          const saved = { ...ws, id };
-          const list = workspaces.workspaces.some((x) => x.id === id)
-            ? workspaces.workspaces.map((x) => (x.id === id ? saved : x))
-            : [...workspaces.workspaces, saved];
-          workspaces = writeStorage("appmaka:workspaces", {
-            ...workspaces,
-            workspaces: list,
-          });
-          return workspaces;
-        }
-        case "delete_workspace": {
-          const id = String(args.workspaceId ?? "");
-          workspaces = writeStorage("appmaka:workspaces", {
-            active_workspace_id:
-              workspaces.active_workspace_id === id
-                ? null
-                : workspaces.active_workspace_id,
-            workspaces: workspaces.workspaces.filter((x) => x.id !== id),
-          });
-          return workspaces;
-        }
-        case "set_active_workspace": {
-          const id = (args.workspaceId as string | null) ?? null;
-          workspaces = writeStorage("appmaka:workspaces", {
-            ...workspaces,
-            active_workspace_id: id,
-          });
-          return workspaces;
-        }
-        case "create_workspace_from_open":
-          return workspaces;
         case "list_cmdhotkeys":
           return cmdHotkeys;
         case "save_cmdhotkey": {

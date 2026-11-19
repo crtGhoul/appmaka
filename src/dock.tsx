@@ -11,39 +11,26 @@ import type {
 import {
   browseAll,
   recordLaunch,
-  resolveWorkspaceTargets,
   ProgramIcon,
   SearchTileIcon,
-  WorkspaceTileIcon,
   type SearchResult,
 } from "./Launcher";
 import "./App.css";
 
 /**
- * Workspace dock window (v0.17.0). A small floating bar of the user's
+ * Dock window (v0.17.0). A small floating bar of the user's
  * pinned tiles on one screen edge; the backend (dock.rs) owns the
  * window's placement and lifecycle, this page only renders and opens.
  *
  * Contents are exactly the launcher's pinned set, in pin order — pin
  * something in the launcher and it shows up here. Data comes from the
  * same invokes the launcher uses; the page refreshes when the backend
- * or the settings panel says pins/apps/workspaces changed, and when
+ * or the settings panel says pins/apps changed, and when
  * the window regains focus.
  *
  * Bundled separately (vite.config.ts "dock" input, loaded by the
  * backend as dock.html).
  */
-
-// Minimal shape of the list_workspaces result — only what the dock
-// reads. The full Workspace type lives in WorkspacesSection.tsx.
-interface WorkspaceShape {
-  id: string;
-  name: string;
-  members: Array<{ app_id: string; account_id: string | null }>;
-}
-interface WorkspaceListShape {
-  workspaces: WorkspaceShape[];
-}
 
 function errMsg(err: unknown): string {
   return typeof err === "string" ? err : "Something went wrong.";
@@ -136,7 +123,6 @@ function DockAccountThumb({ account, app }: { account: Account; app: WebApp }) {
 function tileIcon(r: SearchResult): React.ReactNode {
   if (r.kind === "program") return <ProgramIcon program={r.program} />;
   if (r.kind === "search") return <SearchTileIcon />;
-  if (r.kind === "workspace") return <WorkspaceTileIcon />;
   if (r.kind === "account")
     return <DockAccountThumb account={r.account} app={r.app} />;
   if (r.kind === "app") return <DockAppIcon app={r.app} />;
@@ -153,21 +139,18 @@ function Dock() {
   const [settings, setSettings] = useState<LauncherSettings | null>(null);
   const [apps, setApps] = useState<WebApp[]>([]);
   const [programs, setPrograms] = useState<NativeProgram[]>([]);
-  const [workspaces, setWorkspaces] = useState<WorkspaceShape[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const [s, a, p, w] = await Promise.all([
+      const [s, a, p] = await Promise.all([
         invoke<LauncherSettings>("get_launcher_settings"),
         invoke<WebApp[]>("list_apps"),
         invoke<NativeProgram[]>("list_programs"),
-        invoke<WorkspaceListShape>("list_workspaces"),
       ]);
       setSettings(s);
       setApps(a);
       setPrograms(p);
-      setWorkspaces(w.workspaces ?? []);
       // The panel's light/dark follows the saved theme, like the
       // launcher: "system" resolves against the OS preference.
       const theme = s.theme ?? "system";
@@ -188,7 +171,6 @@ function Dock() {
     const unlisteners = [
       listen("appmaka:pins-changed", () => void load()),
       listen("appmaka:apps-changed", () => void load()),
-      listen("appmaka:workspace-changed", () => void load()),
       listen("appmaka:dock-settings-changed", () => void load()),
     ];
     const onFocus = () => void load();
@@ -216,16 +198,6 @@ function Dock() {
         await openAccount(r.app, r.account);
       } else if (r.kind === "search") {
         await invoke("open_web_search", { query: r.query });
-      } else if (r.kind === "workspace") {
-        const ws = workspaces.find((w) => w.id === r.workspaceId);
-        if (ws) {
-          for (const { app, account } of resolveWorkspaceTargets(
-            ws.members,
-            apps
-          )) {
-            await openAccount(app, account);
-          }
-        }
       } else if (r.kind === "app") {
         // App row: open its most recently used account, like the launcher.
         const acct =
@@ -255,13 +227,12 @@ function Dock() {
     pinned,
     usage: settings?.usage,
     hiddenProgramIds: settings?.hidden_programs,
-    workspaces,
   }).filter((r) => pinnedSet.has(r.id));
   const edge = settings?.dock_edge ?? "bottom";
 
   return (
     <div id="root-inner" className={`dock-root edge-${edge}`}>
-      <div className="dock-bar" role="toolbar" aria-label="Workspace dock">
+      <div className="dock-bar" role="toolbar" aria-label="Dock">
         {error ? (
           <span className="dock-error" role="alert">
             {error}

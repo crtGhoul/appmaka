@@ -167,7 +167,7 @@ export function categorizeApp(name: string, url?: string): AppCategory {
 }
 
 /** Category for one launcher tile. Apps and accounts use the app;
- * programs use the program name; routines, searches and workspaces
+ * programs use the program name; routines and searches
  * are AppMaka constructs, so they sit in Other. */
 export function categoryOfResult(r: SearchResult): AppCategory {
   if (r.kind === "account" || r.kind === "app") {
@@ -205,7 +205,7 @@ export function effectiveSectionName(
 
 /** Section display name for one launcher tile. Apps and accounts use
  * the app's effective section; programs use the heuristic on the
- * program name; routines, searches and workspaces sit in Other. */
+ * program name; routines and searches sit in Other. */
 export function sectionOfResult(r: SearchResult, customSections: string[]): string {
   if (r.kind === "account" || r.kind === "app") {
     return effectiveSectionName(r.app, customSections);

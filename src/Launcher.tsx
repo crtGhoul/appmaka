@@ -47,7 +47,7 @@ export type SearchResult =
   | { kind: "program"; id: string; title: string; context: string; score: number; program: NativeProgram }
   | { kind: "routine"; id: string; title: string; context: string; score: number; routine: Routine }
   | { kind: "search"; id: string; title: string; context: string; score: number; query: string }
-  | { kind: "workspace"; id: string; title: string; context: string; score: number; workspaceId: string };
+  | { kind: "clipboard"; id: string; title: string; context: string; score: number; entryId: string; pinned: boolean };
 
 /**
  * v0.9.3: pinned web searches. The tag is `search:<url-encoded query>` —
@@ -67,47 +67,6 @@ export function parseSearchTag(id: string): string | null {
   } catch {
     return null;
   }
-}
-
-/**
- * v0.9.6: pinned workspaces. The tag is `workspace:<id>` — it rides the same
- * pinned-id machinery as app:/account:/program:/search: (pin order, usage
- * ranking, toggle_pin), and the tile opens every member window at once.
- */
-export function workspaceTag(id: string): string {
-  return `workspace:${id}`;
-}
-
-/** Inverse of `workspaceTag`; null when the id is not a workspace tag. */
-export function parseWorkspaceTag(id: string): string | null {
-  if (!id.startsWith("workspace:")) return null;
-  return id.slice("workspace:".length);
-}
-
-/**
- * v0.9.6: resolve a pinned workspace's members to concrete (app, account)
- * open targets. A member naming an account opens just that account; a
- * whole-app member (`account_id` null) opens every account the app
- * currently has. Missing apps or accounts are skipped silently.
- */
-export function resolveWorkspaceTargets<
-  A extends { id: string; accounts: Array<{ id: string }> },
->(
-  members: ReadonlyArray<{ app_id: string; account_id: string | null }>,
-  apps: ReadonlyArray<A>
-): Array<{ app: A; account: A["accounts"][number] }> {
-  const targets: Array<{ app: A; account: A["accounts"][number] }> = [];
-  for (const m of members) {
-    const app = apps.find((a) => a.id === m.app_id);
-    if (!app) continue;
-    if (m.account_id) {
-      const account = app.accounts.find((a) => a.id === m.account_id);
-      if (account) targets.push({ app, account });
-    } else {
-      for (const account of app.accounts) targets.push({ app, account });
-    }
-  }
-  return targets;
 }
 
 /**
@@ -143,12 +102,6 @@ export interface LauncherSortOpts {
   usage?: Record<string, UsageEntry>;
   /** Program ids the user hid from the launcher. */
   hiddenProgramIds?: string[];
-  /**
-   * v0.9.6: workspaces for materializing pinned workspace tiles. Minimal
-   * shape on purpose — the full Workspace type lives in
-   * WorkspacesSection.tsx and importing it here would cycle.
-   */
-  workspaces?: Array<{ id: string; name: string }>;
 }
 
 /** A program the user added manually (add_custom_program result). */
@@ -292,23 +245,6 @@ export function browseAll(
         query: q,
       });
     }
-  }
-  // v0.9.6: pinned workspaces, same treatment. A workspace deleted after
-  // pinning drops silently instead of breaking the launcher.
-  const wsById = new Map((opts?.workspaces ?? []).map((w) => [w.id, w]));
-  for (const pid of opts?.pinned ?? []) {
-    const wid = parseWorkspaceTag(pid);
-    if (wid === null) continue;
-    const ws = wsById.get(wid);
-    if (!ws) continue;
-    items.push({
-      kind: "workspace",
-      id: pid,
-      title: ws.name,
-      context: "Workspace",
-      score: 0,
-      workspaceId: ws.id,
-    });
   }
   return sortLauncherItems(items, opts).slice(0, BROWSE_LIMIT);
 }
@@ -524,26 +460,6 @@ export function buildResults(
       });
     }
   }
-  // v0.9.6: pinned workspaces stay discoverable while typing too.
-  const wsById = new Map((opts?.workspaces ?? []).map((w) => [w.id, w]));
-  for (const pid of opts?.pinned ?? []) {
-    const wid = parseWorkspaceTag(pid);
-    if (wid === null) continue;
-    const ws = wsById.get(wid);
-    if (!ws) continue;
-    const wScore = bestFuzzyScore(ql, fuzzyEntriesFor(ws, [ws.name]));
-    if (wScore > 0) {
-      results.push({
-        kind: "workspace",
-        id: pid,
-        title: ws.name,
-        context: "Workspace",
-        score: wScore,
-        workspaceId: ws.id,
-      });
-    }
-  }
-
   results.sort((a, b) => b.score - a.score);
   return sortLauncherItems(results, opts).slice(0, 25);
 }
@@ -807,16 +723,21 @@ export const IconGrid = memo(function IconGrid({
  * webview (no new window). Arrow keys move, Enter opens/focuses and
  * closes, Esc closes. Results come from the pure `rankQuickSwitch`
  * matcher; activation reuses the caller's existing open/focus path.
+ * Alt+Enter sleeps the selected window instead of opening it (account
+ * and app rows only; the caller decides what "sleep" means per kind).
  */
 export function QuickSwitchPalette({
   items,
   onActivate,
+  onSleep,
   onClose,
   renderIcon,
   playingFor,
 }: {
   items: SearchResult[];
   onActivate: (r: SearchResult) => void;
+  /** Sleep the selected window; absent = no sleep verb. */
+  onSleep?: (r: SearchResult) => void;
   onClose: () => void;
   renderIcon: (r: SearchResult) => React.ReactNode;
   /** Now-playing track title per result (v0.18.5). Optional. */
@@ -860,6 +781,12 @@ export function QuickSwitchPalette({
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActive((a) => Math.max(a - 1, 0));
+    } else if (e.key === "Enter" && e.altKey && onSleep) {
+      // Sleep verb: freeze the selected window now instead of
+      // opening it. Plain Enter still opens; Alt+Enter sleeps.
+      e.preventDefault();
+      const r = results[active];
+      if (r && (r.kind === "account" || r.kind === "app")) onSleep(r);
     } else if (e.key === "Enter") {
       const r = results[active];
       if (r) onActivate(r);
@@ -887,6 +814,11 @@ export function QuickSwitchPalette({
           autoComplete="off"
           spellCheck={false}
         />
+        {onSleep ? (
+          <p className="muted small palette-hint">
+            Alt+Enter sleeps the selected window.
+          </p>
+        ) : null}
         {results.length === 0 ? (
           <p className="muted small palette-empty">No matches.</p>
         ) : (
@@ -993,31 +925,6 @@ export function SearchTileIcon() {
     >
       <circle cx="11" cy="11" r="7" />
       <line x1="16.5" y1="16.5" x2="21" y2="21" />
-    </svg>
-  );
-}
-
-/**
- * v0.9.6: grid/stack tile icon for pinned workspaces. Inline SVG, quiet
- * stroke style matching the tile aesthetic — no emoji, one accent family.
- */
-export function WorkspaceTileIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      width="34"
-      height="34"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-    >
-      <rect x="3" y="3" width="8" height="8" rx="1.5" />
-      <rect x="13" y="3" width="8" height="8" rx="1.5" />
-      <rect x="3" y="13" width="8" height="8" rx="1.5" />
-      <rect x="13" y="13" width="8" height="8" rx="1.5" />
     </svg>
   );
 }
@@ -1226,7 +1133,14 @@ export function LauncherSettingsPanel({
   const [showSleepLabels, setShowSleepLabels] = useState(
     settings.show_sleep_labels ?? true
   );
-  // v0.17.0: workspace dock (pinned tiles floating on a screen edge).
+  // Global idle-sleep timeout: "per-app" = each app's own setting,
+  // "never" = no idle sleep, otherwise seconds as a string.
+  const [globalIdleSleep, setGlobalIdleSleep] = useState<string>(
+    settings.global_idle_sleep_seconds == null
+      ? "per-app"
+      : String(settings.global_idle_sleep_seconds)
+  );
+  // v0.17.0: edge dock (pinned tiles floating on a screen edge).
   const [dockEnabled, setDockEnabled] = useState(settings.dock_enabled ?? false);
   const [dockEdge, setDockEdge] = useState(settings.dock_edge ?? "bottom");
   const [dockHotkey, setDockHotkey] = useState(settings.dock_hotkey ?? "");
@@ -1541,6 +1455,31 @@ export function LauncherSettingsPanel({
       setFormError(msg);
       onError(msg);
       setDockEdge(settings.dock_edge ?? "bottom");
+    }
+  }
+
+  // Global idle-sleep timeout: a concrete value overrides every app's
+  // own auto-suspend minutes, "per-app" hands control back to them,
+  // "never" (0) turns idle sleep off. Applies on the next watcher tick.
+  async function handleGlobalIdleSleep(next: string) {
+    setGlobalIdleSleep(next);
+    setFormError(null);
+    try {
+      const seconds = next === "per-app" ? null : Number(next);
+      onSaved(
+        await invoke<LauncherSettings>("set_global_idle_sleep_seconds", {
+          seconds,
+        })
+      );
+    } catch (err) {
+      const msg = errMsg(err);
+      setFormError(msg);
+      onError(msg);
+      setGlobalIdleSleep(
+        settings.global_idle_sleep_seconds == null
+          ? "per-app"
+          : String(settings.global_idle_sleep_seconds)
+      );
     }
   }
 
@@ -2366,12 +2305,28 @@ export function LauncherSettingsPanel({
       </label>
 
       <label className="inline-form">
-        <span>Workspace dock</span>
+        <span>Idle sleep for all windows</span>
+        <select
+          value={globalIdleSleep}
+          onChange={(e) => void handleGlobalIdleSleep(e.target.value)}
+          aria-label="Idle sleep for all windows"
+        >
+          <option value="per-app">Use each app's setting</option>
+          <option value="30">30 seconds</option>
+          <option value="120">2 minutes</option>
+          <option value="300">5 minutes</option>
+          <option value="0">Never</option>
+        </select>
+        <span className="help">Idle windows sleep after this long, no matter what each app says. Never turns idle sleep off. Auto-close timers are not affected.</span>
+      </label>
+
+      <label className="inline-form">
+        <span>Dock</span>
         <input
           type="checkbox"
           checked={dockEnabled}
           onChange={(e) => void handleDockEnabled(e.target.checked)}
-          aria-label="Show the workspace dock"
+          aria-label="Show the dock"
         />
         <span className="help">Your pinned tiles in a small bar floating on a screen edge, always on top. Turning it off closes the dock window completely, so it uses no memory while off.</span>
       </label>
@@ -2852,15 +2807,9 @@ export function buildTileMenuEntries(
       pin,
     ];
   }
-  if (r.kind === "workspace") {
-    // v0.9.6: pinned workspace — open every member window at once, or
-    // unpin. Nothing else applies (managed in the library's Workspaces
-    // section).
-    return [
-      { key: "open", label: "Open all", onSelect: () => a.onOpen(r) },
-      pin,
-    ];
-  }
+  // Clipboard rows only exist in the quick-switch palette, which has no
+  // tile menu — there is nothing to offer here.
+  if (r.kind !== "program") return [];
   const prog = r.program;
   const entries: MenuEntry[] = [
     { key: "launch", label: "Launch", onSelect: () => a.onOpen(r) },

@@ -1966,31 +1966,44 @@ mod imp {
                     0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
-                // Decide the owner follow-up under a short borrow. Moving
-                // the owner moves the owned strip with it, which echoes a
-                // synchronous WM_WINDOWPOSCHANGED back into caption_proc —
-                // so the SetWindowPos runs after the borrow is released,
-                // guarded by syncing like the strip nudge above. (Before
-                // the structural fix this echo hit borrow_mut on the held
-                // borrow; the panic was contained but the echo was lost.
-                // The flag preserves the behavior without the panic.)
-                let follow: Option<(HWND, i32, i32)> = with_chrome(|ch| {
-                    let cp = ch.captions.get_mut(&plan.label)?;
-                    let mut rc = RECT::default();
-                    GetWindowRect(hwnd, &mut rc).ok()?;
-                    let (dx, dy) = (rc.left - cp.last_x, rc.top - cp.last_y);
-                    cp.last_x = rc.left;
-                    cp.last_y = rc.top;
-                    let mut orc = RECT::default();
-                    if (dx != 0 || dy != 0) && GetWindowRect(cp.owner, &mut orc).is_ok() {
-                        cp.syncing = true;
-                        Some(Some((cp.owner, orc.left + dx, orc.top + dy)))
-                    } else {
-                        cp.syncing = false;
-                        Some(None)
+                // Read the last-known position under a short borrow, then
+                // query the live rects with no borrow held: the rect
+                // queries are Win32 calls and must not run inside
+                // with_chrome (AGENTS.md Win32/FFI Rule 2). The follow-up
+                // decision and the syncing flag then land under fresh
+                // short borrows, like the SetWindowPos below them.
+                let last: Option<(i32, i32, HWND)> = with_chrome(|ch| {
+                    let cp = ch.captions.get(&plan.label)?;
+                    Some((cp.last_x, cp.last_y, cp.owner))
+                });
+                let follow: Option<(HWND, i32, i32)> = match last {
+                    Some((last_x, last_y, owner)) => {
+                        let mut rc = RECT::default();
+                        let mut orc = RECT::default();
+                        if GetWindowRect(hwnd, &mut rc).is_err() {
+                            None
+                        } else {
+                            let (dx, dy) = (rc.left - last_x, rc.top - last_y);
+                            let follow = if (dx != 0 || dy != 0)
+                                && GetWindowRect(owner, &mut orc).is_ok()
+                            {
+                                Some((owner, orc.left + dx, orc.top + dy))
+                            } else {
+                                None
+                            };
+                            with_chrome(|ch| {
+                                if let Some(cp) = ch.captions.get_mut(&plan.label) {
+                                    cp.last_x = rc.left;
+                                    cp.last_y = rc.top;
+                                    cp.syncing = follow.is_some();
+                                }
+                                Some(())
+                            });
+                            follow
+                        }
                     }
-                })
-                .flatten();
+                    None => None,
+                };
                 if let Some((owner, ox, oy)) = follow {
                     let _ = SetWindowPos(
                         owner,
@@ -2009,12 +2022,10 @@ mod imp {
                     });
                 }
                 if follow.is_none() {
-                    // The follow closure's `?` path (GetWindowRect
-                    // failed) skips its own syncing reset — clear the
-                    // flag here so a transient failure can't wedge
-                    // caption sync for this window permanently. (When
-                    // the closure did run, it already cleared the flag
-                    // or the caption is gone; this is then a no-op.)
+                    // No follow-up (rect query failed, caption gone, or
+                    // no delta): the strip nudge set syncing above, so
+                    // clear it here — a transient failure must not wedge
+                    // caption sync for this window permanently.
                     with_chrome(|ch| {
                         if let Some(cp) = ch.captions.get_mut(&plan.label) {
                             cp.syncing = false;
@@ -2024,21 +2035,35 @@ mod imp {
                 }
             }
             Act::Shift { dx, dy } => {
-                let follow: Option<(HWND, i32, i32)> = with_chrome(|ch| {
+                // Owner handle first (short borrow), rect query outside
+                // it, then the syncing flag under a fresh borrow — the
+                // GetWindowRect call must not run inside with_chrome
+                // (AGENTS.md Win32/FFI Rule 2).
+                let owner: Option<HWND> = with_chrome(|ch| {
                     let cp = ch.captions.get_mut(&plan.label)?;
                     cp.last_x = plan.last.0;
                     cp.last_y = plan.last.1;
-                    let mut orc = RECT::default();
-                    if GetWindowRect(cp.owner, &mut orc).is_ok() {
-                        // Guard the synchronous echo (owned strip follows
-                        // its owner) with syncing; cleared after the move.
-                        cp.syncing = true;
-                        Some(Some((cp.owner, orc.left + dx, orc.top + dy)))
-                    } else {
-                        Some(None)
+                    Some(cp.owner)
+                });
+                let follow: Option<(HWND, i32, i32)> = match owner {
+                    Some(owner) => {
+                        let mut orc = RECT::default();
+                        if GetWindowRect(owner, &mut orc).is_ok() {
+                            // Guard the synchronous echo (owned strip follows
+                            // its owner) with syncing; cleared after the move.
+                            with_chrome(|ch| {
+                                if let Some(cp) = ch.captions.get_mut(&plan.label) {
+                                    cp.syncing = true;
+                                }
+                                Some(())
+                            });
+                            Some((owner, orc.left + dx, orc.top + dy))
+                        } else {
+                            None
+                        }
                     }
-                })
-                .flatten();
+                    None => None,
+                };
                 if let Some((owner, ox, oy)) = follow {
                     let _ = SetWindowPos(
                         owner,

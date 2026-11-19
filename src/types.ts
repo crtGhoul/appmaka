@@ -109,7 +109,7 @@ export interface LauncherSettings {
   autostart: boolean;
   /** Launcher panel translucency, 0.3 (faint) .. 1.0 (solid). Backend always sends it (serde default). */
   panel_opacity: number;
-  /** Whether the workspace dock (pinned tiles on a screen edge) is shown. Backend always sends it (serde default). */
+  /** Whether the dock (pinned tiles on a screen edge) is shown. Backend always sends it (serde default). */
   dock_enabled: boolean;
   /** Which screen edge the dock hugs: "bottom" | "left" | "right". Backend always sends it (serde default). */
   dock_edge: string;
@@ -230,6 +230,12 @@ export interface LauncherSettings {
   show_badges: boolean;
   show_tile_ram: boolean;
   show_sleep_labels: boolean;
+  /**
+   * Global idle-sleep timeout in seconds. Null = each app's own
+   * auto-suspend minutes; 0 = never idle-sleep; n = sleep after n idle
+   * seconds. Backend always sends it (serde default).
+   */
+  global_idle_sleep_seconds: number | null;
   /** Dictation compatibility: global keyboard hooks off (v0.13.18). Backend always sends it. */
   dictation_compat: boolean;
   /**

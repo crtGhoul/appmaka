@@ -8,7 +8,7 @@ import type { WebApp } from "./types";
  *
  * The backend's centralized hotkey registry emits `hotkey-fired` with
  * `{ binding_id, kind, target }` whenever a named binding (routine /
- * workspace / per-command hotkey) is pressed. This hook listens for it and
+ * per-command hotkey) is pressed. This hook listens for it and
  * dispatches through the existing invoke commands — it creates no windows
  * itself (see the Windows WebView2 deadlock note on `open_account`).
  *
@@ -19,10 +19,9 @@ import type { WebApp } from "./types";
 
 export interface HotkeyFiredPayload {
   binding_id: string;
-  kind: "routine" | "workspace" | "command";
+  kind: "routine" | "command";
   target: {
     routine_id?: string;
-    workspace_id?: string;
     app_id?: string;
     account_id?: string | null;
   };
@@ -61,11 +60,6 @@ export function useHotkeyDispatch(
         })
           .then((summary) => onNoticeRef.current?.(summary))
           .catch(fail);
-      } else if (kind === "workspace" && target.workspace_id) {
-        // Sibling-owned command (workspaces worker, v0.8.0).
-        void invoke("set_active_workspace", {
-          workspaceId: target.workspace_id,
-        }).catch(fail);
       } else if (kind === "command" && target.app_id) {
         if (target.account_id) {
           void invoke("open_account", {

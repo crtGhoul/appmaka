@@ -270,28 +270,38 @@ mod imp {
                     down,
                     injected_ours,
                 };
-                // Classify under a short lock; everything after it
-                // (SendInput, channel send, SetEvent) is non-blocking and
-                // runs lock-free.
-                let (action, outcome) = match INSTALLED.lock() {
+                // Classify under a short lock; the channel send and
+                // SetEvent run after the guard is dropped. Both are sync
+                // calls that must never run under the lock (AGENTS.md
+                // Win32/FFI Rule 2) — SetEvent wakes the hook thread,
+                // which can re-enter this proc.
+                let (action, outcome, pending) = match INSTALLED.lock() {
                     Ok(mut guard) => match guard.as_mut() {
                         Some(inst) => {
                             let r = inst.classifier.handle(ev, now_ms());
                             let pending = match r.1 {
-                                TapOutcome::Summon { .. } => Some(HookAction::Summon),
-                                TapOutcome::DismissForStart => Some(HookAction::Dismiss),
+                                TapOutcome::Summon { .. } => Some((
+                                    inst.tx.clone(),
+                                    inst.wake,
+                                    HookAction::Summon,
+                                )),
+                                TapOutcome::DismissForStart => Some((
+                                    inst.tx.clone(),
+                                    inst.wake,
+                                    HookAction::Dismiss,
+                                )),
                                 TapOutcome::None => None,
                             };
-                            if let Some(a) = pending {
-                                let _ = inst.tx.send(a);
-                                let _ = SetEvent(inst.wake);
-                            }
-                            r
+                            (r.0, r.1, pending)
                         }
-                        None => (KeyAction::Pass, TapOutcome::None),
+                        None => (KeyAction::Pass, TapOutcome::None, None),
                     },
-                    Err(_) => (KeyAction::Pass, TapOutcome::None),
+                    Err(_) => (KeyAction::Pass, TapOutcome::None, None),
                 };
+                if let Some((tx, wake, a)) = pending {
+                    let _ = tx.send(a);
+                    let _ = SetEvent(wake);
+                }
                 if action == KeyAction::Swallow {
                     if let TapOutcome::Summon { win_vk } = outcome {
                         if is_win_key(win_vk) {

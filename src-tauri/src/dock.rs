@@ -1,4 +1,4 @@
-//! Workspace dock settings and hotkey bindings (v0.17.0).
+//! Edge dock settings and hotkey bindings (v0.17.0).
 
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
