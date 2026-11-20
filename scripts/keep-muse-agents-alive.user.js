@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.4.0
-// @description  Lag-free auto-allow for muse.ai agents: 75m periodic session refresh, keep-awake heartbeat, PointerEvent split dropdown opening, auto-selects "Always allow for this scheduled task", and HUD countdown.
+// @version      1.4.1
+// @description  Unthrottled Web Worker heartbeat, silent Web Audio anti-hibernation, 75m periodic session refresh, auto-allow & Send engine, split dropdown PointerEvent opening, and HUD countdown.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
 // @match        *muse.ai*
@@ -21,7 +21,7 @@
   const oldHud = document.getElementById('muse-keeper-hud');
   if (oldHud) oldHud.remove();
 
-  const KEEPER_VERSION = '1.4.0';
+  const KEEPER_VERSION = '1.4.1';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
@@ -44,7 +44,7 @@
   log(`Loaded v${KEEPER_VERSION} on ${location.href}`);
 
   // =========================================================================
-  // 1. LIGHTWEIGHT KEEP-ALIVE & PERIODIC AUTO-REFRESH (75 MINUTES)
+  // 1. LIGHTWEIGHT KEEP-ALIVE, WEB AUDIO TICKLER & REFRESH (75 MINUTES)
   // =========================================================================
 
   const REFRESH_INTERVAL_MS = 75 * 60 * 1000; // 75 minutes (~1 hour 15 min)
@@ -114,11 +114,74 @@
   requestWakeLock();
   document.addEventListener('visibilitychange', requestWakeLock);
 
+  // Silent Web Audio oscillator:
+  // Signals Chromium's PerformanceManager that this tab is an active audio source,
+  // preventing Chromium from putting the background renderer process into deep sleep.
+  let audioContext = null;
+  function initAudioKeepAlive() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      audioContext = new AudioCtx();
+      const osc = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      gain.gain.value = 0.00001; // Inaudible sub-threshold
+      osc.connect(gain);
+      gain.connect(audioContext.destination);
+      osc.start();
+
+      const resumeAudio = () => {
+        if (audioContext && audioContext.state === 'suspended') {
+          audioContext.resume().catch(() => {});
+        }
+      };
+      window.addEventListener('click', resumeAudio, { once: true });
+      window.addEventListener('keydown', resumeAudio, { once: true });
+    } catch (_) {}
+  }
+  initAudioKeepAlive();
+
+  // Periodic synthetic wake pulse & simulated click:
+  // Programmatically simulates user interaction (click & focus) every 15 minutes
+  // so internal web app queues and Chromium never freeze background event loops.
+  let lastSyntheticWake = Date.now();
+  const WAKE_PULSE_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+
+  function dispatchSyntheticWakePulse() {
+    try {
+      window.dispatchEvent(new Event('focus'));
+      window.dispatchEvent(new Event('activate'));
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      const target = document.body || document.documentElement;
+      if (target) {
+        const evtOpts = {
+          bubbles: true,
+          cancelable: true,
+          clientX: 10,
+          clientY: 10,
+          pointerType: 'mouse',
+          isPrimary: true
+        };
+        target.dispatchEvent(new PointerEvent('pointerdown', evtOpts));
+        target.dispatchEvent(new MouseEvent('mousedown', evtOpts));
+        target.dispatchEvent(new PointerEvent('pointerup', evtOpts));
+        target.dispatchEvent(new MouseEvent('mouseup', evtOpts));
+        target.dispatchEvent(new MouseEvent('click', evtOpts));
+      }
+      log('⚡ Dispatched background wake pulse & synthetic touch to keep session active');
+    } catch (_) {}
+  }
+
   const heartbeatInterval = setInterval(() => {
     lastHeartbeatTime = Date.now();
     try {
       window.dispatchEvent(new Event('focus'));
       window.dispatchEvent(new MouseEvent('mousemove', { clientX: 1, clientY: 1 }));
+      if (Date.now() - lastSyntheticWake >= WAKE_PULSE_INTERVAL_MS) {
+        lastSyntheticWake = Date.now();
+        dispatchSyntheticWakePulse();
+      }
     } catch (_) {}
     updateHud();
   }, 30000);
@@ -602,17 +665,18 @@
   } catch (_) {}
 
   // =========================================================================
-  // 3. LOW-OVERHEAD MUTATION OBSERVER
+  // 3. LOW-OVERHEAD MUTATION OBSERVER & UNTHROTTLED WEB WORKER
   // =========================================================================
 
   let scanScheduled = false;
   function scheduleScan() {
     if (isPaused || scanScheduled) return;
     scanScheduled = true;
-    requestAnimationFrame(() => {
+    // Use setTimeout so scans execute reliably even when tab/window is in background
+    setTimeout(() => {
       scanScheduled = false;
       scanAndHandle(document);
-    });
+    }, 50);
   }
 
   const observer = new MutationObserver((mutations) => {
@@ -635,7 +699,26 @@
   }
   startObserver();
 
-  // 1-second gentle poll fallback
+  // Dedicated Web Worker tickler:
+  // Dedicated workers run on a separate OS thread and are exempt from Chromium's background timer clamping.
+  let workerInstance = null;
+  try {
+    const workerBlob = new Blob([
+      'setInterval(function() { postMessage("tick"); }, 1000);'
+    ], { type: 'application/javascript' });
+    const workerUrl = URL.createObjectURL(workerBlob);
+    workerInstance = new Worker(workerUrl);
+    workerInstance.onmessage = function () {
+      if (!isPaused) {
+        scanAndHandle(document);
+      }
+    };
+    log('Initialized unthrottled Web Worker background heartbeat');
+  } catch (err) {
+    log('Web Worker blob not permitted, using standard intervals', err);
+  }
+
+  // 1-second gentle poll fallback for environments where Workers may be disabled
   const fallbackInterval = setInterval(() => {
     if (!isPaused) scanAndHandle(document);
   }, 1000);
@@ -794,6 +877,12 @@
       clearInterval(heartbeatInterval);
       clearInterval(fallbackInterval);
       clearInterval(refreshCheckInterval);
+      if (workerInstance) {
+        try { workerInstance.terminate(); } catch (_) {}
+      }
+      if (audioContext) {
+        try { audioContext.close(); } catch (_) {}
+      }
       if (hudEl) hudEl.remove();
       if (notifEl) notifEl.remove();
       log(`Deactivated v${KEEPER_VERSION}`);
