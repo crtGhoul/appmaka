@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.3.9
-// @description  Lag-free auto-allow for muse.ai agents: PointerEvent-powered split chevron opening, auto-selects "Always allow for this scheduled task", deep container checks, and HUD indicator.
+// @version      1.4.0
+// @description  Lag-free auto-allow for muse.ai agents: 75m periodic session refresh, keep-awake heartbeat, PointerEvent split dropdown opening, auto-selects "Always allow for this scheduled task", and HUD countdown.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
 // @match        *muse.ai*
@@ -21,7 +21,7 @@
   const oldHud = document.getElementById('muse-keeper-hud');
   if (oldHud) oldHud.remove();
 
-  const KEEPER_VERSION = '1.3.9';
+  const KEEPER_VERSION = '1.4.0';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
@@ -44,8 +44,47 @@
   log(`Loaded v${KEEPER_VERSION} on ${location.href}`);
 
   // =========================================================================
-  // 1. LIGHTWEIGHT KEEP-ALIVE (ZERO AUDIO LAG)
+  // 1. LIGHTWEIGHT KEEP-ALIVE & PERIODIC AUTO-REFRESH (75 MINUTES)
   // =========================================================================
+
+  const REFRESH_INTERVAL_MS = 75 * 60 * 1000; // 75 minutes (~1 hour 15 min)
+  let nextRefreshAt = Date.now() + REFRESH_INTERVAL_MS;
+
+  function isUserInteracting() {
+    const active = document.activeElement;
+    if (active) {
+      const tag = active.tagName.toLowerCase();
+      if (tag === 'textarea' || tag === 'input' || active.isContentEditable) {
+        if (active.value && active.value.trim().length > 0) return true;
+        if (active.innerText && active.innerText.trim().length > 0) return true;
+      }
+    }
+    // Check if an approval dialog/card is currently waiting for input
+    const openPrompt = document.querySelector('[role="dialog"], [role="alertdialog"], [class*="modal" i]');
+    if (openPrompt && isVisibleFast(openPrompt)) {
+      return true;
+    }
+    return false;
+  }
+
+  // Periodic refresh check every 30 seconds
+  const refreshCheckInterval = setInterval(() => {
+    if (isPaused) return;
+    const now = Date.now();
+    if (now >= nextRefreshAt) {
+      if (isUserInteracting()) {
+        // Postpone by 3 minutes if user is typing or reviewing
+        nextRefreshAt = now + 3 * 60 * 1000;
+        log('Postponed auto-refresh: user is actively typing or a dialog is open');
+        return;
+      }
+      log('⚡ Auto-refreshing agent session for memory & connection freshness...');
+      showNotification('Refreshing agent session for freshness...');
+      setTimeout(() => {
+        location.reload();
+      }, 1500);
+    }
+  }, 30000);
 
   try {
     Object.defineProperty(document, 'visibilityState', {
@@ -79,6 +118,7 @@
     lastHeartbeatTime = Date.now();
     try {
       window.dispatchEvent(new Event('focus'));
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 1, clientY: 1 }));
     } catch (_) {}
     updateHud();
   }, 30000);
@@ -690,6 +730,13 @@
     hudDotEl.style.boxShadow = '0 0 5px #10b981';
     if (hudEl) hudEl.style.borderColor = 'rgba(168, 85, 247, 0.5)';
 
+    if (hudEl) {
+      const minsLeft = Math.max(0, Math.round((nextRefreshAt - Date.now()) / 60000));
+      hudEl.title = isPaused
+        ? 'Click to Resume Auto-Allow'
+        : `Auto-Allow Active | Auto-refresh in ~${minsLeft}m (Click to Pause)`;
+    }
+
     const total = allowedCount + reviewedCount + sentCount;
     if (total > 0) {
       const parts = [];
@@ -746,6 +793,7 @@
       observer.disconnect();
       clearInterval(heartbeatInterval);
       clearInterval(fallbackInterval);
+      clearInterval(refreshCheckInterval);
       if (hudEl) hudEl.remove();
       if (notifEl) notifEl.remove();
       log(`Deactivated v${KEEPER_VERSION}`);
