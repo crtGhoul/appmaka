@@ -120,11 +120,20 @@ fn rename_app(id: String, name: String, store: State<'_, AppStore>) -> Result<We
 /// auto (`section` null). Tauri exposes `app_id` as `appId` to JS.
 #[tauri::command]
 fn set_app_section(
+    app: AppHandle,
     app_id: String,
     section: Option<String>,
     store: State<'_, AppStore>,
 ) -> Result<WebApp, String> {
-    store.set_app_section(&app_id, section)
+    let updated = store.set_app_section(&app_id, section)?;
+    // The library and launcher hold a mount-time snapshot of the apps:
+    // tell them to re-list so the section change shows immediately,
+    // not after a restart. The frontend's optimistic replaceApp alone
+    // is not reliable here — it intermittently fails to commit (the
+    // setApps updater runs but no re-render follows), so the
+    // authoritative re-fetch is what makes the change stick live.
+    let _ = app.emit("appmaka:apps-changed", ());
+    Ok(updated)
 }
 
 #[tauri::command]

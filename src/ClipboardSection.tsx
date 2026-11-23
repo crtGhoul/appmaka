@@ -424,7 +424,7 @@ export function ClipboardSection() {
             />
             Whisper — the classic engine, three sizes below
           </label>
-          <label style={{ display: "block", cursor: "pointer" }}>
+          <label style={{ display: "block", marginBottom: 6, cursor: "pointer" }}>
             <input
               type="radio"
               name="dictation-engine"
@@ -433,6 +433,16 @@ export function ClipboardSection() {
               style={{ marginRight: 8 }}
             />
             Moonshine — faster and hears better, one small model
+          </label>
+          <label style={{ display: "block", cursor: "pointer" }}>
+            <input
+              type="radio"
+              name="dictation-engine"
+              checked={dict?.engine === "parakeet"}
+              onChange={() => void chooseEngine("parakeet")}
+              style={{ marginRight: 8 }}
+            />
+            Parakeet Ultra — best accuracy, one big model
           </label>
         </div>
         {(!dict || dict?.engine === "whisper") && (
@@ -475,6 +485,13 @@ export function ClipboardSection() {
             faster than Whisper Tiny and hears better on short takes.
           </p>
         )}
+        {dict?.engine === "parakeet" && (
+          <p className="muted small" style={{ margin: "0 0 12px" }}>
+            Parakeet Ultra — one model, no size to pick. The most
+            accurate engine, about 670 MB one-time download, 25
+            languages auto-detected, works fully offline.
+          </p>
+        )}
         {dict && !dict.ready ? (
           <div>
             <button onClick={() => void downloadDictation()} disabled={downloading}>
@@ -482,7 +499,9 @@ export function ClipboardSection() {
                 ? "Downloading…"
                 : dict.engine === "moonshine"
                   ? "Download Moonshine (about 70 MB)"
-                  : `Download speech model (about ${dict.model === "small" ? "470" : dict.model === "base" ? "150" : "85"} MB)`}
+                  : dict.engine === "parakeet"
+                    ? "Download Parakeet Ultra (about 670 MB)"
+                    : `Download speech model (about ${dict.model === "small" ? "470" : dict.model === "base" ? "150" : "85"} MB)`}
             </button>
             <p className="muted small" style={{ margin: "6px 0 0" }}>
               One-time download. Nothing is installed or loaded until this

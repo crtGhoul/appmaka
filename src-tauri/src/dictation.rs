@@ -78,6 +78,13 @@ const SHERPA_EXE: &str = "sherpa-onnx-offline";
 const MOONSHINE_MODEL_ARCHIVE: &str =
     "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2";
 const MOONSHINE_MODEL_DIR: &str = "sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27";
+/// Parakeet Ultra (sherpa-onnx, NeMo transducer): the best-accuracy
+/// engine, 25 European languages auto-detected. Per-file download from
+/// Hugging Face (leogaudin/sherpa-onnx-nemo-parakeet-ultra-int8,
+/// CC-BY-4.0) — there is no tarball, so the four files land directly
+/// in the model dir. No bpe.vocab ships with this file set, so
+/// hotwords are unavailable for Parakeet.
+const PARAKEET_MODEL_DIR: &str = "sherpa-onnx-nemo-parakeet-ultra-int8";
 
 // ---------------------------------------------------------------------------
 // Persisted data
@@ -96,9 +103,11 @@ pub struct Transcript {
 struct DictationFile {
     #[serde(default = "default_hotkey")]
     hotkey: String,
-    /// Speech engine: "whisper" (whisper.cpp, ggml models) or
+    /// Speech engine: "whisper" (whisper.cpp, ggml models),
     /// "moonshine" (sherpa-onnx, Moonshine Tiny v2 — faster and more
-    /// accurate than Whisper tiny on short English dictation).
+    /// accurate than Whisper tiny on short English dictation), or
+    /// "parakeet" (sherpa-onnx, Parakeet Ultra — best accuracy, 25
+    /// European languages auto-detected, one ~670 MB model).
     #[serde(default = "default_engine")]
     engine: String,
     /// "tiny", "base", or "small". Whisper only; Moonshine uses its
@@ -379,6 +388,60 @@ fn ensure_moonshine_model(app: &AppHandle) -> Result<PathBuf, String> {
     }
 }
 
+/// The Parakeet Ultra model dir (encoder + decoder + joiner + tokens).
+/// Exists only once all four model files were downloaded.
+fn parakeet_model_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(dictation_dir(app)?
+        .join("parakeet-models")
+        .join(PARAKEET_MODEL_DIR))
+}
+
+/// The four files the Parakeet model dir must hold. Same rule as
+/// Moonshine: a dir alone is not proof — a partial download leaves
+/// the dir behind with files missing, and the engine then fails.
+fn parakeet_model_files_present(model_dir: &Path) -> bool {
+    model_dir.join("encoder.int8.onnx").is_file()
+        && model_dir.join("decoder.int8.onnx").is_file()
+        && model_dir.join("joiner.int8.onnx").is_file()
+        && model_dir.join("tokens.txt").is_file()
+}
+
+/// The four Parakeet model files, in download order (largest first,
+/// so a failure lands early on the file that costs the most time).
+const PARAKEET_MODEL_FILES: [&str; 4] = [
+    "encoder.int8.onnx",
+    "decoder.int8.onnx",
+    "joiner.int8.onnx",
+    "tokens.txt",
+];
+
+/// Download the Parakeet Ultra model files one by one. There is no
+/// archive — each file comes straight from the Hugging Face repo.
+/// A partial download is wiped and re-downloaded whole, like the
+/// Moonshine path.
+fn ensure_parakeet_model(app: &AppHandle) -> Result<PathBuf, String> {
+    let model_dir = parakeet_model_dir(app)?;
+    if parakeet_model_files_present(&model_dir) {
+        return Ok(model_dir);
+    }
+    if model_dir.exists() {
+        let _ = fs::remove_dir_all(&model_dir);
+    }
+    fs::create_dir_all(&model_dir)
+        .map_err(|e| format!("Couldn't create the Parakeet model folder: {e}"))?;
+    for file in PARAKEET_MODEL_FILES {
+        let url = format!(
+            "https://huggingface.co/leogaudin/sherpa-onnx-nemo-parakeet-ultra-int8/resolve/main/{file}"
+        );
+        download_to(&url, &model_dir.join(file))?;
+    }
+    if parakeet_model_files_present(&model_dir) {
+        Ok(model_dir)
+    } else {
+        Err("Downloading the Parakeet model failed (the model files are missing after downloading).".to_string())
+    }
+}
+
 /// Run sherpa-onnx-offline with the Moonshine Tiny v2 model (merged
 /// decoder) on one wav, and pull the transcript out of the JSON line
 /// it prints. The binary also dumps its full config to stdout, so the
@@ -439,6 +502,67 @@ fn run_moonshine(bin: &Path, model_dir: &Path, wav: &Path) -> Result<String, Str
     let stdout = String::from_utf8_lossy(&out.stdout);
     moonshine_text_from_stdout(&stdout)
         .ok_or_else(|| "The Moonshine engine returned no transcript.".to_string())
+}
+
+/// Run sherpa-onnx-offline with the Parakeet Ultra model (NeMo
+/// transducer) on one wav, and pull the transcript out of the JSON
+/// line it prints — same stdout shape as Moonshine, so the same
+/// parser is reused.
+///
+/// --model-type=nemo_transducer is REQUIRED: without it the binary
+/// fails with "'context_size' does not exist in the metadata".
+/// Options are --x=y form, same as Moonshine (0.18.19 lesson).
+/// Verified live on Linux 2026-11-22 against sherpa-onnx v2.0.1
+/// with the repo's own test wav: exit 0, correct transcript.
+fn run_parakeet(bin: &Path, model_dir: &Path, wav: &Path) -> Result<String, String> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg(format!(
+        "--encoder={}",
+        model_dir.join("encoder.int8.onnx").display()
+    ))
+    .arg(format!(
+        "--decoder={}",
+        model_dir.join("decoder.int8.onnx").display()
+    ))
+    .arg(format!(
+        "--joiner={}",
+        model_dir.join("joiner.int8.onnx").display()
+    ))
+    .arg(format!(
+        "--tokens={}",
+        model_dir.join("tokens.txt").display()
+    ))
+    .arg("--model-type=nemo_transducer")
+    .arg("--num-threads=4")
+    .arg(wav);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("Couldn't run the Parakeet engine: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let lines: Vec<&str> = stderr
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        let start = lines.len().saturating_sub(3);
+        let detail = if lines[start..].is_empty() {
+            String::new()
+        } else {
+            format!(" {}", lines[start..].join(" "))
+        };
+        return Err(format!(
+            "The Parakeet engine failed on that recording ({}).{}",
+            out.status, detail
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    moonshine_text_from_stdout(&stdout)
+        .ok_or_else(|| "The Parakeet engine returned no transcript.".to_string())
 }
 
 /// Pure: pull the transcript out of sherpa-onnx-offline's stdout. The
@@ -555,6 +679,14 @@ fn status(app: &AppHandle) -> DictationStatus {
                 .unwrap_or(false),
             moonshine_binary_path(app).is_some(),
         )
+    } else if engine == "parakeet" {
+        // Same sherpa-onnx binary as Moonshine; only the model differs.
+        (
+            parakeet_model_dir(app)
+                .map(|p| parakeet_model_files_present(&p))
+                .unwrap_or(false),
+            moonshine_binary_path(app).is_some(),
+        )
     } else {
         (
             model_path(app, &model).map(|p| p.exists()).unwrap_or(false),
@@ -631,10 +763,11 @@ pub fn set_dictation_model(app: AppHandle, model: String) -> Result<DictationSta
 }
 
 /// Switch the dictation engine. Whisper keeps its model; Moonshine
-/// uses its own fixed Tiny v2 model and ignores the model setting.
+/// uses its own fixed Tiny v2 model and Parakeet its own fixed Ultra
+/// model — both ignore the model setting.
 #[tauri::command]
 pub fn set_dictation_engine(app: AppHandle, engine: String) -> Result<DictationStatus, String> {
-    if engine != "whisper" && engine != "moonshine" {
+    if engine != "whisper" && engine != "moonshine" && engine != "parakeet" {
         return Err("Unknown speech engine.".to_string());
     }
     with_data(&app, |d| d.engine = engine)?;
@@ -782,6 +915,9 @@ pub async fn download_dictation(app: AppHandle) -> Result<DictationStatus, Strin
         if engine == "moonshine" {
             ensure_moonshine_binary(&app2)?;
             ensure_moonshine_model(&app2)?;
+        } else if engine == "parakeet" {
+            ensure_moonshine_binary(&app2)?;
+            ensure_parakeet_model(&app2)?;
         } else {
             ensure_binary_for(&app2, &configured_device(&app2))?;
             ensure_model(&app2, &model)?;
@@ -1202,6 +1338,10 @@ fn run_session(
         let model_dir = ensure_moonshine_model(app)?;
         let bin = ensure_moonshine_binary(app)?;
         run_moonshine(&bin, &model_dir, &wav)?
+    } else if engine == "parakeet" {
+        let model_dir = ensure_parakeet_model(app)?;
+        let bin = ensure_moonshine_binary(app)?;
+        run_parakeet(&bin, &model_dir, &wav)?
     } else {
         let model = with_data(app, |d| d.model.clone())?;
         let device_pref = with_data(app, |d| d.device.clone())?;
@@ -1577,6 +1717,37 @@ mod tests {
         std::fs::write(dir.join("tokens.txt"), b"x").unwrap();
         assert!(moonshine_model_files_present(&dir));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parakeet_model_needs_all_four_files() {
+        // Same rule as Moonshine: a dir alone is not proof. Parakeet
+        // needs all four files — encoder, decoder, joiner, tokens —
+        // and a partial download must not count as installed.
+        let dir = std::env::temp_dir().join("appmaka-test-parakeet-model");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!parakeet_model_files_present(&dir));
+        std::fs::write(dir.join("encoder.int8.onnx"), b"x").unwrap();
+        std::fs::write(dir.join("decoder.int8.onnx"), b"x").unwrap();
+        std::fs::write(dir.join("joiner.int8.onnx"), b"x").unwrap();
+        assert!(!parakeet_model_files_present(&dir));
+        std::fs::write(dir.join("tokens.txt"), b"x").unwrap();
+        assert!(parakeet_model_files_present(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parakeet_finds_json_line_past_config_dump() {
+        // Parakeet's stdout JSON carries extra fields (emotion, event,
+        // timestamps, tokens) next to "text"; the shared parser must
+        // still pull the transcript out. Shape verified live against
+        // sherpa-onnx v2.0.1 on 2026-11-22.
+        let stdout = "OfflineRecognizerConfig(feat_config=FeatureExtractorConfig(sampling_rate=16000))\nCreating recognizer ...\nrecognizer created in 1.374 s\nStarted\nDone!\n\ntest.wav\n----\n{\"lang\": \"\", \"emotion\": \"\", \"event\": \"\", \"text\": \"Ask not what your country can do for you, ask what you can do for your country.\", \"timestamps\": [0.00, 0.24], \"durations\": [0.24, 0.16], \"tokens\": [\" A\", \"sk\"], \"ys_log_probs\": [-0.001205, 0.0], \"words\": []}\n";
+        assert_eq!(
+            moonshine_text_from_stdout(stdout).as_deref(),
+            Some("Ask not what your country can do for you, ask what you can do for your country.")
+        );
     }
 
     #[test]
