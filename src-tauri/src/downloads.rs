@@ -626,6 +626,24 @@ impl GestureState {
             .and_then(|m| m.get(label).map(|t| t.elapsed() <= within))
             .unwrap_or(false)
     }
+
+    /// v0.18.31: arm a new popup's download gate from its opener's
+    /// gesture. A click in the opener (e.g. the Muse chat popup) that
+    /// opens a child popup straight onto a download URL must let the
+    /// child's download through: the child's own webview never sees a
+    /// pointerdown before DownloadStarting fires, so its label is
+    /// never armed by the gesture reporter and the gate cancels the
+    /// download as "no click started it". Copying the opener's recent
+    /// gesture onto the child label fixes that without touching the
+    /// gate itself — an opener with no recent trusted gesture arms
+    /// nothing, so a timer/scripted window.open stays blocked, and the
+    /// 30s expiry bounds the arming. Called by the popup builders
+    /// (build_contained_window / spawn_contained_window) only.
+    pub fn arm_child_from_opener(&self, opener_label: &str, child_label: &str) {
+        if self.recent(opener_label, GESTURE_WINDOW) {
+            self.note(child_label);
+        }
+    }
 }
 
 /// v0.18.9: called by the gesture init script (pointerdown/keydown) in
@@ -1480,6 +1498,64 @@ mod tests {
             download_block_reason("appmaka-retry-dl-1", true, false, blob_exe, "setup.exe")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn download_gate_arms_child_popup_from_gestured_opener() {
+        // v0.18.31: the click that opens the child lives in the opener
+        // (Muse chat popup), so the child popup's own label is never
+        // armed by the gesture reporter — arming it from the opener is
+        // what lets the child's download through.
+        let gestures = GestureState::default();
+        gestures.note("popup-3");
+        gestures.arm_child_from_opener("popup-3", "popup-4");
+        let gestured = gestures.recent("popup-4", GESTURE_WINDOW);
+        assert!(gestured);
+        assert!(download_block_reason(
+            "popup-4",
+            false,
+            gestured,
+            "https://example.com/app-setup.exe",
+            "app-setup.exe"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn download_gate_child_popup_stays_blocked_without_opener_gesture() {
+        // No click in the opener (timer/scripted window.open): the
+        // child is NOT armed and its download is still blocked.
+        let gestures = GestureState::default();
+        gestures.arm_child_from_opener("popup-3", "popup-4");
+        let gestured = gestures.recent("popup-4", GESTURE_WINDOW);
+        assert!(!gestured);
+        assert!(download_block_reason(
+            "popup-4",
+            false,
+            gestured,
+            "https://example.com/app-setup.exe",
+            "app-setup.exe"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn download_gate_blob_executable_still_blocked_when_child_armed() {
+        // The blob:/data: executable block is gesture-independent: even
+        // an armed child must not download one.
+        let gestures = GestureState::default();
+        gestures.note("popup-3");
+        gestures.arm_child_from_opener("popup-3", "popup-4");
+        let gestured = gestures.recent("popup-4", GESTURE_WINDOW);
+        assert!(gestured);
+        assert!(download_block_reason(
+            "popup-4",
+            false,
+            gestured,
+            "blob:https://stream.example/550e8400-e29b-41d4-a716-446655440000",
+            "player-update.exe"
+        )
+        .is_some());
     }
 
     #[test]

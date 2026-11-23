@@ -3512,6 +3512,16 @@ fn build_contained_window(
 ) -> Result<tauri::WebviewWindow, String> {
     let n = OAUTH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let label = format!("{kind}-{n}");
+    // v0.18.31: cross-window download fix — if the opener was clicked
+    // recently, arm this child's download gate from that gesture. The
+    // child navigates straight to the download URL, so it never sees a
+    // pointerdown of its own before DownloadStarting fires; without
+    // this the gate cancels the download as "no click started it".
+    // ctx.parent_label is the opener's label here (nested_ctx below
+    // overwrites it with the child's own label afterwards).
+    if let Some(gestures) = ctx.app.try_state::<crate::downloads::GestureState>() {
+        gestures.arm_child_from_opener(&ctx.parent_label, &label);
+    }
     let title = if kind == "oauth" {
         format!("{} — sign-in", ctx.app_name)
     } else {
@@ -3800,14 +3810,17 @@ fn spawn_contained_window(
 ) {
     let n = OAUTH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let label = format!("{label_prefix}-{n}");
-    // The opener's label is the adblock-flag lookup key below; the
-    // assignment after this overwrites parent_label with the popup's
-    // own label, so capture it first. Windows-only: the flag lookup
-    // feeds the network hook, which only exists there.
-    #[cfg(windows)]
+    // The opener's label is the adblock-flag lookup key below (Windows
+    // only: the flag feeds the network hook) and the download-gate
+    // arming key (all platforms, v0.18.31 — same reason as
+    // build_contained_window); the assignment after this overwrites
+    // parent_label with the popup's own label, so capture it first.
     let opener_label = popup_ctx.parent_label.clone();
     let mut popup_ctx = popup_ctx;
     popup_ctx.parent_label = label.clone();
+    if let Some(gestures) = popup_ctx.app.try_state::<crate::downloads::GestureState>() {
+        gestures.arm_child_from_opener(&opener_label, &label);
+    }
     // Same adblock kit as the in-handler builder (see
     // build_contained_window): the spawned path is the Linux path and
     // the Windows fallback, and it used to get none of these layers.
