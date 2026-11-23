@@ -139,10 +139,9 @@ function Wake-AgentWindows {
             [AgentWakeEngine]::ShowWindow($hwnd, 9) | Out-Null # SW_RESTORE / SW_SHOW
             [AgentWakeEngine]::SetForegroundWindow($hwnd) | Out-Null
             
-            # Send WM_ACTIVATE (0x0006) and a safe non-destructive click
+            # Send WM_ACTIVATE (0x0006) and WM_NULL (0x0000) to safely wake message loops without clicking buttons
             [AgentWakeEngine]::PostMessage($hwnd, 0x0006, [IntPtr]1, [IntPtr]::Zero) | Out-Null
-            [AgentWakeEngine]::PostMessage($hwnd, 0x0201, [IntPtr]1, [IntPtr]::Zero) | Out-Null # WM_LBUTTONDOWN
-            [AgentWakeEngine]::PostMessage($hwnd, 0x0202, [IntPtr]0, [IntPtr]::Zero) | Out-Null # WM_LBUTTONUP
+            [AgentWakeEngine]::PostMessage($hwnd, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
             Start-Sleep -Milliseconds 250
         }
 
