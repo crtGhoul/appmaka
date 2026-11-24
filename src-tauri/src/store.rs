@@ -52,6 +52,15 @@ pub struct AppSettings {
     /// Old records without it migrate to 15.
     #[serde(default = "default_auto_close_minutes")]
     pub auto_close_minutes: u32,
+    /// v0.18.32: per-app downloads toggle. When true, downloads from
+    /// this app's windows skip the gesture check ("no click started
+    /// it") — the user asked for this site's downloads to come
+    /// through without a click each time. Default false: the
+    /// anti-malware posture is unchanged for sites never allowed.
+    /// The blob:/data: executable block still applies regardless.
+    /// Old records without it migrate to off.
+    #[serde(default)]
+    pub allow_downloads: bool,
 }
 
 fn default_auto_close_minutes() -> u32 {
@@ -82,6 +91,7 @@ impl Default for AppSettings {
             adblock_enabled: true,
             auto_suspend_minutes: 5,
             auto_close_minutes: 15,
+            allow_downloads: false,
         }
     }
 }
@@ -1168,6 +1178,29 @@ impl AppStore {
         self.save()
     }
 
+    /// v0.18.32: per-app downloads toggle — lets this app's windows
+    /// skip the download gesture check (the blob:/data: executable
+    /// block still applies). Returns the stored value.
+    pub fn set_app_allow_downloads(
+        &self,
+        app_id: &str,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        {
+            let mut apps = self
+                .apps
+                .lock()
+                .map_err(|e| format!("store lock poisoned: {e}"))?;
+            let app = apps
+                .iter_mut()
+                .find(|a| a.id == app_id)
+                .ok_or_else(|| "App not found.".to_string())?;
+            app.settings.allow_downloads = enabled;
+        }
+        self.save()?;
+        Ok(enabled)
+    }
+
     /// v0.18.5: set one account's persisted adblock override (the
     /// strip Shield toggle persists, not just the live flag).
     pub fn set_account_adblock(
@@ -1410,6 +1443,19 @@ mod tests {
         assert!(acct.adblock_enabled.is_none());
         assert_eq!(acct.last_opened, 0);
         assert_eq!(acct.created_at, 0);
+    }
+
+    #[test]
+    fn allow_downloads_defaults_off_on_old_records() {
+        // v0.18.32: apps.json records written before the toggle existed
+        // load with it off — the anti-malware posture is unchanged
+        // for sites never explicitly allowed.
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"popup_policy":"block","popup_allowlist":[],"adblock_enabled":true,"auto_suspend_minutes":5,"auto_close_minutes":15}"#,
+        )
+        .unwrap();
+        assert!(!settings.allow_downloads);
+        assert!(!AppSettings::default().allow_downloads);
     }
 
     #[test]

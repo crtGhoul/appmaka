@@ -1716,7 +1716,15 @@ pub(crate) fn open_split_pane_webview(
         session_dir: session_dir.clone(),
         popup_policy,
         popup_allowlist: web_app.settings.popup_allowlist.clone(),
-        parent_label: frame.label().to_string(),
+        // v0.18.32: the pane's own label, NOT the frame window's.
+        // Gestures in a pane record under the pane label
+        // (splitpane-{group}-{app}-{account}), so a child popup
+        // armed from the frame label could never inherit a click —
+        // nothing ever records a gesture under "split-{group}".
+        // (Placement/adblock lookups keyed on parent_label already
+        // miss for the frame — it is a plain Window, not a
+        // WebviewWindow — so this changes no other behavior.)
+        parent_label: pane_label.to_string(),
         chain_allowed: false,
     };
     let shortcuts_js = shortcuts_overlay_js(app);

@@ -91,6 +91,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   adblock_enabled: true,
   auto_suspend_minutes: 5,
   auto_close_minutes: 5,
+  allow_downloads: false,
 };
 
 const DEFAULT_COLOR = "#64748b";
@@ -1228,6 +1229,7 @@ function AppSettingsForm({
   const [popupPolicy, setPopupPolicy] = useState<"block" | "allow">(settings.popup_policy);
   const [allowlist, setAllowlist] = useState(settings.popup_allowlist.join("\n"));
   const [adblockEnabled, setAdblockEnabled] = useState(settings.adblock_enabled);
+  const [allowDownloads, setAllowDownloads] = useState(settings.allow_downloads ?? false);
   const [suspendMinutes, setSuspendMinutes] = useState(String(settings.auto_suspend_minutes));
   const [closeMinutes, setCloseMinutes] = useState(String(settings.auto_close_minutes ?? 30));
   const [saving, setSaving] = useState(false);
@@ -1257,6 +1259,7 @@ function AppSettingsForm({
       adblock_enabled: adblockEnabled,
       auto_suspend_minutes: minutes,
       auto_close_minutes: closeMins,
+      allow_downloads: allowDownloads,
     };
     setSaving(true);
     try {
@@ -1346,6 +1349,20 @@ function AppSettingsForm({
         />
         <span>{adblockStateLabel(adblockEnabled, networkAdblock)}</span>
       </label>
+      <div>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={allowDownloads}
+            onChange={(e) => setAllowDownloads(e.target.checked)}
+          />
+          <span>Allow downloads from this site</span>
+        </label>
+        <span className="help">
+          Lets this site&rsquo;s downloads through without a click check.
+          Executable downloads from blob or data links stay blocked.
+        </span>
+      </div>
       <label>
         <span>Auto-suspend idle windows (minutes)</span>
         <input

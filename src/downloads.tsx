@@ -15,7 +15,7 @@ export type DownloadEntry = {
   id: string;
   filename: string;
   url: string;
-  state: "active" | "complete" | "failed" | "interrupted";
+  state: "active" | "complete" | "failed" | "interrupted" | "blocked";
   receivedBytes: number;
   totalBytes: number | null;
   path: string;
@@ -232,6 +232,7 @@ function statusLine(entry: DownloadEntry): string {
   if (entry.state === "failed") return "Couldn't finish.";
   if (entry.state === "interrupted")
     return "Was still downloading when the app closed.";
+  if (entry.state === "blocked") return "Blocked.";
   const received = fmtBytes(entry.receivedBytes ?? 0);
   // Sizes are what the download engine reported; when the total is unknown
   // we never invent a percentage.

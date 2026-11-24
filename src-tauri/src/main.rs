@@ -136,6 +136,19 @@ fn set_app_section(
     Ok(updated)
 }
 
+/// v0.18.32: per-app downloads toggle. Lets this app's windows skip
+/// the download gesture check; the blob:/data: executable block still
+/// applies. Applies to already-open windows immediately — the gate
+/// reads the store on every download.
+#[tauri::command]
+fn set_app_allow_downloads(
+    app_id: String,
+    enabled: bool,
+    store: State<'_, AppStore>,
+) -> Result<bool, String> {
+    store.set_app_allow_downloads(&app_id, enabled)
+}
+
 #[tauri::command]
 fn remove_app(
     app: AppHandle,
@@ -1854,6 +1867,7 @@ fn main() {
             update_app,
             rename_app,
             set_app_section,
+            set_app_allow_downloads,
             remove_app,
             update_app_settings,
             add_account,

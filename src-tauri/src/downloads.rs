@@ -55,7 +55,8 @@ pub struct DownloadEntry {
     pub id: String,
     pub filename: String,
     pub url: String,
-    /// "active" | "complete" | "failed" | "interrupted"
+    /// "active" | "complete" | "failed" | "interrupted" | "blocked"
+    /// ("blocked" = the drive-by gate stopped it; no file exists).
     pub state: String,
     pub received_bytes: u64,
     pub total_bytes: Option<u64>,
@@ -603,6 +604,106 @@ fn notify_download_blocked(app: &AppHandle, filename: &str, reason: &str) {
     );
 }
 
+/// v0.18.32: resolve the (app_id, account_id) a download's webview
+/// belongs to. Account, tabbed, and split-pane labels resolve
+/// directly via `account_ids_for_label`; popup labels ("popup-N" /
+/// "oauth-N") carry no ids, so walk up the opener chain recorded at
+/// popup-build time until a resolvable label is found. Returns None
+/// for windows with no app at all (preview, web search) — those keep
+/// the gesture-only behavior, never the toggle.
+fn app_ids_for_download(app: &AppHandle, label: &str) -> Option<(String, String)> {
+    if let Some(ids) = crate::windows::account_ids_for_label(app, label) {
+        return Some(ids);
+    }
+    let gestures = app.try_state::<GestureState>()?;
+    let mut current = label.to_string();
+    for _ in 0..8 {
+        let opener = gestures.opener_of(&current)?;
+        if let Some(ids) = crate::windows::account_ids_for_label(app, &opener) {
+            return Some(ids);
+        }
+        current = opener;
+    }
+    None
+}
+
+/// v0.18.32: per-app downloads toggle. True only when the download's
+/// window resolves to an app whose settings have allow_downloads on.
+/// Unresolvable windows and apps missing from the store fail closed
+/// to false — the default posture is unchanged for them.
+fn app_allows_downloads(app: &AppHandle, label: &str) -> bool {
+    let Some((app_id, _)) = app_ids_for_download(app, label) else {
+        return false;
+    };
+    app.try_state::<crate::store::AppStore>()
+        .and_then(|s| s.get(&app_id).ok())
+        .map(|a| a.settings.allow_downloads)
+        .unwrap_or(false)
+}
+
+/// Plain-language reason for a blocked entry's note line, recomputed
+/// from the URL and filename (not matched on the gate's reason
+/// strings, which are banner copy).
+fn blocked_entry_note(url: &str, filename: &str) -> String {
+    if is_executable_download(filename)
+        && (url.starts_with("blob:") || url.starts_with("data:"))
+    {
+        "Blocked — automatic executable download from a blob or data link.".to_string()
+    } else {
+        "Blocked — no click started it. Turn on \"Allow downloads from this site\" in the app's settings to let this site's downloads through."
+            .to_string()
+    }
+}
+
+/// v0.18.32: a blocked download used to be invisible — the only trace
+/// was the main-window banner notice (hidden launcher, 9s auto-clear,
+/// 1/min throttle) and no Downloads entry was ever created. Record
+/// the block as a "blocked" entry so the user can see what was
+/// stopped and why, in the Downloads list. Upsert by (url,
+/// filename): a spammy page re-firing the same download refreshes
+/// the one entry instead of flooding the 100-entry history. No file
+/// ever exists for a blocked entry, so the path stays empty and no
+/// Open/Retry actions are offered for it.
+fn record_blocked_download(app: &AppHandle, filename: &str, url: &str) {
+    let Some(state) = app.try_state::<DownloadState>() else {
+        return;
+    };
+    let history_file = state.history_file.clone();
+    let note = blocked_entry_note(url, filename);
+    let recorded = state.with_store(|store| {
+        let entry = if let Some(existing) = store
+            .downloads
+            .iter_mut()
+            .find(|e| e.state == "blocked" && e.url == url && e.filename == filename)
+        {
+            existing.started_at = now_millis();
+            existing.note = Some(note);
+            existing.clone()
+        } else {
+            let entry = DownloadEntry {
+                id: next_download_id(),
+                filename: filename.to_string(),
+                url: url.to_string(),
+                state: "blocked".to_string(),
+                received_bytes: 0,
+                total_bytes: None,
+                path: String::new(),
+                started_at: now_millis(),
+                picked_by_user: false,
+                note: Some(note),
+            };
+            store.downloads.insert(0, entry.clone());
+            store.downloads.truncate(MAX_DOWNLOADS);
+            entry
+        };
+        write_history_file(store, &history_file)?;
+        Ok(entry)
+    });
+    if let Ok(entry) = recorded {
+        emit_progress(app, &entry);
+    }
+}
+
 /// v0.18.9: last user gesture (pointerdown/keydown) per webview label,
 /// for the drive-by download gate. Recorded by the `note_user_gesture`
 /// command, which a tiny init script invokes from the page. Process-local
@@ -610,6 +711,13 @@ fn notify_download_blocked(app: &AppHandle, filename: &str, reason: &str) {
 #[derive(Default)]
 pub struct GestureState {
     last: Mutex<HashMap<String, Instant>>,
+    /// v0.18.32: child popup label -> opener label, recorded at
+    /// popup-build time whether or not the opener had a recent
+    /// gesture. The lazy-opener check and the per-app toggle's popup
+    /// resolution both walk this chain at download time, long after
+    /// the popup was built — recording only armed children would
+    /// lose the chain for the popups that need it most.
+    openers: Mutex<HashMap<String, String>>,
 }
 
 impl GestureState {
@@ -627,6 +735,40 @@ impl GestureState {
             .unwrap_or(false)
     }
 
+    /// The label of the window that opened `label`, if it was a popup
+    /// built by our popup builders.
+    pub fn opener_of(&self, label: &str) -> Option<String> {
+        self.openers
+            .lock()
+            .ok()
+            .and_then(|m| m.get(label).cloned())
+    }
+
+    /// True when this label — or any window that opened it, up the
+    /// opener chain — has a recent gesture. Covers the lazy-opener
+    /// hole (v0.18.32): the click's IPC invoke can still be in flight
+    /// when the child is armed at popup-build time, but by download
+    /// time — seconds later, after a redirect — it has landed, so the
+    /// opener's label reads recent. Bounded to 8 hops and the same
+    /// 30s window at every hop, so a scripted window.open (no
+    /// pointerdown invoke ever fires) still arms nothing.
+    pub fn recent_in_chain(&self, label: &str, within: Duration) -> bool {
+        if self.recent(label, within) {
+            return true;
+        }
+        let mut current = label.to_string();
+        for _ in 0..8 {
+            let Some(opener) = self.opener_of(&current) else {
+                return false;
+            };
+            if self.recent(&opener, within) {
+                return true;
+            }
+            current = opener;
+        }
+        false
+    }
+
     /// v0.18.31: arm a new popup's download gate from its opener's
     /// gesture. A click in the opener (e.g. the Muse chat popup) that
     /// opens a child popup straight onto a download URL must let the
@@ -639,7 +781,13 @@ impl GestureState {
     /// nothing, so a timer/scripted window.open stays blocked, and the
     /// 30s expiry bounds the arming. Called by the popup builders
     /// (build_contained_window / spawn_contained_window) only.
+    /// The opener mapping is recorded whether or not the opener had a
+    /// recent gesture: the lazy-opener check at download time and the
+    /// per-app toggle's popup resolution both walk it later.
     pub fn arm_child_from_opener(&self, opener_label: &str, child_label: &str) {
+        if let Ok(mut m) = self.openers.lock() {
+            m.insert(child_label.to_string(), opener_label.to_string());
+        }
         if self.recent(opener_label, GESTURE_WINDOW) {
             self.note(child_label);
         }
@@ -699,13 +847,22 @@ pub fn make_download_handler(
             let gestured = if is_retry {
                 true
             } else {
-                app.try_state::<GestureState>()
-                    .map(|g| g.recent(webview.label(), GESTURE_WINDOW))
-                    .unwrap_or(false)
+                // v0.18.32: the opener chain covers the lazy-invoke hole
+                // (the click's IPC can still be in flight at popup-build
+                // time but has landed by download time); the per-app
+                // toggle skips the gesture check only — the blob:/data:
+                // executable block in download_block_reason below still
+                // applies regardless of this flag.
+                let chain_gestured = app
+                    .try_state::<GestureState>()
+                    .map(|g| g.recent_in_chain(webview.label(), GESTURE_WINDOW))
+                    .unwrap_or(false);
+                chain_gestured || app_allows_downloads(&app, webview.label())
             };
             if let Some(reason) =
                 download_block_reason(webview.label(), is_retry, gestured, &url_str, &suggested)
             {
+                record_blocked_download(&app, &suggested, &url_str);
                 notify_download_blocked(&app, &suggested, reason);
                 return false;
             }
@@ -1519,6 +1676,137 @@ mod tests {
             "app-setup.exe"
         )
         .is_none());
+    }
+
+    #[test]
+    fn download_gate_split_pane_child_armed_from_pane_label() {
+        // v0.18.32: a child popup opened from a split pane is armed
+        // from the PANE label (splitpane-{group}-{app}-{account}),
+        // which is where pane gestures are recorded — the old code
+        // armed from the frame label ("split-{group}"), under which
+        // nothing ever records a gesture, so the child was never
+        // armed and its download was always cancelled.
+        let gestures = GestureState::default();
+        gestures.note("splitpane-sp-1-app-1-main");
+        gestures.arm_child_from_opener("splitpane-sp-1-app-1-main", "popup-9");
+        assert!(gestures.recent("popup-9", GESTURE_WINDOW));
+        assert!(download_block_reason(
+            "popup-9",
+            false,
+            true,
+            "https://example.com/app-setup.exe",
+            "app-setup.exe"
+        )
+        .is_none());
+        // The frame label itself never carries a gesture, so arming
+        // from it (the old behavior) arms nothing.
+        let unarmed = GestureState::default();
+        unarmed.arm_child_from_opener("split-sp-1", "popup-10");
+        assert!(!unarmed.recent("popup-10", GESTURE_WINDOW));
+    }
+
+    #[test]
+    fn download_gate_opener_mapping_recorded_without_gesture() {
+        // v0.18.32: the child->opener mapping is recorded at arm time
+        // even when the opener has no recent gesture — the lazy-opener
+        // check and the toggle's popup resolution walk it at
+        // download time, when the click may only just have landed.
+        let gestures = GestureState::default();
+        gestures.arm_child_from_opener("popup-3", "popup-4");
+        assert_eq!(gestures.opener_of("popup-4").as_deref(), Some("popup-3"));
+        assert_eq!(gestures.opener_of("popup-3"), None);
+    }
+
+    #[test]
+    fn download_gate_lazy_opener_check_at_download_time() {
+        // v0.18.32: the click's IPC invoke can still be in flight
+        // when the child is armed at popup-build time, so the child's
+        // own label is unarmed — but by download time the invoke has
+        // landed on the opener, and the chain check sees it.
+        let gestures = GestureState::default();
+        gestures.arm_child_from_opener("popup-3", "popup-4");
+        assert!(!gestures.recent("popup-4", GESTURE_WINDOW));
+        assert!(!gestures.recent_in_chain("popup-4", GESTURE_WINDOW));
+        gestures.note("popup-3");
+        assert!(gestures.recent_in_chain("popup-4", GESTURE_WINDOW));
+    }
+
+    #[test]
+    fn download_gate_lazy_opener_check_walks_popup_chains() {
+        // A popup opened from a popup: the click lives two hops up.
+        let gestures = GestureState::default();
+        gestures.arm_child_from_opener("acct-app-1-acct-1", "popup-3");
+        gestures.arm_child_from_opener("popup-3", "popup-4");
+        gestures.note("acct-app-1-acct-1");
+        assert!(gestures.recent_in_chain("popup-4", GESTURE_WINDOW));
+        // And a scripted chain with no click anywhere stays blocked.
+        let cold = GestureState::default();
+        cold.arm_child_from_opener("acct-app-1-acct-1", "popup-3");
+        cold.arm_child_from_opener("popup-3", "popup-4");
+        assert!(!cold.recent_in_chain("popup-4", GESTURE_WINDOW));
+    }
+
+    #[test]
+    fn download_gate_lazy_opener_check_still_bounded_by_window() {
+        // The chain check uses the same 30s window: a stale opener
+        // gesture does not arm the child forever.
+        let gestures = GestureState::default();
+        gestures.arm_child_from_opener("popup-3", "popup-4");
+        gestures.note("popup-3");
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(!gestures.recent_in_chain("popup-4", Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn download_gate_toggle_on_bypasses_gesture_check_only() {
+        // v0.18.32: allow_downloads feeds gestured=true into the gate,
+        // so a plain https download goes through with no click — but
+        // the blob:/data: executable block is gesture-independent and
+        // still stops the worst case even with the toggle on.
+        assert!(download_block_reason(
+            "acct-app-1-acct-1",
+            false,
+            true,
+            "https://example.com/app-setup.exe",
+            "app-setup.exe"
+        )
+        .is_none());
+        assert!(download_block_reason(
+            "acct-app-1-acct-1",
+            false,
+            true,
+            "blob:https://stream.example/550e8400-e29b-41d4-a716-446655440000",
+            "player-update.exe"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn download_gate_toggle_off_preserves_current_behavior() {
+        // Toggle off = gestured=false with no click: still blocked.
+        assert!(download_block_reason(
+            "acct-app-1-acct-1",
+            false,
+            false,
+            "https://example.com/report.pdf",
+            "report.pdf"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn blocked_entry_note_names_reason_and_toggle() {
+        // v0.18.32: the blocked Downloads entry carries a plain
+        // reason the user can act on.
+        let note = blocked_entry_note("https://example.com/report.pdf", "report.pdf");
+        assert!(note.contains("no click started it"));
+        assert!(note.contains("Allow downloads from this site"));
+        let exe_note = blocked_entry_note(
+            "blob:https://stream.example/550e8400-e29b-41d4-a716-446655440000",
+            "player-update.exe",
+        );
+        assert!(exe_note.contains("blob or data link"));
+        assert!(!exe_note.contains("Allow downloads"));
     }
 
     #[test]

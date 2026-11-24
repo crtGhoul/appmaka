@@ -323,6 +323,19 @@ if (typeof window !== "undefined") {
           );
           return settings;
         }
+        case "set_app_allow_downloads": {
+          const appId = String(args.appId ?? "");
+          const enabled = Boolean(args.enabled);
+          apps = writeStorage(
+            "appmaka:apps",
+            apps.map((a) =>
+              a.id === appId
+                ? { ...a, settings: { ...a.settings, allow_downloads: enabled } }
+                : a
+            )
+          );
+          return enabled;
+        }
         case "add_account": {
           const appId = String(args.appId ?? "");
           const acct: Account = {

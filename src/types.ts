@@ -20,6 +20,11 @@ export interface AppSettings {
   auto_suspend_minutes: number;
   /** Minutes of idleness after which an account window is closed (0 = never). */
   auto_close_minutes: number;
+  /**
+   * v0.18.32: when true, downloads from this app's windows skip the
+   * gesture check. Missing on old records = false.
+   */
+  allow_downloads?: boolean;
 }
 
 export interface Account {
