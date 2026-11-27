@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.4.2
+// @version      1.4.3
 // @description  Unthrottled Web Worker heartbeat, silent Web Audio anti-hibernation, 75m periodic session refresh, auto-allow/Send/Log-in engine, split dropdown PointerEvent opening, and HUD countdown.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
@@ -21,7 +21,7 @@
   const oldHud = document.getElementById('muse-keeper-hud');
   if (oldHud) oldHud.remove();
 
-  const KEEPER_VERSION = '1.4.2';
+  const KEEPER_VERSION = '1.4.3';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
@@ -375,20 +375,6 @@
   }
 
   let lastLoginClickTime = 0;
-  function isLoginContext(el) {
-    if (/\/(login|signin|sign-in|auth)\b/i.test(location.pathname)) return true;
-    if (el.closest('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="auth" i], [class*="login" i], form')) {
-      return true;
-    }
-    const bodyText = (document.body?.innerText || '').toLowerCase();
-    return (
-      bodyText.includes('logged out') ||
-      bodyText.includes('session expired') ||
-      bodyText.includes('sign in to') ||
-      bodyText.includes('log in to') ||
-      bodyText.includes('welcome back')
-    );
-  }
 
   function handleLoginButton(btn) {
     if (isPaused || !btn || clickedElements.has(btn) || btn.disabled) return false;
@@ -403,7 +389,9 @@
 
     const cleanLabel = label.toLowerCase().replace(/\s+/g, ' ').trim();
     if (!STRICT_LOGIN_REGEX.test(cleanLabel)) return false;
-    if (!isLoginContext(btn)) return false;
+
+    // Avoid clicking inside chat message bubbles/transcripts
+    if (btn.closest('article, [class*="message" i], [class*="chat" i]')) return false;
 
     const now = Date.now();
     if (now - lastLoginClickTime < 15000) return false;
