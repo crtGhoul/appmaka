@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Muse.ai Agent Auto-Allow & Keep-Alive
-// @version      1.4.1
-// @description  Unthrottled Web Worker heartbeat, silent Web Audio anti-hibernation, 75m periodic session refresh, auto-allow & Send engine, split dropdown PointerEvent opening, and HUD countdown.
+// @version      1.4.2
+// @description  Unthrottled Web Worker heartbeat, silent Web Audio anti-hibernation, 75m periodic session refresh, auto-allow/Send/Log-in engine, split dropdown PointerEvent opening, and HUD countdown.
 // @match        *://muse.ai/*
 // @match        *://*.muse.ai/*
 // @match        *muse.ai*
@@ -21,7 +21,7 @@
   const oldHud = document.getElementById('muse-keeper-hud');
   if (oldHud) oldHud.remove();
 
-  const KEEPER_VERSION = '1.4.1';
+  const KEEPER_VERSION = '1.4.2';
   let isPaused = false;
   let allowedCount = 0;
   let reviewedCount = 0;
@@ -72,10 +72,10 @@
     if (isPaused) return;
     const now = Date.now();
     if (now >= nextRefreshAt) {
-      if (isUserInteracting()) {
-        // Postpone by 3 minutes if user is typing or reviewing
+      if (isUserInteracting() || /\/(login|signin|sign-in|auth)\b/i.test(location.pathname)) {
+        // Postpone by 3 minutes if user is typing, a dialog is open, or on a login screen
         nextRefreshAt = now + 3 * 60 * 1000;
-        log('Postponed auto-refresh: user is actively typing or a dialog is open');
+        log('Postponed auto-refresh: user is actively typing, dialog is open, or on login screen');
         return;
       }
       log('⚡ Auto-refreshing agent session for memory & connection freshness...');
@@ -193,9 +193,10 @@
   const STRICT_ALLOW_REGEX = /^(allow|allow once|always allow|allow all|allow access|grant permission|grant access|approve|approve all|confirm action|proceed|accept)$/i;
   const STRICT_REVIEW_REGEX = /^(review|review task|review changes)$/i;
   const STRICT_SEND_REGEX = /^(send|send email|send now)$/i;
+  const STRICT_LOGIN_REGEX = /^(log\s?in|sign\s?in|continue with google|log\s?in with google|sign\s?in with google|reconnect)$/i;
 
-  // Strictly forbid negative actions, including "Don't send", "Don't allow", etc.
-  const FORBIDDEN_REGEX = /\b(deny|block|cancel|reject|dismiss|delete|remove|never|refuse|quit|exit|close|don'?t|do not)\b/i;
+  // Strictly forbid negative actions, including "Don't send", "Don't allow", "Log out", etc.
+  const FORBIDDEN_REGEX = /\b(deny|block|cancel|reject|dismiss|delete|remove|never|refuse|quit|exit|close|don'?t|do not|log\s?out|sign\s?out|sign\s?up)\b/i;
 
   function isVisibleFast(el) {
     if (!el || !el.isConnected) return false;
@@ -370,6 +371,51 @@
     showNotification(`Auto-Selected: ${label.slice(0, 30)}`);
     updateHud();
     triggerReviewBurst();
+    return true;
+  }
+
+  let lastLoginClickTime = 0;
+  function isLoginContext(el) {
+    if (/\/(login|signin|sign-in|auth)\b/i.test(location.pathname)) return true;
+    if (el.closest('[role="dialog"], [role="alertdialog"], [class*="modal" i], [class*="auth" i], [class*="login" i], form')) {
+      return true;
+    }
+    const bodyText = (document.body?.innerText || '').toLowerCase();
+    return (
+      bodyText.includes('logged out') ||
+      bodyText.includes('session expired') ||
+      bodyText.includes('sign in to') ||
+      bodyText.includes('log in to') ||
+      bodyText.includes('welcome back')
+    );
+  }
+
+  function handleLoginButton(btn) {
+    if (isPaused || !btn || clickedElements.has(btn) || btn.disabled) return false;
+    if (!isVisibleFast(btn) || isExcluded(btn) || isHistoricalEntry(btn)) return false;
+    if (btn.dataset.museKeeperHandled === 'true') return false;
+
+    const rawText = (btn.innerText || btn.textContent || '').trim();
+    const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
+    const label = rawText || ariaLabel;
+    if (!label || label.length > 40) return false;
+    if (FORBIDDEN_REGEX.test(rawText) || FORBIDDEN_REGEX.test(ariaLabel)) return false;
+
+    const cleanLabel = label.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!STRICT_LOGIN_REGEX.test(cleanLabel)) return false;
+    if (!isLoginContext(btn)) return false;
+
+    const now = Date.now();
+    if (now - lastLoginClickTime < 15000) return false;
+    lastLoginClickTime = now;
+
+    clickedElements.add(btn);
+    btn.dataset.museKeeperHandled = 'true';
+    allowedCount++;
+    log(`⚡ Auto-pressed [Log In]: "${label}"`, btn);
+    triggerTrustedClick(btn);
+    showNotification(`Auto-Login: ${label.slice(0, 25)}`);
+    updateHud();
     return true;
   }
 
@@ -621,6 +667,10 @@
         break;
       }
       if (handleAllowButton(actionButtons[i])) {
+        actionTriggered = true;
+        break;
+      }
+      if (handleLoginButton(actionButtons[i])) {
         actionTriggered = true;
         break;
       }
